@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Carpetas publicas de evidencia servidas a la app de camara via FileProvider.
+     Solo se usa en Android 9 o menor; desde Android 10 se escribe por MediaStore. -->
+<paths>
+    <external-path
+        name="localIncidents_dcim"
+        path="DCIM/localIncidents/" />
+    <external-path
+        name="localIncidents_music"
+        path="Music/localIncidents/" />
+</paths>

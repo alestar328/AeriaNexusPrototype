@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Tema oscuro con el mismo fondo que la app Compose para que nunca
+         se vea un destello claro al lanzar la app o navegar entre pantallas. -->
+    <style name="Theme.AeriaNexusPrototype" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/fondo_base</item>
+        <item name="android:statusBarColor">@color/fondo_superficie</item>
+        <item name="android:navigationBarColor">@color/fondo_superficie</item>
+    </style>
+</resources>

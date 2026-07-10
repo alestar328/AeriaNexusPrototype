@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Igual que el tema base, mas el splash del sistema (Android 12+):
+         fondo oscuro de la app y el icono adaptativo (aguila Aeria) al centro.
+         En versiones anteriores no hay splash API y se ve solo el fondo. -->
+    <style name="Theme.AeriaNexusPrototype" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/fondo_base</item>
+        <item name="android:statusBarColor">@color/fondo_superficie</item>
+        <item name="android:navigationBarColor">@color/fondo_superficie</item>
+        <item name="android:windowSplashScreenBackground">@color/fondo_base</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+    </style>
+</resources>

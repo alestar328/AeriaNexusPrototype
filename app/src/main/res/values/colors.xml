@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mismos valores que FondoBase y Superficie en ui/theme/Color.kt.
+         Si cambian alli, deben cambiar aqui tambien. -->
+    <color name="fondo_base">#080B12</color>
+    <color name="fondo_superficie">#0D1117</color>
+</resources>
