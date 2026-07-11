@@ -32,9 +32,11 @@ import androidx.compose.material.icons.filled.Battery2Bar
 import androidx.compose.material.icons.filled.Battery4Bar
 import androidx.compose.material.icons.filled.Battery6Bar
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.SatelliteAlt
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -179,6 +181,27 @@ fun MapScreen(
                             },
                         ) {
                             RemoteAgentMarkerView(agente)
+                        }
+                    }
+                }
+
+                // Avisos de SOS con senal cortada: tooltip fijo sobre la ultima
+                // posicion del emisor. Solo aparece en las demas unidades, nunca
+                // en el telefono que emitio la alarma (Agora no le devuelve sus
+                // propios mensajes).
+                uiState.signalCuts.forEach { corte ->
+                    key("signal-cut-${corte.uid}") {
+                        ViewAnnotation(
+                            options = viewAnnotationOptions {
+                                geometry(Point.fromLngLat(corte.longitude, corte.latitude))
+                                allowOverlap(true)
+                                annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
+                            },
+                        ) {
+                            SignalCutTooltip(
+                                corte = corte,
+                                onDismiss = { viewModel.dismissSignalCut(corte.uid) },
+                            )
                         }
                     }
                 }
@@ -336,6 +359,75 @@ private fun RemoteAgentMarkerView(agente: RemoteAgentMarker) {
                     .padding(horizontal = 4.dp, vertical = 1.dp),
             )
         }
+    }
+}
+
+/**
+ * Tooltip fijo en el mapa cuando un agente en emergencia corto la senal:
+ * identifica al agente y la hora exacta del corte, con un punto rojo sobre su
+ * ultima posicion conocida. Solo se descarta con la X: un toque accidental
+ * sobre la tarjeta no debe borrar un aviso critico.
+ */
+@Composable
+private fun SignalCutTooltip(corte: SignalCutMarker, onDismiss: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Superficie.copy(alpha = 0.95f))
+                .border(1.dp, RojoSuave, RoundedCornerShape(8.dp))
+                .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Warning,
+                        contentDescription = "SOS con senal cortada",
+                        tint = RojoSuave,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Agent ${corte.officer}",
+                        color = TextoPrincipal,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "Signal cut: ${corte.cutTimeLabel}",
+                    color = RojoSuave,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Cerrar aviso de corte",
+                    tint = TextoSecundario,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        // Punto sobre la ultima posicion conocida del emisor; el anchor BOTTOM
+        // de la anotacion apoya este extremo justo en la coordenada.
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(RojoSuave, CircleShape)
+                .border(2.dp, Color.White, CircleShape),
+        )
     }
 }
 

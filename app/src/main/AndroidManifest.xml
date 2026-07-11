@@ -32,9 +32,13 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- usesCleartextTraffic: el servidor HTTP de la bodycam W1 (visor remoto
+         y descarga de grabaciones) es http:// en la red WiFi local; sin esto
+         Android bloquea la conexion. El trafico a internet sigue siendo TLS. -->
     <application
         android:name=".AeriaNexusApp"
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

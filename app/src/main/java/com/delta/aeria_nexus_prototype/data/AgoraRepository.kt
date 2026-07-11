@@ -74,6 +74,11 @@ class AgoraRepository(
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
 
+    // True mientras la bodycam (uid 9001) publica video en el canal. Que la
+    // bodycam transmita ES su senal de SOS: asi funciona su boton fisico 133
+    // y tambien el comando STREAM_START enviado desde el telefono.
+    private var bodycamStreamActive = false
+
     private val _remoteAgents = MutableStateFlow<Map<Int, RemoteAgent>>(emptyMap())
     val remoteAgents: StateFlow<Map<Int, RemoteAgent>> = _remoteAgents.asStateFlow()
 
@@ -98,6 +103,13 @@ class AgoraRepository(
     private val _remoteVideoStopped = MutableStateFlow<Int?>(null)
     val remoteVideoStopped: StateFlow<Int?> = _remoteVideoStopped.asStateFlow()
 
+    // Cortes de senal SOS que el mapa muestra como aviso fijo, por uid del
+    // emisor. Solo se alimenta con cancelaciones recibidas por el data stream:
+    // como Agora nunca devuelve al emisor sus propios mensajes, el agente que
+    // corto su SOS no ve el aviso en su propio mapa, solo las demas unidades.
+    private val _sosSignalCuts = MutableStateFlow<Map<Int, SosCancel>>(emptyMap())
+    val sosSignalCuts: StateFlow<Map<Int, SosCancel>> = _sosSignalCuts.asStateFlow()
+
     private val eventHandler = object : IRtcEngineEventHandler() {
 
         override fun onJoinChannelSuccess(channel: String, uid: Int, elapsed: Int) {
@@ -118,6 +130,7 @@ class AgoraRepository(
 
         override fun onUserOffline(uid: Int, reason: Int) {
             if (uid != BODYCAM_UID && _connectedUsers.value > 1) _connectedUsers.value--
+            if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = false)
             // Un emisor que se desconecta equivale a un livestream cortado.
             _remoteVideoStopped.value = uid
             // Solo se quita el marcador si el agente salio del canal a proposito.
@@ -132,11 +145,17 @@ class AgoraRepository(
             when (state) {
                 Constants.REMOTE_VIDEO_STATE_STOPPED,
                 Constants.REMOTE_VIDEO_STATE_FAILED,
-                -> _remoteVideoStopped.value = uid
+                -> {
+                    _remoteVideoStopped.value = uid
+                    if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = false)
+                }
 
                 Constants.REMOTE_VIDEO_STATE_STARTING,
                 Constants.REMOTE_VIDEO_STATE_DECODING,
-                -> if (_remoteVideoStopped.value == uid) _remoteVideoStopped.value = null
+                -> {
+                    if (_remoteVideoStopped.value == uid) _remoteVideoStopped.value = null
+                    if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = true)
+                }
             }
         }
 
@@ -239,6 +258,11 @@ class AgoraRepository(
         startSosHeartbeat()
     }
 
+    /** Quita del mapa el aviso de corte de senal del agente [uid]. */
+    fun dismissSignalCut(uid: Int) {
+        _sosSignalCuts.update { it - uid }
+    }
+
     /** Cancela el SOS propio: corta el livestream y avisa a los receptores. */
     fun cancelSos() {
         if (!_sosActive.value) return
@@ -317,6 +341,44 @@ class AgoraRepository(
         rtcEngine.enableLocalAudio(false)
         rtcEngine.adjustRecordingSignalVolume(0)
         rtcEngine.stopPreview()
+    }
+
+    /**
+     * Traduce el video de la bodycam a un flujo SOS: al empezar a publicar se
+     * emite la alerta (la bodycam no manda mensajes por el data stream, asi
+     * que esta es la unica via para que TODOS los telefonos se enteren), y al
+     * apagarse se emite la cancelacion para cerrar popups y avisar el corte.
+     */
+    private fun onBodycamStreamChanged(streaming: Boolean) {
+        if (streaming == bodycamStreamActive) return
+        bodycamStreamActive = streaming
+        val ahora = System.currentTimeMillis()
+        if (streaming) {
+            _incomingSos.tryEmit(
+                SosAlert(
+                    sessionKey = "$BODYCAM_UID@$ahora",
+                    officer = BODYCAM_OFFICER,
+                    uid = BODYCAM_UID,
+                    startedAtMillis = ahora,
+                    // La bodycam no emite GPS; el agente que la lleva comparte
+                    // su posicion desde el telefono como cualquier otro.
+                    latitude = null,
+                    longitude = null,
+                ),
+            )
+        } else {
+            // Este corte no se fija en el mapa (sosSignalCuts): la bodycam no
+            // emite GPS, asi que no hay posicion donde anclar el aviso.
+            _incomingSosCancel.tryEmit(
+                SosCancel(
+                    officer = BODYCAM_OFFICER,
+                    uid = BODYCAM_UID,
+                    timestampMillis = ahora,
+                    latitude = null,
+                    longitude = null,
+                ),
+            )
+        }
     }
 
     private fun startLocationSharingIfPermitted() {
@@ -432,6 +494,9 @@ class AgoraRepository(
             }
 
             "emergency" -> {
+                // Un SOS nuevo del mismo agente invalida su aviso de corte
+                // anterior: la emergencia vigente es la que importa.
+                _sosSignalCuts.update { it - remoteUid }
                 val startedAt = mensaje.optLong("ts")
                 val sessionKey = "$remoteUid@$startedAt"
                 // Solo la primera vez que se ve una sesion se alerta al usuario;
@@ -451,15 +516,15 @@ class AgoraRepository(
             }
 
             "emergency_cancel" -> {
-                _incomingSosCancel.tryEmit(
-                    SosCancel(
-                        officer = mensaje.optString("officer"),
-                        uid = remoteUid,
-                        timestampMillis = mensaje.optLong("ts"),
-                        latitude = mensaje.optDoubleOrNull("lat"),
-                        longitude = mensaje.optDoubleOrNull("lng"),
-                    ),
+                val cancelacion = SosCancel(
+                    officer = mensaje.optString("officer"),
+                    uid = remoteUid,
+                    timestampMillis = mensaje.optLong("ts"),
+                    latitude = mensaje.optDoubleOrNull("lat"),
+                    longitude = mensaje.optDoubleOrNull("lng"),
                 )
+                _incomingSosCancel.tryEmit(cancelacion)
+                _sosSignalCuts.update { it + (remoteUid to cancelacion) }
             }
         }
     }
@@ -472,6 +537,9 @@ class AgoraRepository(
 
         // Uid fijo con el que la bodycam entra al canal cuando transmite.
         const val BODYCAM_UID = 9001
+
+        // Nombre que muestran las alertas SOS originadas por la bodycam.
+        private const val BODYCAM_OFFICER = "BODYCAM"
 
         private const val LOCATION_SEND_INTERVAL_MILLIS = 1_000L
         private const val HEARTBEAT_INTERVAL_MILLIS = 3_000L

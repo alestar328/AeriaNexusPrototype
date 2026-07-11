@@ -7,27 +7,36 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.delta.aeria_nexus_prototype.BodycamService
 import com.delta.aeria_nexus_prototype.BuildConfig
+import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -80,9 +89,32 @@ class BodycamRepository(private val context: Context) {
     private val _batteryPercent = MutableStateFlow(0)
     val batteryPercent: StateFlow<Int> = _batteryPercent.asStateFlow()
 
+    // Grabacion local y livestream de la bodycam. Las respuestas OK:* y los
+    // botones fisicos BTN_* adelantan el valor al instante; el STATUS de cada
+    // 5 segundos es la fuente de verdad que corrige cualquier desvio.
+    private val _isRecording = MutableStateFlow(false)
+    val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    private val _isStreaming = MutableStateFlow(false)
+    val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
+
+    // Visor remoto de foto: la bodycam mantiene su camara abierta y sirve
+    // frames JPEG por HTTP mientras este flag sea true.
+    private val _isPreviewing = MutableStateFlow(false)
+    val isPreviewing: StateFlow<Boolean> = _isPreviewing.asStateFlow()
+
+    // Direccion del servidor HTTP de la bodycam (visor y descarga de
+    // grabaciones); llega en cada STATUS cuando la W1 tiene WiFi.
+    @Volatile private var fileServerIp: String? = null
+    @Volatile private var fileServerPort = DEFAULT_FILE_SERVER_PORT
+
     // Lineas BTN_* de los botones fisicos, para el flujo SOS de fases siguientes.
     private val _buttonEvents = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val buttonEvents: SharedFlow<String> = _buttonEvents.asSharedFlow()
+
+    // Respuestas OK:/ERROR: a los comandos, para dar feedback puntual en la UI.
+    private val _commandResponses = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val commandResponses: SharedFlow<String> = _commandResponses.asSharedFlow()
 
     /** True si el permiso Bluetooth de runtime ya esta concedido. */
     fun hasBluetoothPermission(): Boolean {
@@ -285,13 +317,48 @@ class BodycamRepository(private val context: Context) {
                 try {
                     val estado = JSONObject(line.removePrefix("STATUS:"))
                     _batteryPercent.value = estado.optInt("battery", _batteryPercent.value)
+                    _isRecording.value = estado.optBoolean("recording", _isRecording.value)
+                    _isStreaming.value = estado.optBoolean("streaming", _isStreaming.value)
+                    _isPreviewing.value = estado.optBoolean("preview", _isPreviewing.value)
+                    fileServerIp = estado.optString("file_server_ip").takeIf { it.isNotEmpty() }
+                    fileServerPort = estado.optInt("file_server_port", fileServerPort)
                 } catch (e: Exception) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
             }
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT).
-            line.startsWith("BTN_") -> _buttonEvents.tryEmit(line)
-            // OK:x / ERROR:x / PONG: respuestas a comandos, sin uso por ahora.
+            line.startsWith("BTN_") -> {
+                applyStateChange(line)
+                _buttonEvents.tryEmit(line)
+            }
+            // OK:x / ERROR:x — respuestas a los comandos enviados.
+            line.startsWith("OK:") || line.startsWith("ERROR:") -> {
+                applyStateChange(line)
+                _commandResponses.tryEmit(line)
+            }
+        }
+    }
+
+    /**
+     * Adelanta el estado de grabacion/streaming sin esperar al siguiente
+     * STATUS. La camara de la bodycam es exclusiva: iniciar el livestream
+     * detiene la grabacion local en el dispositivo, por eso se apaga aqui.
+     */
+    private fun applyStateChange(line: String) {
+        when (line) {
+            "OK:REC_START", "BTN_REC_START" -> {
+                _isRecording.value = true
+                _isPreviewing.value = false
+            }
+            "OK:REC_STOP", "BTN_REC_STOP" -> _isRecording.value = false
+            "OK:STREAM_STOP", "BTN_STREAM_STOP" -> _isStreaming.value = false
+            "OK:STREAM_START", "BTN_STREAM_START" -> {
+                _isStreaming.value = true
+                _isRecording.value = false
+                _isPreviewing.value = false
+            }
+            "OK:PREVIEW_START" -> _isPreviewing.value = true
+            "OK:PREVIEW_STOP" -> _isPreviewing.value = false
         }
     }
 
@@ -301,6 +368,83 @@ class BodycamRepository(private val context: Context) {
         output = null
         socket = null
         _batteryPercent.value = 0
+        // Sin enlace no se conoce el estado real de la bodycam: se muestra
+        // apagado hasta que el primer STATUS de la reconexion lo confirme.
+        _isRecording.value = false
+        _isStreaming.value = false
+        // La bodycam tambien apaga su visor al perder el telefono.
+        _isPreviewing.value = false
+    }
+
+    /**
+     * Frames del visor en vivo: abre GET /preview/stream (MJPEG) y emite cada
+     * frame ya enderezado. El flujo termina cuando la bodycam apaga su visor,
+     * la red se cae o aun no llego la IP en el STATUS; quien colecta decide
+     * si reintenta.
+     */
+    fun streamPreviewFrames(): Flow<Bitmap> = flow {
+        val ip = fileServerIp ?: return@flow
+        var conexion: HttpURLConnection? = null
+        try {
+            conexion = URL("http://$ip:$fileServerPort/preview/stream").openConnection() as HttpURLConnection
+            conexion.connectTimeout = FRAME_TIMEOUT_MILLIS
+            conexion.readTimeout = STREAM_READ_TIMEOUT_MILLIS
+            if (conexion.responseCode != HttpURLConnection.HTTP_OK) return@flow
+            val entrada = BufferedInputStream(conexion.inputStream)
+            while (true) {
+                val bytes = leerFrameMultipart(entrada) ?: break
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    ?.let { emit(rotarFrame(it)) }
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "Stream del visor cortado: ${e.message}")
+        } finally {
+            conexion?.disconnect()
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Lee un frame del stream MJPEG: cabeceras de la parte (de donde sale
+     * Content-Length) y despues exactamente esos bytes de JPEG. Devuelve null
+     * al terminar el stream.
+     */
+    private fun leerFrameMultipart(entrada: BufferedInputStream): ByteArray? {
+        var tamano = -1
+        while (true) {
+            val linea = leerLinea(entrada) ?: return null
+            if (linea.startsWith("Content-Length:", ignoreCase = true)) {
+                tamano = linea.substringAfter(":").trim().toIntOrNull() ?: return null
+            }
+            // La linea vacia separa cabeceras de datos dentro de cada parte.
+            if (linea.isEmpty() && tamano > 0) break
+        }
+        val datos = ByteArray(tamano)
+        var leidos = 0
+        while (leidos < tamano) {
+            val n = entrada.read(datos, leidos, tamano - leidos)
+            if (n < 0) return null
+            leidos += n
+        }
+        return datos
+    }
+
+    /** Linea de texto terminada en \n (sin el \r\n), o null si el stream acabo. */
+    private fun leerLinea(entrada: BufferedInputStream): String? {
+        val bytes = StringBuilder()
+        while (true) {
+            val b = entrada.read()
+            if (b < 0) return null
+            if (b == '\n'.code) return bytes.toString().trimEnd('\r')
+            bytes.append(b.toChar())
+        }
+    }
+
+    // El sensor de la W1 esta montado a 90 grados: sin girar, el visor se ve
+    // acostado. Ajustar la constante si la prueba de campo muestra otra cosa.
+    private fun rotarFrame(frame: Bitmap): Bitmap {
+        if (PREVIEW_ROTATION_DEGREES == 0f) return frame
+        val matriz = Matrix().apply { postRotate(PREVIEW_ROTATION_DEGREES) }
+        return Bitmap.createBitmap(frame, 0, 0, frame.width, frame.height, matriz, true)
     }
 
     companion object {
@@ -313,5 +457,13 @@ class BodycamRepository(private val context: Context) {
         private const val WATCHDOG_CHECK_MILLIS = 3_000L
         private const val STALE_LINK_MILLIS = 12_000L
         private const val RETRY_AFTER_DROP_MILLIS = 1_000L
+
+        private const val DEFAULT_FILE_SERVER_PORT = 8080
+        private const val FRAME_TIMEOUT_MILLIS = 3_000
+        // La W1 empuja un frame cada ~150 ms; si en 5 s no llega nada, el
+        // enlace esta muerto y conviene cortar para que el visor reintente.
+        private const val STREAM_READ_TIMEOUT_MILLIS = 5_000
+        // Ajustada en campo el 2026-07-12: con 90 la imagen quedaba girada a la derecha.
+        private const val PREVIEW_ROTATION_DEGREES = 0f
     }
 }

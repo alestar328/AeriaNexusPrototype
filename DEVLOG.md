@@ -6,6 +6,92 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-07-11 (4) — Foto remota: fix del PHOTO y visor remoto (viewfinder) por WiFi
+
+### Hecho
+
+- **Fix del error "Photo failed" (BodyCamServer, proyecto de la W1)**: el logcat de la W1 mostro `takePicture failed` — en el HAL UNISOC `takePicture` exige una preview realmente activa y `PhotoController` llamaba a `startPreview()` sin surface. Fix: `setPreviewTexture(SurfaceTexture(0))` + espera del primer frame (latch 2 s) antes de disparar + `release()` de la camara en el catch (antes un fallo dejaba la camara abierta para siempre). VERIFICADO en hardware: la foto sale y se guarda.
+- **Visor remoto para foto a distancia (Opcion A acordada)** — el agente deja la bodycam fija y encuadra desde el telefono:
+  - **BodyCamServer**: comandos nuevos `PREVIEW_START`/`PREVIEW_STOP`; `PreviewController` nuevo mantiene Camera1 abierta, guarda el ultimo frame NV21 y lo sirve como JPEG (calidad 60, ~640x480) en `GET /preview` del NanoHTTPD 8080; `PHOTO` con el visor activo dispara sobre ESA misma sesion (lo que ves es lo que capturas, max resolucion) y rearranca la preview. STATUS ahora incluye `"preview"`. Exclusividad de camara respetada: REC_START/STREAM_START (comando o boton fisico) apagan el visor; tambien se apaga al desconectarse el telefono (bateria).
+  - **Aeria Nexus**: `BodycamRepository` parsea `file_server_ip/port` del STATUS, expone `isPreviewing` y `fetchPreviewFrame()` (HTTP + rotacion 90º, constante `PREVIEW_ROTATION_DEGREES` ajustable en campo); pantalla nueva `BodycamViewfinderScreen` + ViewModel (ruta `bodycam/viewfinder`): frames a ~1.4 fps, boton grande de captura, reintento automatico reenviando PREVIEW_START tras 5 frames fallidos (microcortes BT), PREVIEW_STOP al salir. Entrada: boton "REMOTE VIEWFINDER" en el controlador (oculto durante livestream). `ViewLiveFeedButton` generalizado a `SecondaryPanelButton`.
+- Ambos APK compilados e instalados: BodyCamServer en la W1 (30393016471440) y Aeria Nexus en el Redmi.
+- `docs/bodycam-contexto.md` actualizado (comandos PREVIEW_*, campo preview del STATUS, endpoint /preview).
+
+### Depuracion en vivo del visor (mismo dia) — dos bugs encontrados y corregidos
+
+1. **Cleartext HTTP bloqueado en el telefono**: el manifest no permitia trafico http:// (bloqueado por defecto desde Android 9); el fetch del frame moria al instante sin llegar a la red (sintoma: reintentos de PREVIEW_START cada 3,5 s en la W1 y CERO GET /preview). Fix: `android:usesCleartextTraffic="true"` (el servidor de la W1 es http en LAN; el trafico a internet sigue TLS) + Log.w en fetchPreviewFrame para que nunca vuelva a ser invisible.
+2. **NanoHTTPD 2.3.1 tardaba ~10 s FIJOS por peticion** (timeout > los 3 s del telefono): su HTTPSession hace `inetAddress.getHostName()` — reverse DNS bloqueante — con cada conexion; el router no responde PTR y espera ~10 s. Diagnostico concluyente: localhost 0 s vs red 10,1-10,4 s consistente, y el `GET` se logueaba 10 s despues del connect TCP. Fix: NanoHTTPD incorporado como fuente en `src/main/java/fi/iki/elonen/NanoHTTPD.java` con `remoteHostname = remoteIp` (dependencia gradle eliminada). Resultado medido: 0,09-0,39 s por peticion.
+
+### Visor verificado en campo y subida a MJPEG (2026-07-12)
+
+- Visor VERIFICADO con hardware: frames visibles; orientacion ajustada en campo (`PREVIEW_ROTATION_DEGREES` 90 -> 0: la imagen salia girada a la derecha; con 0 se omite la copia de bitmap).
+- El usuario pidio mas fluidez: el polling (~1.4 fps, un ciclo HTTP por frame) se reemplazo por **MJPEG streaming**: `GET /preview/stream` en la W1 (multipart/x-mixed-replace, un hilo empuja el frame actual cada 150 ms ≈ 6-7 fps por una unica conexion; termina al apagarse el visor o cortarse el cliente); en el telefono `BodycamRepository.streamPreviewFrames(): Flow<Bitmap>` (parser multipart por Content-Length) y el ViewModel colecta el flow, reenviando PREVIEW_START si el stream se corta. `GET /preview` (frame unico) se conserva para diagnostico con curl.
+
+### Pendiente (verificar en campo)
+
+- Fluidez del visor MJPEG (~6-7 fps) y foto con el visor abierto: confirmar que la preview sigue viva tras disparar (verificado una vez con el polling: IMG_20260712_054158.jpg).
+
+---
+
+## 2026-07-11 (3) — Operations responsive: fin de los botones apinados
+
+### Hecho
+
+- **Diagnostico**: la columna central de `OperationsScreen` sumaba alturas fijas (150+150+64 + fila de radio con aspectRatio 4:3 ≈ 120 + separaciones ≈ 508.dp) pero el alto real disponible entre header y EMERGENCY ronda 400-480.dp en un telefono tipico (menos en 16:9): desbordaba en casi cualquier dispositivo.
+- **Fix en `OperationsScreen`**:
+  - Las tarjetas NEW INCIDENT y CONTINUE ACTIVE INCIDENT ya no miden 150.dp fijos: se reparten con `weight(1f)` el alto que queda en cada telefono.
+  - `BoxWithConstraints` con umbral `maxHeight < 500.dp` activa modo compacto: iconos y textos internos mas pequenos, el icono decorativo de CONTINUE se omite (tres lineas de texto no caben con el), bodycam 52.dp y radio 64.dp.
+  - Fila de radio/llamada sin `aspectRatio` (atada al ancho robaba ~120.dp de alto); ahora altura propia con `heightIn` (96/64.dp).
+  - `heightIn` en vez de `height` en los botones de alto fijo para tolerar fuente del sistema grande.
+  - EMERGENCY intacto (72.dp, accion critica) con separacion garantizada de 10.dp.
+- Compila limpio (assembleDebug).
+
+### Pendiente
+
+- Verificacion visual en el dispositivo donde se veian apinados (no habia ninguno conectado por adb al cerrar).
+
+---
+
+## 2026-07-11 (2) — Tooltip de "Signal cut" en el mapa de las demas unidades
+
+### Hecho
+
+- **`AgoraRepository`**: StateFlow nuevo `sosSignalCuts` (Map uid -> SosCancel). Se alimenta SOLO con `emergency_cancel` recibidos por el data stream, asi que el emisor nunca ve su propio aviso (Agora no devuelve mensajes propios) — requisito explicito del usuario. Un `emergency` nuevo del mismo uid borra su corte anterior; `dismissSignalCut(uid)` lo quita a mano. El corte sintetizado de la bodycam NO se fija (sin GPS, no hay donde anclarlo).
+- **`MapViewModel`**: `SignalCutMarker` (uid, officer, posicion, hora del corte HH:mm:ss) en `MapUiState.signalCuts`; si la cancelacion no trae lat/lng se usa la ultima posicion conocida del agente y sin ninguna de las dos no se muestra.
+- **`MapScreen`**: `SignalCutTooltip` como ViewAnnotation anclada BOTTOM sobre la ultima posicion del emisor — tarjeta con icono de aviso, "Agent P-4471" (el id sigue hardcodeado en OfficerSampleData hasta que exista login; viaja en el campo `officer` del mensaje) y "Signal cut: HH:mm:ss", con punto rojo en la coordenada. Persiste al navegar entre pestanas (estado en el repositorio).
+- **Mismo dia, ajuste de persistencia**: la tarjeta ya NO se descarta al tocarla (un toque accidental no borra un aviso critico); ahora lleva una X (target 36.dp) como unico camino para cerrarla. Sigue borrandose sola si el mismo agente emite un SOS nuevo.
+- Compila limpio (assembleDebug).
+
+### Pendiente
+
+- Prueba con dos telefonos: SOS en A -> cancelar en A -> tooltip en el mapa de B (y no en A); tocar para descartar; nuevo SOS del mismo agente limpia el tooltip viejo.
+
+---
+
+## 2026-07-11 — Fase 4 (parte 2a): controlador remoto de la bodycam desde el movil
+
+### Decisiones de diseno (acordadas con el usuario)
+
+- El movil tiene CONTROL TOTAL de la bodycam; esto reemplaza la regla historica "solo conectar" del 2026-06-02 (los botones fisicos siguen funcionando igual).
+- **Livestream desde el movil = SOS para todos**: mismo significado que el boton fisico 133. No existe el "visor privado".
+- Set aparte de botones locales SIN SOS: foto (PHOTO) y grabacion (REC_START/STOP).
+- PTT y apagado quedan fuera: el protocolo BT no tiene comando de mic (BTN_PTT es solo notificacion; habria que agregar MIC_ON/OFF a BodyCamServer) y apagar el equipo requiere permisos de plataforma que nuestro APK no tiene.
+
+### Hecho
+
+- **`feature/bodycam/`** (pantalla nueva `BodycamControllerScreen` + ViewModel, ruta `bodycam`): estado de conexion + bateria de la bodycam, boton rojo LIVESTREAM — SOS (con aviso explicito de que alerta a todas las unidades; parpadea mientras transmite y un segundo toque manda STREAM_STOP), botones PHOTO y RECORD (locales, sin SOS), VIEW LIVE FEED (abre `livestream/9001`), conectar/desconectar con permiso BT en el gesto. Al pedir el stream desde esta pantalla, el visor se abre solo cuando llega `OK:STREAM_START`; si responde `ERROR:` (p. ej. sin WiFi) se muestra el mensaje y no se navega. Entrada: boton "BODYCAM CONTROL" en Operations.
+- **`BodycamRepository`**: StateFlows nuevos `isRecording`/`isStreaming` — se adelantan con `OK:*`/`BTN_*` y se corrigen con el campo `recording`/`streaming` del STATUS cada 5 s (resincroniza tras micro-cortes); SharedFlow `commandResponses` para feedback de comandos; todo se resetea al perder el enlace. OJO: `STREAM_START` apaga `isRecording` (camara exclusiva en la W1).
+- **`AgoraRepository` — deteccion SOS de bodycam (via confiable, sin BT)**: cuando el video del uid 9001 empieza a publicarse (`onRemoteVideoStateChanged` STARTING/DECODING) se emite un `SosAlert` (officer "BODYCAM", sin posicion — la W1 no emite GPS); al pararse el video o salir del canal, `SosCancel`. Con esto TODOS los telefonos reciben la emergencia, la dispare el movil o el boton fisico 133. Guard `bodycamStreamActive` contra dobles emisiones.
+- **`SosAlertViewModel`**: el popup+sirena del uid 9001 se suprime en el telefono que tiene la bodycam conectada por BT (ese agente la disparo el mismo y ya lo ve en el controlador); las demas unidades si lo reciben.
+- Compila limpio (assembleDebug).
+
+### Pendiente
+
+- Prueba fisica: W1 con BodyCamServer + WiFi, un telefono conectado por BT (stream desde el movil, foto, grabacion, feedback de error sin WiFi) y un segundo telefono para verificar el popup SOS "BODYCAM" + "Accept & view live" + signal cut al parar. De paso cae la prueba pendiente de coexistencia 2.4 GHz (stream Agora vs RFCOMM).
+- Futuro del controlador: comando MIC_ON/OFF en BodyCamServer para el PTT remoto; IR/LED/torch ya existen en el protocolo si se quieren exponer.
+
+---
+
 ## 2026-07-10 (5) — Enlace BT con la bodycam robusto: reconexion automatica + foreground service
 
 ### Investigacion (por que era inestable)

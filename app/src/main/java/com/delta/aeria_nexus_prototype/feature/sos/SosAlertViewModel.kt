@@ -3,6 +3,7 @@ package com.delta.aeria_nexus_prototype.feature.sos
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
+import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.model.SosAlert
 import com.delta.aeria_nexus_prototype.data.model.SosCancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +25,7 @@ data class SosAlertUiState(
  */
 class SosAlertViewModel(
     private val agoraRepository: AgoraRepository,
+    private val bodycamRepository: BodycamRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SosAlertUiState())
@@ -32,10 +34,20 @@ class SosAlertViewModel(
     init {
         viewModelScope.launch {
             agoraRepository.incomingSos.collect { alerta ->
+                // El SOS de la propia bodycam (enlazada por Bluetooth a este
+                // telefono) no suena aqui: el agente que la lleva lo disparo
+                // el mismo y ya lo ve en el controlador. La sirena es para
+                // las demas unidades.
+                val esBodycamPropia =
+                    alerta.uid == AgoraRepository.BODYCAM_UID && bodycamRepository.isConnected
                 // Si ya hay una alerta en pantalla se conserva la primera; el
                 // heartbeat del emisor ya viene filtrado por el repositorio.
                 _uiState.update {
-                    if (it.activeAlert == null) it.copy(activeAlert = alerta, signalCut = null) else it
+                    if (it.activeAlert == null && !esBodycamPropia) {
+                        it.copy(activeAlert = alerta, signalCut = null)
+                    } else {
+                        it
+                    }
                 }
             }
         }

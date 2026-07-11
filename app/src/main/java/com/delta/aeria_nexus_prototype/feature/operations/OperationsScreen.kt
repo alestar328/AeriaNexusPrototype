@@ -13,15 +13,17 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -29,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -70,6 +73,7 @@ fun OperationsScreen(
     viewModel: OperationsViewModel,
     onOpenActiveIncident: (String) -> Unit,
     onOpenSosLivestream: () -> Unit,
+    onOpenBodycamControl: () -> Unit,
     onTabSelected: (MainTab) -> Unit,
 ) {
     val activeIncident by viewModel.activeIncident.collectAsStateWithLifecycle()
@@ -97,25 +101,48 @@ fun OperationsScreen(
         ) {
             BrandHeader()
 
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-            ) {
-                NewIncidentButton(
-                    onClick = { onOpenActiveIncident(viewModel.createIncident()) },
-                )
-                ContinueIncidentButton(
-                    incidentId = activeIncident?.id,
-                    startedAtMillis = activeIncident?.startedAtMillis,
-                    onClick = { activeIncident?.let { onOpenActiveIncident(it.id) } },
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // Botones de radio y llamada: decorativos en el prototipo.
-                    RadioActionButton(icon = Icons.Filled.Mic, description = "Push to talk", modifier = Modifier.weight(1f))
-                    RadioActionButton(icon = Icons.Filled.Phone, description = "Call dispatch", modifier = Modifier.weight(1f))
+            // Las dos tarjetas grandes se reparten con weight el alto que
+            // realmente queda en este telefono, en lugar de usar alturas
+            // fijas que desbordaban en pantallas bajas. Por debajo del
+            // umbral se compactan ademas los contenidos internos.
+            BoxWithConstraints(modifier = Modifier.weight(1f)) {
+                val compacto = maxHeight < 500.dp
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+                ) {
+                    NewIncidentButton(
+                        compacto = compacto,
+                        onClick = { onOpenActiveIncident(viewModel.createIncident()) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    ContinueIncidentButton(
+                        compacto = compacto,
+                        incidentId = activeIncident?.id,
+                        startedAtMillis = activeIncident?.startedAtMillis,
+                        onClick = { activeIncident?.let { onOpenActiveIncident(it.id) } },
+                        modifier = Modifier.weight(1f),
+                    )
+                    BodycamControlButton(compacto = compacto, onClick = onOpenBodycamControl)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // Botones de radio y llamada: decorativos en el prototipo.
+                        RadioActionButton(
+                            icon = Icons.Filled.Mic,
+                            description = "Push to talk",
+                            compacto = compacto,
+                            modifier = Modifier.weight(1f),
+                        )
+                        RadioActionButton(
+                            icon = Icons.Filled.Phone,
+                            description = "Call dispatch",
+                            compacto = compacto,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             }
 
+            Spacer(Modifier.height(10.dp))
             EmergencyButton(
                 sosActive = sosActive,
                 onClick = {
@@ -150,11 +177,14 @@ private fun BrandHeader() {
 }
 
 @Composable
-private fun NewIncidentButton(onClick: () -> Unit) {
+private fun NewIncidentButton(
+    compacto: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .height(150.dp)
             .clip(RoundedCornerShape(24.dp))
             .background(
                 Brush.linearGradient(
@@ -167,7 +197,7 @@ private fun NewIncidentButton(onClick: () -> Unit) {
     ) {
         Box(
             modifier = Modifier
-                .size(56.dp)
+                .size(if (compacto) 40.dp else 56.dp)
                 .background(Color.White.copy(alpha = 0.1f), CircleShape)
                 .border(2.dp, Color.White.copy(alpha = 0.2f), CircleShape),
             contentAlignment = Alignment.Center,
@@ -176,14 +206,14 @@ private fun NewIncidentButton(onClick: () -> Unit) {
                 Icons.Filled.Add,
                 contentDescription = null,
                 tint = Color.White,
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(if (compacto) 26.dp else 36.dp),
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(if (compacto) 6.dp else 12.dp))
         Text(
             text = "NEW INCIDENT",
             color = Color.White,
-            fontSize = 18.sp,
+            fontSize = if (compacto) 15.sp else 18.sp,
             fontWeight = FontWeight.Black,
             letterSpacing = 3.sp,
         )
@@ -192,16 +222,17 @@ private fun NewIncidentButton(onClick: () -> Unit) {
 
 @Composable
 private fun ContinueIncidentButton(
+    compacto: Boolean,
     incidentId: String?,
     startedAtMillis: Long?,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val hayActivo = incidentId != null
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .height(150.dp)
             .alpha(if (hayActivo) 1f else 0.5f)
             .clip(RoundedCornerShape(24.dp))
             .background(Superficie)
@@ -210,21 +241,25 @@ private fun ContinueIncidentButton(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .background(Color.White.copy(alpha = 0.05f), CircleShape)
-                .border(2.dp, Color.White.copy(alpha = 0.1f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.ListAlt,
-                contentDescription = null,
-                tint = TextoSecundario,
-                modifier = Modifier.size(28.dp),
-            )
+        // En compacto el icono se omite: esta tarjeta lleva hasta tres lineas
+        // de texto y con el icono no cabe en el alto que le toca por weight.
+        if (!compacto) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .background(Color.White.copy(alpha = 0.05f), CircleShape)
+                    .border(2.dp, Color.White.copy(alpha = 0.1f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ListAlt,
+                    contentDescription = null,
+                    tint = TextoSecundario,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
         }
-        Spacer(Modifier.height(10.dp))
         Text(
             text = "CONTINUE ACTIVE INCIDENT",
             color = TextoTerciario,
@@ -236,7 +271,7 @@ private fun ContinueIncidentButton(
             Text(
                 text = incidentId,
                 color = AzulClaro,
-                fontSize = 18.sp,
+                fontSize = if (compacto) 16.sp else 18.sp,
                 fontWeight = FontWeight.Black,
             )
             Text(
@@ -255,15 +290,51 @@ private fun ContinueIncidentButton(
     }
 }
 
+/** Acceso al controlador remoto de la bodycam (livestream, foto, grabacion). */
+@Composable
+private fun BodycamControlButton(compacto: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            // heightIn y no height: si el usuario agranda la fuente del
+            // sistema, el boton crece en lugar de recortar el texto.
+            .heightIn(min = if (compacto) 52.dp else 64.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(AzulOscuroPanel)
+            .border(1.dp, AzulPrimario.copy(alpha = 0.2f), RoundedCornerShape(24.dp))
+            .clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Videocam,
+            contentDescription = null,
+            tint = AzulClaro,
+            modifier = Modifier.size(28.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = "BODYCAM CONTROL",
+            color = AzulClaro,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 2.sp,
+        )
+    }
+}
+
 @Composable
 private fun RadioActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
+    compacto: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Altura propia en lugar de aspectRatio: atada al ancho, la fila crecia
+    // hasta ~120.dp y era una de las causas del apinamiento vertical.
     Box(
         modifier = modifier
-            .aspectRatio(4f / 3f)
+            .heightIn(min = if (compacto) 64.dp else 96.dp)
             .clip(RoundedCornerShape(24.dp))
             .background(AzulOscuroPanel)
             .border(1.dp, AzulPrimario.copy(alpha = 0.2f), RoundedCornerShape(24.dp))
@@ -272,7 +343,7 @@ private fun RadioActionButton(
     ) {
         Box(
             modifier = Modifier
-                .size(64.dp)
+                .size(if (compacto) 48.dp else 64.dp)
                 .background(AzulPrimario.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
                 .border(1.dp, AzulClaro.copy(alpha = 0.2f), RoundedCornerShape(16.dp)),
             contentAlignment = Alignment.Center,
@@ -281,7 +352,7 @@ private fun RadioActionButton(
                 icon,
                 contentDescription = description,
                 tint = AzulClaro,
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(if (compacto) 28.dp else 36.dp),
             )
         }
     }

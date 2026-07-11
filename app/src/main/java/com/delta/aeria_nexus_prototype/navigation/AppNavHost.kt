@@ -11,9 +11,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel
+import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerViewModel
+import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderViewModel
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportScreen
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportViewModel
 import com.delta.aeria_nexus_prototype.feature.incidentdetail.IncidentDetailScreen
@@ -47,6 +52,9 @@ object Routes {
     const val SUBMITTED = "incidents/{id}/submitted"
     // Livestream del SOS: uid 0 = camara propia (emisor), otro uid = ver a ese agente.
     const val LIVESTREAM = "livestream/{uid}"
+    const val BODYCAM = "bodycam"
+    // Visor remoto de la bodycam para la foto a distancia (frames por WiFi).
+    const val BODYCAM_VIEWFINDER = "bodycam/viewfinder"
 
     fun livestream(uid: Int) = "livestream/$uid"
     fun incidentDetail(id: String) = "incidents/$id"
@@ -98,7 +106,27 @@ fun AppNavHost() {
                 onOpenSosLivestream = {
                     navController.navigate(Routes.livestream(LivestreamViewModel.OWN_CAMERA_UID))
                 },
+                onOpenBodycamControl = { navController.navigate(Routes.BODYCAM) },
                 onTabSelected = onTabSelected,
+            )
+        }
+
+        composable(Routes.BODYCAM) {
+            BodycamControllerScreen(
+                viewModel = viewModel { BodycamControllerViewModel(AppContainer.bodycamRepository) },
+                onOpenLivestream = {
+                    navController.navigate(Routes.livestream(AgoraRepository.BODYCAM_UID))
+                },
+                onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
+                onBack = { navController.popBackStack() },
+                onTabSelected = onTabSelected,
+            )
+        }
+
+        composable(Routes.BODYCAM_VIEWFINDER) {
+            BodycamViewfinderScreen(
+                viewModel = viewModel { BodycamViewfinderViewModel(AppContainer.bodycamRepository) },
+                onClose = { navController.popBackStack() },
             )
         }
 
@@ -206,7 +234,9 @@ fun AppNavHost() {
     // Alertas SOS de otros agentes. Los dialogos abren su propia ventana por
     // encima de cualquier pantalla, por eso basta con montarlos aqui una vez.
     SosAlertOverlay(
-        viewModel = viewModel { SosAlertViewModel(AppContainer.agoraRepository) },
+        viewModel = viewModel {
+            SosAlertViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
+        },
         onAcceptLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
     )
 }

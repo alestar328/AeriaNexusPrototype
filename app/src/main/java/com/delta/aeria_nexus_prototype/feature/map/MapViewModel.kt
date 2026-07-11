@@ -6,6 +6,7 @@ import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.BatteryRepository
 import com.delta.aeria_nexus_prototype.data.LocationRepository
 import com.delta.aeria_nexus_prototype.data.model.RemoteAgent
+import com.delta.aeria_nexus_prototype.data.model.SosCancel
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -29,6 +30,18 @@ data class RemoteAgentMarker(
     val lastSeenLabel: String,
 )
 
+/**
+ * Aviso fijo en el mapa de que otro agente en emergencia corto la senal:
+ * quien era y a que hora corto, anclado a su ultima posicion conocida.
+ */
+data class SignalCutMarker(
+    val uid: Int,
+    val officer: String,
+    val latitude: Double,
+    val longitude: Double,
+    val cutTimeLabel: String,
+)
+
 data class MapUiState(
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
@@ -37,6 +50,7 @@ data class MapUiState(
     val satellites: Int = 0,
     val batteryPercent: Int = 0,
     val remoteAgents: List<RemoteAgentMarker> = emptyList(),
+    val signalCuts: List<SignalCutMarker> = emptyList(),
     // Agentes conectados al canal, incluido este telefono (0 = sin conexion).
     val connectedUsers: Int = 0,
 )
@@ -113,6 +127,32 @@ class MapViewModel(
                     _uiState.update { it.copy(remoteAgents = marcadores) }
                 }
         }
+        viewModelScope.launch {
+            agoraRepository.sosSignalCuts.collect { cortes ->
+                val avisos = cortes.values.mapNotNull { it.toSignalCutMarker() }
+                _uiState.update { it.copy(signalCuts = avisos) }
+            }
+        }
+    }
+
+    /** Quita el aviso de corte de senal del agente [uid] cuando el usuario lo toca. */
+    fun dismissSignalCut(uid: Int) {
+        agoraRepository.dismissSignalCut(uid)
+    }
+
+    private fun SosCancel.toSignalCutMarker(): SignalCutMarker? {
+        // Si la cancelacion no trajo posicion se usa la ultima conocida del
+        // agente en la red; sin ninguna de las dos no hay donde anclar el aviso.
+        val ultimaPosicion = agoraRepository.remoteAgents.value[uid]
+        val lat = latitude ?: ultimaPosicion?.latitude ?: return null
+        val lng = longitude ?: ultimaPosicion?.longitude ?: return null
+        return SignalCutMarker(
+            uid = uid,
+            officer = officer,
+            latitude = lat,
+            longitude = lng,
+            cutTimeLabel = formatClock(timestampMillis),
+        )
     }
 
     private fun RemoteAgent.toMarker(): RemoteAgentMarker {

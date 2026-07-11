@@ -98,6 +98,8 @@ PHOTO           → OK:PHOTO
 STATUS          → STATUS:{json}   (ver abajo)
 STREAM_START    → OK:STREAM_START (requiere WiFi; para la grabacion si estaba activa)
 STREAM_STOP     → OK:STREAM_STOP
+PREVIEW_START   → OK:PREVIEW_START (visor remoto: frames JPEG en GET /preview; requiere WiFi, no disponible grabando ni en stream)
+PREVIEW_STOP    → OK:PREVIEW_STOP
 IR_ON / IR_OFF  → OK:...
 LED:N           → OK:LED:N        (0=off, 1-6 rojo, 7 verde, 8 rojo parpadeo, 9 amarillo parpadeo, 10 azul)
 GPS_ON / GPS_OFF→ OK:...          (ver nota GPS)
@@ -109,7 +111,8 @@ TORCH_ON / TORCH_OFF → OK:...
 ```json
 {"recording":false,"battery":87,"storage_mb":12034,"wifi":true,"api":true,
  "file_server_ip":"192.168.1.50","file_server_port":8080,
- "streaming":false,"stream_uid":9001,"stream_channel":"falcon_group_channel"}
+ "streaming":false,"stream_uid":9001,"stream_channel":"falcon_group_channel",
+ "preview":false}
 ```
 
 La app Flutter hace poll de `STATUS` cada 5 segundos con la conexion activa y
@@ -158,7 +161,9 @@ Paquete `com.falconone.bodycamserver`, 13 archivos Kotlin:
   `video_file` o `photo_file`.
 - `FileServerService` — NanoHTTPD en puerto **8080** ("servidor W1"):
   `GET /status`, `GET /recordings` (lista JSON, mas reciente primero),
-  `GET /recordings/latest`, `GET /recordings/{filename}` (binario mp4/jpg).
+  `GET /recordings/latest`, `GET /recordings/{filename}` (binario mp4/jpg),
+  `GET /preview` (ultimo frame JPEG del visor remoto; 404 si PREVIEW_START
+  no esta activo).
 - `HardwareController` — nodos sysfs del W1: IR, LED (aw2013), sensor de luz,
   motor IR-CUT dia/noche, GPS BeiDou. Escribe directo o via `sh -c echo`.
 - `Protocol.kt` — Cmd/Rsp/Ntf + `ButtonDebounce` (300 ms).
