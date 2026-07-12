@@ -19,6 +19,7 @@ import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerScreen
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderScreen
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderViewModel
+import com.delta.aeria_nexus_prototype.feature.bodycam.ViewfinderMode
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportScreen
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportViewModel
 import com.delta.aeria_nexus_prototype.feature.incidentdetail.IncidentDetailScreen
@@ -55,6 +56,8 @@ object Routes {
     const val BODYCAM = "bodycam"
     // Visor remoto de la bodycam para la foto a distancia (frames por WiFi).
     const val BODYCAM_VIEWFINDER = "bodycam/viewfinder"
+    // Monitor de la grabacion en curso de la bodycam (misma pantalla, modo REC).
+    const val BODYCAM_REC_MONITOR = "bodycam/recording"
 
     fun livestream(uid: Int) = "livestream/$uid"
     fun incidentDetail(id: String) = "incidents/$id"
@@ -118,6 +121,7 @@ fun AppNavHost() {
                     navController.navigate(Routes.livestream(AgoraRepository.BODYCAM_UID))
                 },
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
+                onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },
                 onBack = { navController.popBackStack() },
                 onTabSelected = onTabSelected,
             )
@@ -125,7 +129,18 @@ fun AppNavHost() {
 
         composable(Routes.BODYCAM_VIEWFINDER) {
             BodycamViewfinderScreen(
-                viewModel = viewModel { BodycamViewfinderViewModel(AppContainer.bodycamRepository) },
+                viewModel = viewModel {
+                    BodycamViewfinderViewModel(AppContainer.bodycamRepository, ViewfinderMode.PHOTO)
+                },
+                onClose = { navController.popBackStack() },
+            )
+        }
+
+        composable(Routes.BODYCAM_REC_MONITOR) {
+            BodycamViewfinderScreen(
+                viewModel = viewModel {
+                    BodycamViewfinderViewModel(AppContainer.bodycamRepository, ViewfinderMode.RECORDING)
+                },
                 onClose = { navController.popBackStack() },
             )
         }

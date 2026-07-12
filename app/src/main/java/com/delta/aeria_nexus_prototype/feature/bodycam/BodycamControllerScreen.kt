@@ -1,6 +1,5 @@
 package com.delta.aeria_nexus_prototype.feature.bodycam
 
-import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -49,6 +48,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
@@ -72,6 +72,7 @@ fun BodycamControllerScreen(
     viewModel: BodycamControllerViewModel,
     onOpenLivestream: () -> Unit,
     onOpenViewfinder: () -> Unit,
+    onOpenRecordingMonitor: () -> Unit,
     onBack: () -> Unit,
     onTabSelected: (MainTab) -> Unit,
 ) {
@@ -85,11 +86,11 @@ fun BodycamControllerScreen(
         }
     }
 
-    // El permiso Bluetooth es de runtime desde Android 12; se pide al tocar
-    // CONNECT y, si se concede, se conecta en el mismo gesto.
+    // Los permisos Bluetooth son de runtime desde Android 12; se piden al tocar
+    // CONNECT y, si se conceden, se conecta en el mismo gesto.
     val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { concedido -> if (concedido) viewModel.connect() }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { resultados -> if (resultados.values.all { it }) viewModel.connect() }
 
     AppScaffold(
         currentTab = null,
@@ -102,7 +103,7 @@ fun BodycamControllerScreen(
             onBack = onBack,
             onConnect = {
                 if (!viewModel.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
                 } else {
                     viewModel.connect()
                 }
@@ -113,6 +114,7 @@ fun BodycamControllerScreen(
             onToggleRecording = viewModel::toggleRecording,
             onOpenLivestream = onOpenLivestream,
             onOpenViewfinder = onOpenViewfinder,
+            onOpenRecordingMonitor = onOpenRecordingMonitor,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -129,6 +131,7 @@ private fun BodycamControllerContent(
     onToggleRecording: () -> Unit,
     onOpenLivestream: () -> Unit,
     onOpenViewfinder: () -> Unit,
+    onOpenRecordingMonitor: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val conectada = uiState.connectionState == BodycamState.CONNECTED
@@ -149,16 +152,21 @@ private fun BodycamControllerContent(
         Spacer(Modifier.weight(1f))
 
         if (conectada) {
-            if (uiState.isStreaming) {
-                SecondaryPanelButton(
+            // La camara de la bodycam es exclusiva: se ofrece ver la fuente
+            // que este activa (livestream o grabacion) y, si ninguna lo esta,
+            // el visor para la foto a distancia.
+            when {
+                uiState.isStreaming -> SecondaryPanelButton(
                     text = "VIEW LIVE FEED",
                     icon = Icons.Filled.Videocam,
                     onClick = onOpenLivestream,
                 )
-            } else {
-                // Visor para la foto a distancia: la camara es exclusiva, por
-                // eso no se ofrece mientras la bodycam transmite en vivo.
-                SecondaryPanelButton(
+                uiState.isRecording -> SecondaryPanelButton(
+                    text = "VIEW RECORDING",
+                    icon = Icons.Filled.CenterFocusStrong,
+                    onClick = onOpenRecordingMonitor,
+                )
+                else -> SecondaryPanelButton(
                     text = "REMOTE VIEWFINDER",
                     icon = Icons.Filled.CenterFocusStrong,
                     onClick = onOpenViewfinder,

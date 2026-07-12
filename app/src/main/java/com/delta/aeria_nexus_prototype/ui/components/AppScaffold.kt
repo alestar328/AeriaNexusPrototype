@@ -1,6 +1,5 @@
 package com.delta.aeria_nexus_prototype.ui.components
 
-import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.AppContainer
+import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -107,12 +107,12 @@ private fun StatusBar(isRecording: Boolean) {
     val bodycam = AppContainer.bodycamRepository
     val bodycamState by bodycam.state.collectAsStateWithLifecycle()
 
-    // El permiso Bluetooth es de runtime desde Android 12; se pide al tocar el
-    // icono de la bodycam y, si se concede, se conecta en el mismo gesto.
+    // Los permisos Bluetooth son de runtime desde Android 12; se piden al tocar
+    // el icono de la bodycam y, si se conceden, se conecta en el mismo gesto.
     val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { concedido ->
-        if (concedido) bodycam.connect()
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { resultados ->
+        if (resultados.values.all { it }) bodycam.connect()
     }
 
     Row(
@@ -144,7 +144,7 @@ private fun StatusBar(isRecording: Boolean) {
                     bodycamState == BodycamState.CONNECTED || bodycamState == BodycamState.CONNECTING ->
                         bodycam.disconnect()
                     !bodycam.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                        bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                        bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
                     else -> bodycam.connect()
                 }
             },

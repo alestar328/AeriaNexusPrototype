@@ -116,14 +116,15 @@ class BodycamRepository(private val context: Context) {
     private val _commandResponses = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val commandResponses: SharedFlow<String> = _commandResponses.asSharedFlow()
 
-    /** True si el permiso Bluetooth de runtime ya esta concedido. */
+    /** True si los permisos Bluetooth de runtime ya estan concedidos. */
     fun hasBluetoothPermission(): Boolean {
         // Antes de Android 12 el permiso BLUETOOTH es de instalacion, no de runtime.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
-        return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.BLUETOOTH_CONNECT,
-        ) == PackageManager.PERMISSION_GRANTED
+        // CONNECT para el socket y SCAN para cancelDiscovery() antes de conectar.
+        return BLUETOOTH_RUNTIME_PERMISSIONS.all { permiso ->
+            ContextCompat.checkSelfPermission(context, permiso) ==
+                PackageManager.PERMISSION_GRANTED
+        }
     }
 
     /**
@@ -382,7 +383,7 @@ class BodycamRepository(private val context: Context) {
      * la red se cae o aun no llego la IP en el STATUS; quien colecta decide
      * si reintenta.
      */
-    fun streamPreviewFrames(): Flow<Bitmap> = flow {
+    fun streamPreviewFrames(rotationDegrees: Float): Flow<Bitmap> = flow {
         val ip = fileServerIp ?: return@flow
         var conexion: HttpURLConnection? = null
         try {
@@ -394,7 +395,7 @@ class BodycamRepository(private val context: Context) {
             while (true) {
                 val bytes = leerFrameMultipart(entrada) ?: break
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?.let { emit(rotarFrame(it)) }
+                    ?.let { emit(rotarFrame(it, rotationDegrees)) }
             }
         } catch (e: IOException) {
             Log.w(TAG, "Stream del visor cortado: ${e.message}")
@@ -439,16 +440,23 @@ class BodycamRepository(private val context: Context) {
         }
     }
 
-    // El sensor de la W1 esta montado a 90 grados: sin girar, el visor se ve
-    // acostado. Ajustar la constante si la prueba de campo muestra otra cosa.
-    private fun rotarFrame(frame: Bitmap): Bitmap {
-        if (PREVIEW_ROTATION_DEGREES == 0f) return frame
-        val matriz = Matrix().apply { postRotate(PREVIEW_ROTATION_DEGREES) }
+    // Cada fuente de la bodycam entrega el frame con su propia orientacion;
+    // el que colecta pasa los grados ajustados en campo para su fuente.
+    private fun rotarFrame(frame: Bitmap, grados: Float): Bitmap {
+        if (grados == 0f) return frame
+        val matriz = Matrix().apply { postRotate(grados) }
         return Bitmap.createBitmap(frame, 0, 0, frame.width, frame.height, matriz, true)
     }
 
     companion object {
         private const val TAG = "BodycamRepository"
+
+        // Permisos de runtime que exige Android 12+ para conectar por Bluetooth;
+        // la UI los pide juntos en un solo dialogo ("Dispositivos cercanos").
+        val BLUETOOTH_RUNTIME_PERMISSIONS = arrayOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_SCAN,
+        )
 
         // Mismo UUID que BodyCamServer en la bodycam (RFCOMM custom de Falcon).
         private val FALCON_UUID: UUID = UUID.fromString("FA1C0000-1337-4242-CAFE-DEADBEEF0001")
@@ -463,7 +471,12 @@ class BodycamRepository(private val context: Context) {
         // La W1 empuja un frame cada ~150 ms; si en 5 s no llega nada, el
         // enlace esta muerto y conviene cortar para que el visor reintente.
         private const val STREAM_READ_TIMEOUT_MILLIS = 5_000
-        // Ajustada en campo el 2026-07-12: con 90 la imagen quedaba girada a la derecha.
-        private const val PREVIEW_ROTATION_DEGREES = 0f
+
+        // Rotacion de los frames segun la fuente, ajustadas en campo:
+        // visor de foto (2026-07-12: con 90 quedaba girada a la derecha).
+        const val PREVIEW_ROTATION_DEGREES = 0f
+        // Monitor de grabacion (2026-07-12: el TextureView llega girado 90
+        // a la derecha; se endereza con 90 a la izquierda).
+        const val MONITOR_ROTATION_DEGREES = -90f
     }
 }

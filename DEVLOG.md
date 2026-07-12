@@ -6,6 +6,64 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-07-12 (2) — Monitor de grabacion: ver en el movil lo que la bodycam graba
+
+### Hecho
+
+- **BodyCamServer (W1)**: durante la grabacion, `RecordingActivity` copia su
+  `TextureView` a un bitmap 640x360 cada 250 ms (hilo UI, bitmap reutilizado) y
+  lo comprime a JPEG q60 (`latestJpeg()` en el companion). NO se abre un tercer
+  stream de camara: el HAL UNISOC no garantiza PRIV+PRIV+YUV y la via segura es
+  leer el preview que ya existe. `FileServerService` ahora sirve en `/preview`
+  y `/preview/stream` "la fuente viva que haya": `PreviewController` (visor de
+  foto) o el monitor de grabacion; con la fuente activa pero sin frame aun, el
+  stream espera el siguiente tick en vez de cortarse.
+- **Aeria Nexus**: `BodycamViewfinderViewModel/Screen` ganan `ViewfinderMode`:
+  - `PHOTO` (igual que antes): PREVIEW_START/STOP, boton de captura.
+  - `RECORDING`: sin comandos de visor (la grabacion ya alimenta el stream y
+    salir de mirar NO la detiene), titulo "RECORDING MONITOR", badge REC,
+    boton rojo Stop que envia REC_STOP, y cierre automatico cuando
+    `isRecording` pasa a false (lo pare este boton, el fisico u otro agente).
+  - Controlador: el panel superior ofrece segun la fuente activa VIEW LIVE
+    FEED (stream) / VIEW RECORDING (grabando) / REMOTE VIEWFINDER (libre).
+  - Ruta nueva `bodycam/recording` (misma pantalla, modo RECORDING).
+- Ambos APK compilados e instalados: BodyCamServer en la W1 y Aeria Nexus en el
+  Samsung A56; MainActivity de la W1 relanzada para levantar el servicio BT.
+
+### Orientacion ajustada en campo (mismo dia)
+
+- El monitor salia girado 90 a la derecha (getBitmap trae el buffer sin la
+  matriz de la vista). Fix: rotacion POR FUENTE en el telefono —
+  `streamPreviewFrames(rotationDegrees)` con `PREVIEW_ROTATION_DEGREES = 0`
+  (visor de foto, ya calibrado) y `MONITOR_ROTATION_DEGREES = -90` (monitor);
+  el ViewModel del visor pasa la que toca segun el modo. La W1 no gasta CPU
+  extra en girar.
+
+### Pendiente (verificar en campo)
+
+- VIEW RECORDING con la rotacion -90 aplicada: frames derechos a ~4 fps; Stop
+  desde el monitor cierra la pantalla y guarda el .mp4. Requiere WiFi en la W1
+  (el monitor viaja por HTTP igual que el visor de foto).
+
+---
+
+## 2026-07-12 — Fix: bodycam no conectaba en el Samsung A56 (faltaba BLUETOOTH_SCAN)
+
+### Hecho
+
+- **Diagnostico por logcat**: cada intento moria en `cancelDiscovery()` con `Need android.permission.BLUETOOTH_SCAN`. En el Redmi (Android 11) funcionaba porque ahi basta el `BLUETOOTH_ADMIN` legacy; en Android 12+ `cancelDiscovery()` exige `BLUETOOTH_SCAN` de runtime, que la app nunca declaraba ni pedia (el comentario del manifest "desde 12 basta CONNECT" era falso).
+- **Fix**:
+  - Manifest: `BLUETOOTH_SCAN` con `neverForLocation` (no usamos el escaneo para ubicar).
+  - `BodycamRepository`: constante publica `BLUETOOTH_RUNTIME_PERMISSIONS` (CONNECT + SCAN) y `hasBluetoothPermission()` ahora exige ambos.
+  - `AppScaffold` y `BodycamControllerScreen`: launcher cambiado a `RequestMultiplePermissions` pidiendo los dos a la vez (mismo grupo "Dispositivos cercanos": un solo dialogo).
+- APK instalado en el Samsung A56 (RZCY510MBBM).
+
+### Pendiente
+
+- Verificar en el Samsung: tocar el icono de la bodycam, aceptar "Dispositivos cercanos" y confirmar que conecta. Ojo: la W1 reporta `wifi=false` desde las 22:38 — el enlace BT no lo necesita, pero visor remoto y descarga de grabaciones si.
+
+---
+
 ## 2026-07-11 (4) — Foto remota: fix del PHOTO y visor remoto (viewfinder) por WiFi
 
 ### Hecho

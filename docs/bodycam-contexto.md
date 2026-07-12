@@ -162,8 +162,10 @@ Paquete `com.falconone.bodycamserver`, 13 archivos Kotlin:
 - `FileServerService` — NanoHTTPD en puerto **8080** ("servidor W1"):
   `GET /status`, `GET /recordings` (lista JSON, mas reciente primero),
   `GET /recordings/latest`, `GET /recordings/{filename}` (binario mp4/jpg),
-  `GET /preview` (ultimo frame JPEG del visor remoto; 404 si PREVIEW_START
-  no esta activo).
+  `GET /preview` (frame JPEG unico) y `GET /preview/stream` (MJPEG continuo).
+  Los endpoints de preview sirven la fuente viva que haya: el visor remoto
+  (PREVIEW_START) o, durante una grabacion, el monitor de RecordingActivity
+  (copia su TextureView a JPEG ~4 fps, 2026-07-12); 404 si no hay ninguna.
 - `HardwareController` — nodos sysfs del W1: IR, LED (aw2013), sensor de luz,
   motor IR-CUT dia/noche, GPS BeiDou. Escribe directo o via `sh -c echo`.
 - `Protocol.kt` — Cmd/Rsp/Ntf + `ButtonDebounce` (300 ms).

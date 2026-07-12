@@ -20,9 +20,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,14 +38,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
+import com.delta.aeria_nexus_prototype.ui.theme.RojoCritico
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 
 /**
  * Visor remoto de la bodycam a pantalla completa: muestra lo que enfoca su
- * camara (1-2 fps por WiFi) y un boton grande para capturar la foto con ese
- * encuadre. Pensado para dejar la bodycam fija en un punto y disparar desde
- * el telefono.
+ * camara por WiFi. En modo foto ofrece el boton de captura con ese encuadre;
+ * en modo grabacion es un monitor de lo que se esta grabando, con boton para
+ * detener la grabacion (y se cierra solo cuando esta termina).
  */
 @Composable
 fun BodycamViewfinderScreen(
@@ -51,6 +54,15 @@ fun BodycamViewfinderScreen(
     onClose: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val modoGrabacion = viewModel.mode == ViewfinderMode.RECORDING
+
+    // La grabacion puede pararla este boton, el fisico de la bodycam u otro
+    // agente: en cualquier caso el monitor ya no tiene nada que mostrar.
+    if (modoGrabacion) {
+        LaunchedEffect(uiState.recordingActive) {
+            if (!uiState.recordingActive) onClose()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -67,7 +79,11 @@ fun BodycamViewfinderScreen(
             )
         }
 
-        TopBar(onClose = onClose)
+        TopBar(
+            title = if (modoGrabacion) "RECORDING MONITOR" else "REMOTE VIEWFINDER",
+            showRecBadge = modoGrabacion,
+            onClose = onClose,
+        )
 
         when {
             uiState.mensajeError != null -> ErrorNotice(
@@ -94,13 +110,21 @@ fun BodycamViewfinderScreen(
                 CaptureFeedback(text = uiState.commandFeedback ?: "")
                 Spacer(Modifier.height(14.dp))
             }
-            CaptureButton(onClick = viewModel::capturePhoto)
+            if (modoGrabacion) {
+                StopRecordingButton(onClick = viewModel::stopRecording)
+            } else {
+                CaptureButton(onClick = viewModel::capturePhoto)
+            }
         }
     }
 }
 
 @Composable
-private fun TopBar(onClose: () -> Unit) {
+private fun TopBar(
+    title: String,
+    showRecBadge: Boolean,
+    onClose: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -124,7 +148,7 @@ private fun TopBar(onClose: () -> Unit) {
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            text = "REMOTE VIEWFINDER",
+            text = title,
             modifier = Modifier
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color.Black.copy(alpha = 0.5f))
@@ -133,6 +157,52 @@ private fun TopBar(onClose: () -> Unit) {
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp,
+        )
+        if (showRecBadge) {
+            Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(RojoCritico),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "REC",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                )
+            }
+        }
+    }
+}
+
+/** Detiene la grabacion de la bodycam desde el monitor. */
+@Composable
+private fun StopRecordingButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(76.dp)
+            .clip(CircleShape)
+            .background(RojoCritico)
+            .border(3.dp, Color.White, CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Stop,
+            contentDescription = "Detener grabacion",
+            tint = Color.White,
+            modifier = Modifier.size(34.dp),
         )
     }
 }

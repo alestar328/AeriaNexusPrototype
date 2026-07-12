@@ -18,11 +18,16 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
-    <!-- cancelDiscovery() exige ADMIN hasta Android 11; desde 12 basta CONNECT. -->
+    <!-- cancelDiscovery() exige ADMIN hasta Android 11 y SCAN desde Android 12.
+         neverForLocation: no usamos el escaneo para deducir ubicacion. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
