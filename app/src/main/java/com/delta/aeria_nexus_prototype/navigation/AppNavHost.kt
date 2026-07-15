@@ -11,6 +11,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
@@ -44,6 +45,9 @@ import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
 object Routes {
     const val OPERATIONS = "operations"
     const val MAP = "map"
+    // Variante con foco opcional: abre el mapa centrado en esa posicion
+    // (p. ej. la ubicacion de un SOS). Navegar a MAP a secas sigue valiendo.
+    const val MAP_WITH_FOCUS = "map?focusLat={focusLat}&focusLng={focusLng}"
     const val INCIDENTS = "incidents"
     const val PROFILE = "profile"
     const val INCIDENT_DETAIL = "incidents/{id}"
@@ -60,6 +64,7 @@ object Routes {
     const val BODYCAM_REC_MONITOR = "bodycam/recording"
 
     fun livestream(uid: Int) = "livestream/$uid"
+    fun mapFocusedAt(latitude: Double, longitude: Double) = "map?focusLat=$latitude&focusLng=$longitude"
     fun incidentDetail(id: String) = "incidents/$id"
     fun activeIncident(id: String) = "incidents/$id/active"
     fun draftReport(id: String) = "incidents/$id/report"
@@ -156,7 +161,13 @@ fun AppNavHost() {
             )
         }
 
-        composable(Routes.MAP) {
+        composable(
+            route = Routes.MAP_WITH_FOCUS,
+            arguments = listOf(
+                navArgument("focusLat") { defaultValue = "" },
+                navArgument("focusLng") { defaultValue = "" },
+            ),
+        ) { entrada ->
             MapScreen(
                 viewModel = viewModel {
                     MapViewModel(
@@ -166,6 +177,9 @@ fun AppNavHost() {
                     )
                 },
                 onTabSelected = onTabSelected,
+                onOpenLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
+                focusLatitude = entrada.arguments?.getString("focusLat")?.toDoubleOrNull(),
+                focusLongitude = entrada.arguments?.getString("focusLng")?.toDoubleOrNull(),
             )
         }
 
@@ -253,6 +267,11 @@ fun AppNavHost() {
             SosAlertViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
         },
         onAcceptLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
+        onOpenMap = { latitude, longitude ->
+            navController.navigate(Routes.mapFocusedAt(latitude, longitude)) {
+                popUpTo(Routes.OPERATIONS)
+            }
+        },
     )
 }
 

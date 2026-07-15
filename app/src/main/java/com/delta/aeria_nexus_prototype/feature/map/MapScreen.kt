@@ -66,6 +66,7 @@ import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
 import com.delta.aeria_nexus_prototype.ui.theme.DoradoAgente
 import com.delta.aeria_nexus_prototype.ui.theme.GrisSinSenal
+import com.delta.aeria_nexus_prototype.ui.theme.RojoCritico
 import com.delta.aeria_nexus_prototype.ui.theme.RojoSuave
 import com.delta.aeria_nexus_prototype.ui.theme.Superficie
 import com.delta.aeria_nexus_prototype.ui.theme.TextoPrincipal
@@ -99,11 +100,17 @@ private const val MAP_PITCH = 60.0
  * Mapa tactico (fase 1): posicion propia en tiempo real con puck pulsante,
  * boton de recentrado y panel de estado (bateria, GPS, satelites).
  * La fase 2 agrega los marcadores de otros agentes via Agora.
+ * [focusLatitude]/[focusLongitude] centran la camara en esa posicion al abrir
+ * (p. ej. la ubicacion de un SOS) en lugar de en la posicion propia.
+ * [onOpenLivestream] abre el livestream del agente en emergencia (por su uid).
  */
 @Composable
 fun MapScreen(
     viewModel: MapViewModel,
     onTabSelected: (MainTab) -> Unit,
+    onOpenLivestream: (Int) -> Unit,
+    focusLatitude: Double? = null,
+    focusLongitude: Double? = null,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -128,20 +135,27 @@ fun MapScreen(
         if (hasLocationPermission) viewModel.onLocationPermissionGranted()
     }
 
+    val focusPoint = if (focusLatitude != null && focusLongitude != null) {
+        Point.fromLngLat(focusLongitude, focusLatitude)
+    } else {
+        null
+    }
     val viewportState = rememberMapViewportState {
         setCameraOptions {
-            center(Point.fromLngLat(INITIAL_LNG, INITIAL_LAT))
+            center(focusPoint ?: Point.fromLngLat(INITIAL_LNG, INITIAL_LAT))
             zoom(MAP_ZOOM)
             pitch(MAP_PITCH)
         }
     }
 
     // Vuela la camara a la posicion propia una sola vez, en el primer fix.
-    var initialCameraDone by remember { mutableStateOf(false) }
+    // Con un foco pedido (ubicacion de un SOS) la camara ya esta ahi y el
+    // primer fix GPS no debe arrastrarla a la posicion propia.
+    var initialCameraDone by remember { mutableStateOf(focusPoint != null) }
     LaunchedEffect(uiState.gpsReady) {
         if (uiState.gpsReady && !initialCameraDone) {
             initialCameraDone = true
-            flyToOwnPosition(viewportState, uiState.longitude, uiState.latitude)
+            flyToPosition(viewportState, uiState.longitude, uiState.latitude)
         }
     }
 
@@ -171,16 +185,42 @@ fun MapScreen(
                 }
 
                 // Marcadores de los demas agentes de la red tactica (fase 2).
+                // allowOverlapWithPuck es obligatorio en todas las anotaciones:
+                // sin el, Mapbox OCULTA la anotacion cuando se solapa con el
+                // puck de la posicion propia (un companero a pocos metros
+                // desapareceria del mapa hasta hacer zoom).
                 uiState.remoteAgents.forEach { agente ->
                     key(agente.uid) {
                         ViewAnnotation(
                             options = viewAnnotationOptions {
                                 geometry(Point.fromLngLat(agente.longitude, agente.latitude))
                                 allowOverlap(true)
+                                allowOverlapWithPuck(true)
                                 annotationAnchor { anchor(ViewAnnotationAnchor.CENTER) }
                             },
                         ) {
                             RemoteAgentMarkerView(agente)
+                        }
+                    }
+                }
+
+                // SOS vigentes: tooltip rojo sobre la posicion de cada agente
+                // en emergencia. Persiste aunque el popup se haya descartado y
+                // tocarlo abre el livestream del emisor.
+                uiState.activeSos.forEach { sos ->
+                    key("sos-${sos.uid}") {
+                        ViewAnnotation(
+                            options = viewAnnotationOptions {
+                                geometry(Point.fromLngLat(sos.longitude, sos.latitude))
+                                allowOverlap(true)
+                                allowOverlapWithPuck(true)
+                                annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
+                            },
+                        ) {
+                            SosTooltip(
+                                sos = sos,
+                                onOpenLivestream = { onOpenLivestream(sos.uid) },
+                            )
                         }
                     }
                 }
@@ -195,6 +235,7 @@ fun MapScreen(
                             options = viewAnnotationOptions {
                                 geometry(Point.fromLngLat(corte.longitude, corte.latitude))
                                 allowOverlap(true)
+                                allowOverlapWithPuck(true)
                                 annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
                             },
                         ) {
@@ -221,13 +262,35 @@ fun MapScreen(
                 )
             }
 
+            // Banners de SOS activos: fijos en pantalla, visibles sin importar
+            // donde este la camara. Tocar el banner vuela a la posicion del
+            // emisor; VIEW LIVE abre su livestream directo.
+            if (uiState.activeSos.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    uiState.activeSos.forEach { sos ->
+                        SosBanner(
+                            sos = sos,
+                            onLocate = {
+                                flyToPosition(viewportState, sos.longitude, sos.latitude)
+                            },
+                            onOpenLivestream = { onOpenLivestream(sos.uid) },
+                        )
+                    }
+                }
+            }
+
             RecenterButton(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = 140.dp),
                 enabled = uiState.gpsReady,
                 onClick = {
-                    flyToOwnPosition(viewportState, uiState.longitude, uiState.latitude)
+                    flyToPosition(viewportState, uiState.longitude, uiState.latitude)
                 },
             )
 
@@ -241,8 +304,8 @@ fun MapScreen(
     }
 }
 
-/** Anima la camara sobre la posicion propia, con la misma curva que Flutter. */
-private fun flyToOwnPosition(
+/** Anima la camara hasta una posicion, con la misma curva que Flutter. */
+private fun flyToPosition(
     viewportState: com.mapbox.maps.extension.compose.animation.viewport.MapViewportState,
     longitude: Double,
     latitude: Double,
@@ -357,6 +420,132 @@ private fun RemoteAgentMarkerView(agente: RemoteAgentMarker) {
                 modifier = Modifier
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 4.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Banner de SOS activo fijo en lo alto del mapa: se ve siempre, sin importar
+ * donde este la camara ni el nivel de zoom. Tocar el cuerpo vuela la camara a
+ * la posicion del emisor; el boton VIEW LIVE abre su livestream directo.
+ */
+@Composable
+private fun SosBanner(
+    sos: SosMarker,
+    onLocate: () -> Unit,
+    onOpenLivestream: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(RojoCritico)
+            .clickable(onClick = onLocate)
+            .padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Warning,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "SOS — Agent ${sos.officer}",
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "Since ${sos.startedTimeLabel} — tap to locate",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 11.sp,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color.White.copy(alpha = 0.22f))
+                .clickable(onClick = onOpenLivestream)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
+            Text(
+                text = "VIEW LIVE",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 1.sp,
+            )
+        }
+    }
+}
+
+/**
+ * Tooltip de SOS vigente sobre la posicion del agente en emergencia. Toda la
+ * tarjeta es tocable y abre el livestream del emisor; el punto pulsante en la
+ * coordenada distingue la emergencia activa de un simple companero en el mapa.
+ */
+@Composable
+private fun SosTooltip(sos: SosMarker, onOpenLivestream: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Superficie.copy(alpha = 0.95f))
+                .border(1.dp, RojoCritico, RoundedCornerShape(8.dp))
+                .clickable(onClick = onOpenLivestream)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = "SOS activo, tocar para ver el livestream",
+                    tint = RojoCritico,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "SOS — Agent ${sos.officer}",
+                    color = RojoCritico,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "Since ${sos.startedTimeLabel} — tap to view live",
+                color = TextoSecundario,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        // Punto pulsante sobre la posicion del emisor; el anchor BOTTOM de la
+        // anotacion apoya este extremo justo en la coordenada.
+        Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+            val pulso by rememberInfiniteTransition(label = "pulsoSos").animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1_000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+                label = "pulsoSos",
+            )
+            Box(
+                modifier = Modifier
+                    .size(12.dp + 20.dp * pulso)
+                    .background(RojoCritico.copy(alpha = (1f - pulso) * 0.6f), CircleShape),
+            )
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .background(RojoCritico, CircleShape)
+                    .border(2.dp, Color.White, CircleShape),
             )
         }
     }

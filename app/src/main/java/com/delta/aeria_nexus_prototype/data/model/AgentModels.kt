@@ -34,3 +34,16 @@ data class SosCancel(
     val latitude: Double?,
     val longitude: Double?,
 )
+
+/**
+ * Ficha de identificacion de un agente. Se muestra sobre el livestream del
+ * SOS para que quien mira sepa a quien esta viendo; el tipo de sangre es
+ * critico si hay que asistirlo herido.
+ */
+data class AgentIdCard(
+    val firstName: String,
+    val lastName: String,
+    val badgeNumber: String,
+    val rank: String,
+    val bloodType: String,
+)

@@ -1,10 +1,6 @@
 package com.delta.aeria_nexus_prototype.ui.components
 
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -22,7 +18,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.Vrpano
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -39,13 +34,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.data.AppContainer
-import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -104,16 +100,7 @@ private fun StatusBar(isRecording: Boolean) {
 
     // La barra de estado es global (no pertenece a ninguna pantalla), por eso
     // observa el repositorio directamente en lugar de pasar por un ViewModel.
-    val bodycam = AppContainer.bodycamRepository
-    val bodycamState by bodycam.state.collectAsStateWithLifecycle()
-
-    // Los permisos Bluetooth son de runtime desde Android 12; se piden al tocar
-    // el icono de la bodycam y, si se conceden, se conecta en el mismo gesto.
-    val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions(),
-    ) { resultados ->
-        if (resultados.values.all { it }) bodycam.connect()
-    }
+    val bodycamState by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
 
     Row(
         modifier = Modifier
@@ -133,30 +120,21 @@ private fun StatusBar(isRecording: Boolean) {
         Spacer(Modifier.width(12.dp))
         IndicatorDot(color = VerdeOk, label = "ONLINE")
         Spacer(Modifier.weight(1f))
-        // Falcon Camera (bodycam): tocar conecta o desconecta el Bluetooth.
+        // Falcon Camera (bodycam): SOLO indicador del estado del enlace; la
+        // conexion se maneja desde la pantalla BODYCAM CONTROL.
         DeviceIndicator(
             icon = Icons.Filled.Videocam,
             description = "Falcon Camera (bodycam)",
             tint = bodycamStateColor(bodycamState),
-            onClick = {
-                when {
-                    // Conectado o reintentando: el toque apaga el enlace.
-                    bodycamState == BodycamState.CONNECTED || bodycamState == BodycamState.CONNECTING ->
-                        bodycam.disconnect()
-                    !bodycam.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                        bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
-                    else -> bodycam.connect()
-                }
-            },
         )
         Spacer(Modifier.width(12.dp))
         // Falcon Lens (gafas): integracion pendiente, siempre desconectado.
-        // El set de Material no trae gafas; el visor Vrpano es lo mas parecido.
+        // El set de Material de Compose no trae gafas: el icono es el vector
+        // eyeglasses_2 de Material Symbols importado en drawable.
         DeviceIndicator(
-            icon = Icons.Filled.Vrpano,
+            icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
             description = "Falcon Lens (gafas)",
             tint = TextoTerciario,
-            onClick = null,
         )
         if (isRecording) {
             Spacer(Modifier.width(12.dp))
@@ -178,14 +156,12 @@ private fun DeviceIndicator(
     icon: ImageVector,
     description: String,
     tint: Color,
-    onClick: (() -> Unit)?,
 ) {
-    val base = Modifier.size(20.dp)
     Icon(
         icon,
         contentDescription = description,
         tint = tint,
-        modifier = if (onClick != null) base.clickable(onClick = onClick) else base,
+        modifier = Modifier.size(20.dp),
     )
 }
 

@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
 import com.delta.aeria_nexus_prototype.ui.theme.RojoCritico
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import java.time.Instant
@@ -76,6 +77,19 @@ fun LivestreamScreen(
         )
 
         TopBar(isBroadcaster = viewModel.isBroadcaster, onClose = onClose)
+
+        viewModel.agent?.let { agente ->
+            AgentInfoCard(
+                agent = agente,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    // Sobre el emisor la tarjeta sube para no tapar CANCEL SOS.
+                    .padding(
+                        start = 16.dp,
+                        bottom = if (viewModel.isBroadcaster) 128.dp else 32.dp,
+                    ),
+            )
+        }
 
         if (viewModel.isBroadcaster) {
             CancelSosButton(
@@ -158,6 +172,46 @@ private fun LiveBadge(text: String) {
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp,
+        )
+    }
+}
+
+/**
+ * Ficha del agente que se ve en el video: nombre, placa, rango y tipo de
+ * sangre, este ultimo critico si hay que asistirlo herido.
+ */
+@Composable
+private fun AgentInfoCard(agent: AgentIdCard, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black.copy(alpha = 0.6f))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = "${agent.firstName} ${agent.lastName}".uppercase(),
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+        )
+        Spacer(Modifier.height(6.dp))
+        AgentDataRow(label = "Badge", value = agent.badgeNumber)
+        AgentDataRow(label = "Rank", value = agent.rank)
+        AgentDataRow(label = "Blood type", value = agent.bloodType)
+    }
+}
+
+@Composable
+private fun AgentDataRow(label: String, value: String) {
+    Row {
+        Text(text = "$label:", color = TextoSecundario, fontSize = 13.sp)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = value,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }

@@ -4,6 +4,8 @@ import android.view.TextureView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
+import com.delta.aeria_nexus_prototype.data.OfficerSampleData
+import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +33,15 @@ class LivestreamViewModel(
 ) : ViewModel() {
 
     val isBroadcaster: Boolean = watchUid == OWN_CAMERA_UID
+
+    // Ficha del agente que sale en pantalla: la propia al emitir, la del
+    // emisor del SOS al mirar. Null si la placa no esta en el padron (por
+    // ejemplo el stream de la bodycam, que no tiene agente asignado).
+    val agent: AgentIdCard? = if (isBroadcaster) {
+        OfficerSampleData.findAgent(OfficerSampleData.profile.officerNum)
+    } else {
+        agoraRepository.sosOfficer(watchUid)?.let(OfficerSampleData::findAgent)
+    }
 
     // El estado inicial toma el valor real del SOS: si arrancara en false, la
     // pantalla del emisor se cerraria sola antes de recibir el primer collect.

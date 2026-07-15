@@ -1,5 +1,6 @@
 package com.delta.aeria_nexus_prototype.data
 
+import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
 import com.delta.aeria_nexus_prototype.data.model.EvidenceClass
 import com.delta.aeria_nexus_prototype.data.model.EvidenceRecord
 import com.delta.aeria_nexus_prototype.data.model.EvidenceType
@@ -32,6 +33,29 @@ object OfficerSampleData {
         flConnected = true,
         appVersion = "v1.0.0",
     )
+
+    // Ficha de cada agente conocido, por numero de placa. El SOS solo viaja
+    // con la placa del emisor; aqui se resuelve el resto de sus datos. Padron
+    // estatico hasta que exista login contra un backend real.
+    private val agentsByBadge = mapOf(
+        "P-4471" to AgentIdCard(
+            firstName = "Carlos",
+            lastName = "Mendez",
+            badgeNumber = "P-4471",
+            rank = "Patrol Officer",
+            bloodType = "O+",
+        ),
+        "P-3318" to AgentIdCard(
+            firstName = "Lucia",
+            lastName = "Torres",
+            badgeNumber = "P-3318",
+            rank = "Patrol Officer",
+            bloodType = "A-",
+        ),
+    )
+
+    /** Ficha del agente con esa placa; null si no esta en el padron. */
+    fun findAgent(badgeNumber: String): AgentIdCard? = agentsByBadge[badgeNumber]
 
     val incidents = listOf(
         OfficerIncident(

@@ -6,6 +6,43 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-07-15 (2) — SOS persistente en el mapa: marcador rojo tocable mientras dure la emergencia
+
+### Hecho
+
+- **`AgoraRepository`**: StateFlow nuevo `activeSosAlerts` (Map uid -> SosAlert). Un SOS entra al recibirse por el data stream y SOLO sale con su `emergency_cancel`: descartar el popup no lo borra. Los reenvios del heartbeat refrescan el mismo valor; un SOS nuevo del mismo uid lo reemplaza. El emisor nunca ve su propio marcador (Agora no devuelve mensajes propios).
+- **`MapViewModel`**: `SosMarker` (uid, officer, posicion, hora de inicio) en `MapUiState.activeSos`. Se combina `activeSosAlerts` con `remoteAgents` para que el marcador siga la posicion viva del emisor (sigue compartiendo GPS durante el SOS); sin posicion viva se usa la coordenada de la alerta, y sin ninguna no se pinta (caso bodycam, sin GPS).
+- **`MapScreen`**: `SosTooltip` como ViewAnnotation anclada BOTTOM — tarjeta con borde rojo critico, "SOS — Agent P-4471", "Since HH:mm:ss — tap to view live" y punto rojo PULSANTE en la coordenada (distingue emergencia activa de un companero normal). TODA la tarjeta es tocable y abre `livestream/{uid}` del emisor (param nuevo `onOpenLivestream` cableado en AppNavHost). Si el emisor ya no publica video, la pantalla muestra su aviso de SIGNAL CUT normal.
+- Exclusion mutua con los avisos de corte ya existente: `emergency` borra el signal cut del uid y `emergency_cancel` borra el SOS activo y fija el corte.
+- **Ajuste del mismo dia — banner fijo `SosBanner`**: el tooltip anclado a la coordenada queda fuera de pantalla si la camara esta lejos (habia que buscarlo con el zoom). Ahora cada SOS activo pinta ademas un banner rojo fijo en lo alto del mapa, visible siempre: tocar el cuerpo vuela la camara a la posicion del emisor (`flyToOwnPosition` renombrada a `flyToPosition`, reutilizada) y el boton VIEW LIVE abre el livestream directo. El tooltip pulsante en la coordenada se conserva.
+- **Ajuste del mismo dia — `allowOverlapWithPuck(true)` en TODAS las ViewAnnotations** (marcadores de agentes, tooltip SOS y tooltip de signal cut): en Mapbox v11 el default es false y la anotacion se OCULTA cuando se solapa con el puck de la posicion propia — un agente en emergencia a pocos metros desaparecia del mapa hasta hacer zoom suficiente para separarlos. Este era el motivo de que el tooltip SOS "solo se viera con zoom" con los telefonos juntos.
+- **Icono de gafas real en el header**: el usuario importo el vector eyeglasses_2 de Material Symbols como `drawable/icon_eyeglasses.xml` (el set de Material de Compose no trae gafas; hasta ahora se usaba Vrpano como sustituto). Se ajusto el tamano intrinseco 960dp -> 24dp y el indicador Falcon Lens lo carga con `ImageVector.vectorResource`.
+- Compila limpio (assembleDebug). Sin dispositivos por adb: APK sin instalar.
+
+### Pendiente (verificar con dos telefonos)
+
+- SOS en A -> en B descartar el popup -> abrir Map: banner rojo arriba SIEMPRE visible; tocarlo vuela a la posicion de A (tooltip rojo pulsante que le sigue al moverse); VIEW LIVE o tocar el tooltip abren el livestream de A -> cancelar en A: banner y tooltip desaparecen y aparece el aviso de "Signal cut".
+
+---
+
+## 2026-07-15 — Bloqueo de capturas, SOS al mapa, ficha del agente en el livestream e icono de bodycam solo indicador
+
+### Hecho
+
+- **Capturas de pantalla bloqueadas en toda la app**: `FLAG_SECURE` en `MainActivity.onCreate` (antes de `setContent`). Bloquea screenshot y grabacion de pantalla y oculta la vista previa en apps recientes. Basta la ventana de la actividad: con una ventana segura visible, el sistema bloquea la captura aunque los dialogos de Compose abran ventana propia.
+- **Popup SOS con icono de mapa**: en la fila "Location" de la alerta (`SosAlertOverlay`) aparece un icono de mapa (solo si la alerta trae coordenadas). Al tocarlo se cierra la alerta (para la sirena) y se navega al mapa tactico centrado en la posicion del emisor. Ruta `MAP_WITH_FOCUS` (`map?focusLat={..}&focusLng={..}`, args opcionales con default: navegar a `map` a secas sigue funcionando); `MapScreen` gana `focusLatitude/focusLongitude` — con foco la camara arranca ahi y el primer fix GPS NO la arrastra a la posicion propia (`initialCameraDone` nace true).
+- **Ficha del agente en el livestream del SOS**: tarjeta sobre el video (abajo-izquierda; sobre el emisor sube para no tapar CANCEL SOS) con nombre y apellido, placa, rango y tipo de sangre. Datos: modelo nuevo `AgentIdCard` + padron estatico `agentsByBadge` en `OfficerSampleData` (P-4471 Carlos Mendez O+, P-3318 Lucia Torres A-; estatico hasta que exista login). El SOS solo viaja con la placa: `AgoraRepository` guarda `_sosOfficers` (uid -> placa, alimentado por los mensajes `emergency`) y `LivestreamViewModel` resuelve la ficha (la propia en modo emisor, la del emisor del SOS en modo receptor). El stream de la bodycam (officer "BODYCAM") no esta en el padron: sin tarjeta, comportamiento esperado.
+- **Icono de bodycam del topbar = solo indicador**: `AppScaffold` ya no conecta/desconecta al tocarlo (se quitaron el clickable y el launcher de permisos); conserva el color por estado (gris/ambar/verde/rojo). La conexion se maneja desde BODYCAM CONTROL, que ya tenia su propio flujo con permisos.
+- Compila limpio (assembleDebug). Sin dispositivos por adb al cierre: APK sin instalar.
+
+### Pendiente (verificar en dispositivo)
+
+- Screenshot bloqueado en varias pantallas (incluido el popup SOS abierto).
+- Con dos telefonos: SOS en A -> en B tocar el icono de mapa del popup -> mapa centrado en A (marcador dorado ahi); "Accept & view live" -> tarjeta con Carlos Mendez / P-4471 / Patrol Officer / O+.
+- Icono de bodycam del topbar ya no reacciona al toque y sigue cambiando de color al conectar desde BODYCAM CONTROL.
+
+---
+
 ## 2026-07-12 (2) — Monitor de grabacion: ver en el movil lo que la bodycam graba
 
 ### Hecho

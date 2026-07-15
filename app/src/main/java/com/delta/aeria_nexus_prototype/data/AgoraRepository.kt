@@ -110,6 +110,20 @@ class AgoraRepository(
     private val _sosSignalCuts = MutableStateFlow<Map<Int, SosCancel>>(emptyMap())
     val sosSignalCuts: StateFlow<Map<Int, SosCancel>> = _sosSignalCuts.asStateFlow()
 
+    // SOS vigentes de otros agentes, por uid del emisor. Un SOS entra al
+    // recibirse y solo sale con su cancelacion: aunque el receptor descarte el
+    // popup, el mapa sigue mostrando al agente en emergencia mientras dure.
+    private val _activeSosAlerts = MutableStateFlow<Map<Int, SosAlert>>(emptyMap())
+    val activeSosAlerts: StateFlow<Map<Int, SosAlert>> = _activeSosAlerts.asStateFlow()
+
+    // Placa del oficial que emitio el SOS de cada uid. Se conserva aunque la
+    // emergencia termine: la pantalla de livestream la consulta para mostrar
+    // la ficha del agente que se esta viendo.
+    private val _sosOfficers = MutableStateFlow<Map<Int, String>>(emptyMap())
+
+    /** Placa del oficial detras del SOS del agente [uid], si llego en la alerta. */
+    fun sosOfficer(uid: Int): String? = _sosOfficers.value[uid]
+
     private val eventHandler = object : IRtcEngineEventHandler() {
 
         override fun onJoinChannelSuccess(channel: String, uid: Int, elapsed: Int) {
@@ -497,21 +511,24 @@ class AgoraRepository(
                 // Un SOS nuevo del mismo agente invalida su aviso de corte
                 // anterior: la emergencia vigente es la que importa.
                 _sosSignalCuts.update { it - remoteUid }
+                _sosOfficers.update { it + (remoteUid to mensaje.optString("officer")) }
                 val startedAt = mensaje.optLong("ts")
                 val sessionKey = "$remoteUid@$startedAt"
+                val alerta = SosAlert(
+                    sessionKey = sessionKey,
+                    officer = mensaje.optString("officer"),
+                    uid = remoteUid,
+                    startedAtMillis = startedAt,
+                    latitude = mensaje.optDoubleOrNull("lat"),
+                    longitude = mensaje.optDoubleOrNull("lng"),
+                )
+                // El SOS queda fijado para el mapa mientras no se cancele; los
+                // reenvios del heartbeat solo refrescan el mismo valor.
+                _activeSosAlerts.update { it + (remoteUid to alerta) }
                 // Solo la primera vez que se ve una sesion se alerta al usuario;
                 // los reenvios del heartbeat de esa misma sesion se ignoran.
                 if (seenSosKeys.add(sessionKey)) {
-                    _incomingSos.tryEmit(
-                        SosAlert(
-                            sessionKey = sessionKey,
-                            officer = mensaje.optString("officer"),
-                            uid = remoteUid,
-                            startedAtMillis = startedAt,
-                            latitude = mensaje.optDoubleOrNull("lat"),
-                            longitude = mensaje.optDoubleOrNull("lng"),
-                        ),
-                    )
+                    _incomingSos.tryEmit(alerta)
                 }
             }
 
@@ -523,6 +540,7 @@ class AgoraRepository(
                     latitude = mensaje.optDoubleOrNull("lat"),
                     longitude = mensaje.optDoubleOrNull("lng"),
                 )
+                _activeSosAlerts.update { it - remoteUid }
                 _incomingSosCancel.tryEmit(cancelacion)
                 _sosSignalCuts.update { it + (remoteUid to cancelacion) }
             }

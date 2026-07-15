@@ -1,14 +1,18 @@
 package com.delta.aeria_nexus_prototype.feature.sos
 
 import android.media.MediaPlayer
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -21,6 +25,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -29,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
+import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import java.time.Instant
 import java.time.ZoneId
@@ -42,11 +48,13 @@ private val RojoAlerta = Color(0xFFE53935)
  * Capa global de alertas SOS: se monta una sola vez sobre el NavHost para que
  * la emergencia de otro agente aparezca sin importar la pantalla actual.
  * [onAcceptLivestream] abre el livestream del agente emisor (por su uid).
+ * [onOpenMap] lleva al mapa tactico centrado en la posicion de la emergencia.
  */
 @Composable
 fun SosAlertOverlay(
     viewModel: SosAlertViewModel,
     onAcceptLivestream: (Int) -> Unit,
+    onOpenMap: (latitude: Double, longitude: Double) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -81,11 +89,37 @@ fun SosAlertOverlay(
                         color = TextoSecundario,
                         fontSize = 13.sp,
                     )
-                    Text(
-                        text = "Location: ${formatCoords(alerta.latitude, alerta.longitude)}",
-                        color = TextoSecundario,
-                        fontSize = 13.sp,
-                    )
+                    val latitud = alerta.latitude
+                    val longitud = alerta.longitude
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Location: ${formatCoords(latitud, longitud)}",
+                            color = TextoSecundario,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (latitud != null && longitud != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        // Cerrar la alerta detiene la sirena
+                                        // antes de saltar al mapa tactico.
+                                        viewModel.dismissAlert()
+                                        onOpenMap(latitud, longitud)
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Filled.Map,
+                                    contentDescription = "Ver ubicacion en el mapa",
+                                    tint = AzulClaro,
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
