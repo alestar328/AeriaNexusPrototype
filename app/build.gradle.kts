@@ -1,3 +1,5 @@
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Properties
 
 plugins {
@@ -48,6 +50,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Sufijo con fecha/hora para distinguir builds debug entre si cuando
+            // se comparten como APK suelto (ej. a ciberseguridad para pruebas):
+            // version.properties no sube en debug, asi que sin esto todos los
+            // debug se verian igual (1.0).
+            versionNameSuffix = "-debug-" + SimpleDateFormat("yyyyMMdd-HHmm").format(Date())
+        }
         release {
             // Minify y shrinkResources reducen el peso del APK y eliminan
             // los iconos de material-icons-extended que no se usan.
