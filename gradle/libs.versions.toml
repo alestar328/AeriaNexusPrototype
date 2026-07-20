@@ -12,6 +12,9 @@ navigationCompose = "2.8.9"
 mapboxMaps = "11.8.0"
 playServicesLocation = "21.3.0"
 agora = "4.5.2"
+room = "2.7.2"
+# La version de KSP va atada a la de Kotlin (prefijo 2.0.21): subir ambas juntas.
+ksp = "2.0.21-1.0.28"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -37,9 +40,14 @@ mapbox-maps-compose = { group = "com.mapbox.extension", name = "maps-compose", v
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 # full-sdk: necesario para el livestream del SOS (video). Mismo SDK nativo que la app Flutter.
 agora-full-sdk = { group = "io.agora.rtc", name = "full-sdk", version.ref = "agora" }
+# Room: base de datos local para que los incidents sobrevivan al cierre de la app.
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 

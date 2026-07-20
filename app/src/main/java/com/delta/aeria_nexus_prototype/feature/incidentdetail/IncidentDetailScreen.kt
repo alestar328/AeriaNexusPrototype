@@ -55,6 +55,7 @@ import com.delta.aeria_nexus_prototype.data.model.TimelineEntry
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntryType
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
+import com.delta.aeria_nexus_prototype.ui.components.EvidenceMediaPreview
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.components.StatusBadge
@@ -334,6 +335,14 @@ private fun EvidenceCard(evidence: EvidenceRecord) {
                         Text(text = "Sealed", color = VerdeOk, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
+            }
+            // Prueba visible: foto o video capturado con el telefono.
+            if (evidence.mediaUri != null) {
+                EvidenceMediaPreview(
+                    mediaUri = evidence.mediaUri,
+                    type = evidence.type,
+                    modifier = Modifier.padding(top = 10.dp),
+                )
             }
             Row(
                 modifier = Modifier

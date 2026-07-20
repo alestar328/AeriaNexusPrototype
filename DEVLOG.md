@@ -6,6 +6,43 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-07-17 (2) — Fotos derechas en el visor y los incidents ya sobreviven al cierre de la app (Room)
+
+### Hecho
+
+- **Fotos giradas 90 grados en Incidents**: `BitmapFactory` ignora la etiqueta de orientacion EXIF que graba la camara. `MediaPreview.kt` gana `aplicarOrientacionExif`: lee la etiqueta con `ExifInterface` del framework (sin dependencia nueva) y rota el bitmap (90/180/270). Aplica al visor a pantalla completa y a las miniaturas pre-API 29 (en 29+ `loadThumbnail` de MediaStore ya orienta bien).
+- **Persistencia con Room** (el usuario eligio Room sobre JSON local): los incidents cerrados desaparecian al matar la app porque solo vivian en un StateFlow.
+  - Dependencias: `room-runtime` + `room-ktx` 2.7.2 y plugin KSP `2.0.21-1.0.28` (atado a la version de Kotlin: subir ambos juntos), todo via catalogo.
+  - `data/local/` nuevo: `IncidentEntities.kt` (tablas `incidents`, `timeline_entries`, `evidence_records` con FK CASCADE y columna `position` porque @Relation no garantiza orden; enums como texto, conversion automatica de Room; mappers a/desde dominio), `IncidentDao.kt` (`getAll` ordenado por `createdAtMillis` DESC y `save` transaccional del incident completo) y `IncidentDatabase.kt` (`aeria_nexus.db`, version 1).
+  - `IncidentRepository`: recibe el DAO por constructor (AppContainer lo crea en `init`, ahora con lateinit). Al arrancar carga los guardados y los antepone a los datos de ejemplo; `endActiveIncident()` ademas de anteponer al StateFlow guarda en Room (scope propio con Dispatchers.IO). Los datos de ejemplo NUNCA se persisten.
+  - Pendiente para produccion (documentado en `IncidentDatabase`): la BD va sin cifrar; migrar a SQLCipher o equivalente antes de un despliegue real (regla de datos sensibles).
+- Compila limpio (assembleDebug). APK sin instalar en dispositivo.
+
+### Pendiente (verificar en dispositivo)
+
+- Foto de evidencia en vertical se ve derecha en miniatura y a pantalla completa.
+- NEW INCIDENT -> foto -> END INCIDENT -> matar la app -> reabrir -> el incident sigue primero en Incidents con su evidencia y timeline.
+
+---
+
+## 2026-07-17 — Los incidentes cerrados llegan a la pestana Incidents con sus fotos y videos visibles
+
+### Hecho
+
+- **Bug reportado**: las fotos/videos capturados con el telefono se guardaban en el album localIncidents (visibles en galeria) pero el incidente nunca aparecia en la pestana Incidents y el detalle no mostraba los archivos.
+- **`IncidentRepository`**: `officerIncidents` paso de List estatica a StateFlow (datos de ejemplo + incidentes cerrados en la sesion). `endActiveIncident()` ya no descarta el incidente activo: lo convierte a `OfficerIncident` (fecha dd/MM/yyyy y hora del inicio real, duracion en minutos, agente del perfil, status DRAFT, priority MEDIUM, sync LOCAL_ONLY, typeCode "FIELD") conservando evidencia y timeline completos, y lo antepone a la lista.
+- **`IncidentListViewModel`**: observa el StateFlow, asi el incidente recien cerrado aparece al entrar a la pestana (la navegacion de "End incident" ya llevaba ahi).
+- **`ui/components/MediaPreview.kt`** (nuevo): `EvidenceMediaPreview` para la evidencia con `mediaUri` — miniatura real (160.dp, decodificada en IO con `loadThumbnail` de MediaStore en API 29+; fallback BitmapFactory/MediaMetadataRetriever para menos) e icono de imagen rota si el archivo se borro de la galeria. Foto: se abre a pantalla completa en un Dialog dentro de la app (decodificada con inSampleSize, tope 2048 px). Video: overlay de play y se abre con el reproductor del sistema via ACTION_VIEW + FLAG_GRANT_READ_URI_PERMISSION (sin ExoPlayer, regla de app ligera). Audio: fila "PLAY AUDIO NOTE" que abre el reproductor del sistema.
+- **`IncidentDetailScreen`**: cada `EvidenceCard` con `mediaUri` muestra la vista previa encima del hash.
+- Compila limpio (assembleDebug). Sin dispositivos por adb: APK sin instalar.
+
+### Pendiente (verificar en dispositivo)
+
+- NEW INCIDENT → foto + video con el telefono → END INCIDENT → el incidente aparece primero en Incidents como Draft con su contador de evidencia → abrirlo → miniaturas reales; tocar la foto la abre a pantalla completa y el video se reproduce en el reproductor del sistema.
+- Nota: la lista sigue viviendo solo en memoria — al matar la app los incidentes cerrados desaparecen de la pestana (los archivos siguen en la galeria). Persistirlos (Room o JSON local) queda como siguiente paso si se quiere conservar entre sesiones.
+
+---
+
 ## 2026-07-15 (2) — SOS persistente en el mapa: marcador rojo tocable mientras dure la emergencia
 
 ### Hecho
