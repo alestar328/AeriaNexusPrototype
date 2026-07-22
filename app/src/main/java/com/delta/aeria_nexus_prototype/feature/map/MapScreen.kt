@@ -636,11 +636,11 @@ private fun StatusPanel(uiState: MapUiState, modifier: Modifier = Modifier) {
                 text = "${uiState.batteryPercent}%",
                 tint = if (uiState.batteryPercent <= 15) RojoSuave else TextoPrincipal,
             )
-            StatusItem(
+            /**StatusItem(
                 icon = Icons.Filled.SatelliteAlt,
                 text = "${uiState.satellites}",
                 tint = TextoPrincipal,
-            )
+            )**/
             // Agentes en el canal; verde cuando la red tactica esta conectada.
             StatusItem(
                 icon = Icons.Filled.Groups,

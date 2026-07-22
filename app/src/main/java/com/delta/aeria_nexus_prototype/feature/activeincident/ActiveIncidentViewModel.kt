@@ -104,20 +104,17 @@ class ActiveIncidentViewModel(
         val duracion = "${segundos / 60}m ${segundos % 60}s"
         repositorio.updateActiveIncident { it.copy(isRecording = false) }
         addTimelineEntry("Recording ended — $duracion captured", TimelineEntryType.RECORDING_END)
-        addEvidence(
-            EvidenceRecord(
-                id = UUID.randomUUID().toString(),
-                type = EvidenceType.VIDEO,
-                label = "Video recording — ${activeDevices()}",
-                time = IncidentRepository.nowTime(),
-                duration = duracion,
-                device = activeDevices(),
-                classification = EvidenceClass.EVIDENCE,
-                hash = IncidentRepository.fakeHash(),
-                sync = SyncState.LOCAL_ONLY,
-            ),
+        val video = EvidenceRecord(
+            id = UUID.randomUUID().toString(),
+            type = EvidenceType.VIDEO,
+            label = "Video recording — ${activeDevices()}",
+            time = IncidentRepository.nowTime(),
+            duration = duracion,
+            device = activeDevices(),
+            hash = IncidentRepository.fakeHash(),
+            sync = SyncState.LOCAL_ONLY,
         )
-        _uiState.update { it.copy(recordingSeconds = 0) }
+        _uiState.update { it.copy(recordingSeconds = 0, pendingEvidence = video) }
     }
 
     /** Foto con la bodycam conectada: el comando BT dispara su camara. */
@@ -172,20 +169,18 @@ class ActiveIncidentViewModel(
             "Video recorded — ${duracion ?: "saved"} (phone camera)",
             TimelineEntryType.RECORDING_END,
         )
-        addEvidence(
-            EvidenceRecord(
-                id = UUID.randomUUID().toString(),
-                type = EvidenceType.VIDEO,
-                label = "Video recording — ${activeDevices()}",
-                time = IncidentRepository.nowTime(),
-                duration = duracion,
-                device = activeDevices(),
-                classification = EvidenceClass.EVIDENCE,
-                hash = IncidentRepository.fakeHash(),
-                sync = SyncState.LOCAL_ONLY,
-                mediaUri = destino.uri.toString(),
-            ),
+        val video = EvidenceRecord(
+            id = UUID.randomUUID().toString(),
+            type = EvidenceType.VIDEO,
+            label = "Video recording — ${activeDevices()}",
+            time = IncidentRepository.nowTime(),
+            duration = duracion,
+            device = activeDevices(),
+            hash = IncidentRepository.fakeHash(),
+            sync = SyncState.LOCAL_ONLY,
+            mediaUri = destino.uri.toString(),
         )
+        _uiState.update { it.copy(pendingEvidence = video) }
     }
 
     /** Crea la evidencia de foto pendiente y abre la hoja de clasificacion. */
@@ -248,14 +243,15 @@ class ActiveIncidentViewModel(
         _uiState.update { it.copy(showWitnessQr = false) }
     }
 
-    /** Guarda la foto pendiente con la clasificacion elegida. */
+    /** Guarda la evidencia pendiente (foto o video) con la clasificacion elegida. */
     fun classifyPendingEvidence(clase: EvidenceClass) {
         val pendiente = _uiState.value.pendingEvidence ?: return
-        addEvidence(pendiente.copy(classification = clase, label = "Photo — ${clase.label}"))
+        val prefijo = if (pendiente.type == EvidenceType.VIDEO) "Video" else "Photo"
+        addEvidence(pendiente.copy(classification = clase, label = "$prefijo — ${clase.label}"))
         _uiState.update { it.copy(pendingEvidence = null) }
     }
 
-    /** Guarda la foto pendiente sin clasificar. */
+    /** Guarda la evidencia pendiente sin clasificar. */
     fun skipClassification() {
         _uiState.value.pendingEvidence?.let { addEvidence(it) }
         _uiState.update { it.copy(pendingEvidence = null) }

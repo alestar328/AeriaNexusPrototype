@@ -124,7 +124,7 @@ fun OperationsScreen(
                         modifier = Modifier.weight(1f),
                     )
                     BodycamControlButton(compacto = compacto, onClick = onOpenBodycamControl)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                 /**   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         // Botones de radio y llamada: decorativos en el prototipo.
                         RadioActionButton(
                             icon = Icons.Filled.Mic,
@@ -138,7 +138,7 @@ fun OperationsScreen(
                             compacto = compacto,
                             modifier = Modifier.weight(1f),
                         )
-                    }
+                    }**/
                 }
             }
 

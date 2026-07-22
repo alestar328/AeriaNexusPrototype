@@ -15,10 +15,13 @@ class MainActivity : ComponentActivity() {
         // La app muestra evidencia y datos de agentes: FLAG_SECURE bloquea las
         // capturas y la grabacion de pantalla en toda la aplicacion, y ademas
         // oculta la vista previa en el selector de apps recientes.
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE,
-        )
+        // TODO-REACTIVAR-FLAG_SECURE: desactivado temporalmente para poder tomar
+        // screenshots y grabar pantalla durante el desarrollo. Descomentar antes
+        // de release.
+        // window.setFlags(
+        //     WindowManager.LayoutParams.FLAG_SECURE,
+        //     WindowManager.LayoutParams.FLAG_SECURE,
+        // )
         enableEdgeToEdge()
         setContent {
             AeriaNexusPrototypeTheme {
