@@ -49,6 +49,30 @@ android {
         buildConfigField("String", "BODYCAM_MAC", "\"$bodycamMac\"")
     }
 
+    // Firma de release. La ruta y las contrasenas viven en local.properties, que
+    // no va a git; el keystore vive fuera del repo. Si falta cualquiera de las
+    // cuatro propiedades no se declara la config y el release sale sin firmar,
+    // que es preferible a fallar el build en una maquina que no tenga la clave.
+    val releaseKeystore = localProperties.getProperty("RELEASE_KEYSTORE_FILE")
+        ?.let { rootProject.file(it) }
+        ?.takeIf { it.exists() }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = localProperties.getProperty("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = localProperties.getProperty("RELEASE_KEY_ALIAS")
+                keyPassword = localProperties.getProperty("RELEASE_KEY_PASSWORD")
+                // Con minSdk 26 el esquema v2 es suficiente y es el que acaba
+                // verificando (AGP omite el v1 aunque se pida). Se deja pedido
+                // por si algun dia baja el minSdk.
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // Sufijo con fecha/hora para distinguir builds debug entre si cuando
@@ -58,6 +82,7 @@ android {
             versionNameSuffix = "-debug-" + SimpleDateFormat("yyyyMMdd-HHmm").format(Date())
         }
         release {
+            signingConfig = signingConfigs.findByName("release")
             // Minify y shrinkResources reducen el peso del APK y eliminan
             // los iconos de material-icons-extended que no se usan.
             isMinifyEnabled = true

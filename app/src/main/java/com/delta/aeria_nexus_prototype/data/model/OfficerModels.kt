@@ -42,7 +42,8 @@ data class EvidenceRecord(
     val sync: SyncState,
     // Marca de tiempo dentro de la grabacion si la foto se tomo mientras se grababa.
     val linkedTimestamp: String? = null,
-    // Uri del archivo en el album localIncidents cuando se capturo con el telefono.
+    // Nombre del .fev en la boveda cuando se capturo con el telefono. No es un uri:
+    // el original en claro se borra al cifrar y solo se abre con la contrasena.
     val mediaUri: String? = null,
 )
 

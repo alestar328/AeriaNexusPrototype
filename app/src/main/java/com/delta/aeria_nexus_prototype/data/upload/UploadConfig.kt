@@ -1,0 +1,92 @@
+package com.delta.aeria_nexus_prototype.data.upload
+
+import android.content.Context
+import android.util.Log
+import java.io.File
+
+private const val TAG = "FalconUploadCfg"
+
+/**
+ * Dónde sube el teléfono y con qué credencial.
+ *
+ * Gemelo de `UploadConfig` en BodyCamServer: las dos apps hablan el mismo protocolo
+ * (`docs/UPLOAD-PROTOCOL.md` del repo de la bodycam) contra el mismo destino, así que
+ * la configuración se lee igual y desde un fichero, no de una constante compilada.
+ *
+ *     /sdcard/Android/data/com.delta.aeria_nexus_prototype/files/upload.conf
+ *     base_url=http://192.168.0.14:1080/files/
+ *     token=stub-token
+ *     chunk_bytes=1048576
+ *
+ * Se pone por adb sin recompilar:
+ *
+ *     adb shell "echo base_url=http://192.168.0.14:1080/files/ > \
+ *       /sdcard/Android/data/com.delta.aeria_nexus_prototype/files/upload.conf"
+ *
+ * [token] es un stub declarado: hoy vale cualquier cosa no vacía porque el servidor de
+ * pruebas no valida nada. Existe para que el cliente ejercite el camino de mandar la
+ * credencial y para que el día que haya login de agente se sustituya la fuente del token
+ * y no el transporte.
+ *
+ * El destino por defecto queda **vacío a propósito**: una app sin `upload.conf` no debe
+ * empezar a mandar evidencia a un sitio que nadie ha confirmado.
+ */
+class UploadConfig(private val context: Context) {
+
+    private val confFile: File?
+        get() = context.getExternalFilesDir(null)?.let { File(it, CONF_NAME) }
+
+    /**
+     * Se relee en cada acceso en vez de cachearse. Una subida puede estar reintentando
+     * durante minutos; poder corregir la URL por adb sin reiniciar la app ahorra un ciclo
+     * entero de prueba.
+     */
+    private fun conf(): Map<String, String> {
+        val file = confFile ?: return emptyMap()
+        if (!file.isFile) return emptyMap()
+        return try {
+            file.readLines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains('=') }
+                .associate { line ->
+                    val i = line.indexOf('=')
+                    line.substring(0, i).trim() to line.substring(i + 1).trim()
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "no se pudo leer $CONF_NAME: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    /** Siempre con barra final: la URL de creación es un directorio, no un recurso. */
+    fun baseUrl(): String {
+        val raw = conf()["base_url"]?.takeIf { it.isNotBlank() } ?: DEFAULT_BASE_URL
+        return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
+    }
+
+    fun token(): String = conf()["token"]?.takeIf { it.isNotBlank() } ?: DEFAULT_TOKEN
+
+    fun chunkBytes(): Int =
+        conf()["chunk_bytes"]?.toIntOrNull()?.takeIf { it in 64 * 1024..64 * 1024 * 1024 }
+            ?: DEFAULT_CHUNK_BYTES
+
+    fun enabled(): Boolean {
+        if (conf()["enabled"] == "false") return false
+        if (baseUrl().isBlank()) {
+            Log.w(TAG, "sin base_url — la subida por bloques está desactivada")
+            return false
+        }
+        return true
+    }
+
+    fun describe(): String = "base_url=${baseUrl()} chunk=${chunkBytes() / 1024} KB"
+
+    private companion object {
+        const val CONF_NAME = "upload.conf"
+
+        /** TODO: la URL real de Nexus cuando backend confirme el endpoint. */
+        const val DEFAULT_BASE_URL = ""
+        const val DEFAULT_TOKEN = "stub-token"
+        const val DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
+    }
+}

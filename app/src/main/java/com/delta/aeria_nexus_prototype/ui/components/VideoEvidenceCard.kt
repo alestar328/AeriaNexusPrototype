@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
@@ -149,6 +150,8 @@ fun VideoEvidenceCard(
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
+                    // El hash real son 64 caracteres hex y no cabe en una linea.
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     devices.forEach { device -> DeviceBadge(device) }

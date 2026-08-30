@@ -38,18 +38,17 @@ class IncidentRepository(private val incidentDao: IncidentDao) {
     val officerProfile: OfficerProfile = OfficerSampleData.profile
     val reportIncidents: List<ReportIncident> = ReportSampleData.incidents
 
-    // Lista de incidentes del agente: primero los guardados en Room (mas
-    // recientes arriba) y despues los de ejemplo. Observable para que la
-    // pestana Incidents se actualice sola.
-    private val _officerIncidents = MutableStateFlow(OfficerSampleData.incidents)
+    // Lista de incidentes del agente: solo lo guardado en Room, mas recientes
+    // arriba. Observable para que la pestana Incidents se actualice sola.
+    // Arranca vacia y la rellena el init; la pantalla ya tiene estado vacio.
+    private val _officerIncidents = MutableStateFlow(emptyList<OfficerIncident>())
     val officerIncidents: StateFlow<List<OfficerIncident>> = _officerIncidents.asStateFlow()
 
     init {
         // La carga inicial termina antes de que el usuario pueda cerrar un
         // incidente nuevo, por eso basta con reemplazar el valor completo.
         scope.launch {
-            val guardados = incidentDao.getAll().map { it.toDomain() }
-            _officerIncidents.value = guardados + OfficerSampleData.incidents
+            _officerIncidents.value = incidentDao.getAll().map { it.toDomain() }
         }
     }
 
@@ -83,6 +82,13 @@ class IncidentRepository(private val incidentDao: IncidentDao) {
         return id
     }
 
+    /**
+     * Aviso de que un incidente acaba de persistirse. Lo usa EvidenceUploader para
+     * volcar el estado de subida en cuanto las filas de evidencia existen: antes de
+     * este momento no hay nada que actualizar.
+     */
+    var onIncidentSaved: (() -> Unit)? = null
+
     /** Aplica un cambio sobre el incidente activo, si existe. */
     fun updateActiveIncident(transform: (ActiveIncident) -> ActiveIncident) {
         _activeIncident.value = _activeIncident.value?.let(transform)
@@ -93,7 +99,10 @@ class IncidentRepository(private val incidentDao: IncidentDao) {
         _activeIncident.value?.let { activo ->
             val incidente = activo.toOfficerIncident()
             _officerIncidents.value = listOf(incidente) + _officerIncidents.value
-            scope.launch { incidentDao.save(incidente, System.currentTimeMillis()) }
+            scope.launch {
+                incidentDao.save(incidente, System.currentTimeMillis())
+                onIncidentSaved?.invoke()
+            }
         }
         _activeIncident.value = null
     }
@@ -131,7 +140,23 @@ class IncidentRepository(private val incidentDao: IncidentDao) {
         fun generateIncidentId(): String =
             "INC-2026-%05d".format(Random.nextInt(100_000))
 
-        /** Hash simulado para la evidencia del prototipo. */
+        /**
+         * Hash de custodia de una evidencia: el SHA-256 real del fichero en
+         * claro que devuelve EvidenceCrypto.seal (campo plainSha256), con el
+         * prefijo "sha256:" que espera el descifrador de referencia
+         * (tools/falcon_evidence_decrypt.py --expect-sha256).
+         *
+         * Si el cifrado fallo llega null y se cae al hash simulado: la evidencia
+         * sigue su curso, pero se ve que no esta verificada.
+         */
+        fun evidenceHash(plainSha256: String?): String =
+            if (plainSha256 != null) "sha256:$plainSha256" else fakeHash()
+
+        /**
+         * Hash simulado. Solo para la evidencia que esta app no ha calculado:
+         * la que graba la bodycam (que la cifra y la hashea ella misma) y los
+         * datos de ejemplo del prototipo.
+         */
         fun fakeHash(): String =
             "sha256:" + UUID.randomUUID().toString().replace("-", "").take(8) + "..."
     }

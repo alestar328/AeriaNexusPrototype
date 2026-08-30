@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.delta.aeria_nexus_prototype.data.model.EvidenceRecord
@@ -339,7 +340,7 @@ private fun EvidenceCard(evidence: EvidenceRecord) {
             // Prueba visible: foto o video capturado con el telefono.
             if (evidence.mediaUri != null) {
                 EvidenceMediaPreview(
-                    mediaUri = evidence.mediaUri,
+                    sealedName = evidence.mediaUri,
                     type = evidence.type,
                     modifier = Modifier.padding(top = 10.dp),
                 )
@@ -365,6 +366,9 @@ private fun EvidenceCard(evidence: EvidenceRecord) {
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
+                    // El hash real son 64 caracteres hex y no cabe en una linea:
+                    // se muestra el principio, que es lo que se compara a ojo.
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }

@@ -38,6 +38,8 @@ import com.delta.aeria_nexus_prototype.feature.rmsform.RmsFormViewModel
 import com.delta.aeria_nexus_prototype.feature.sos.SosAlertOverlay
 import com.delta.aeria_nexus_prototype.feature.sos.SosAlertViewModel
 import com.delta.aeria_nexus_prototype.feature.submitted.SubmissionSuccessScreen
+import com.delta.aeria_nexus_prototype.feature.vault.VaultScreen
+import com.delta.aeria_nexus_prototype.feature.vault.VaultViewModel
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
 
@@ -50,6 +52,8 @@ object Routes {
     const val MAP_WITH_FOCUS = "map?focusLat={focusLat}&focusLng={focusLng}"
     const val INCIDENTS = "incidents"
     const val PROFILE = "profile"
+    // Boveda de evidencia cifrada, protegida por la contrasena del agente.
+    const val VAULT = "profile/vault"
     const val INCIDENT_DETAIL = "incidents/{id}"
     const val ACTIVE_INCIDENT = "incidents/{id}/active"
     const val DRAFT_REPORT = "incidents/{id}/report"
@@ -192,7 +196,19 @@ fun AppNavHost() {
         }
 
         composable(Routes.PROFILE) {
-            ProfileScreen(profile = repositorio.officerProfile, onTabSelected = onTabSelected)
+            ProfileScreen(
+                profile = repositorio.officerProfile,
+                onOpenVault = { navController.navigate(Routes.VAULT) },
+                onTabSelected = onTabSelected,
+            )
+        }
+
+        composable(Routes.VAULT) {
+            VaultScreen(
+                viewModel = viewModel { VaultViewModel(AppContainer.vaultRepository) },
+                onBack = { navController.popBackStack() },
+                onTabSelected = onTabSelected,
+            )
         }
 
         composable(Routes.INCIDENT_DETAIL) { entrada ->
@@ -214,6 +230,7 @@ fun AppNavHost() {
                         repositorio,
                         AppContainer.bodycamRepository,
                         AppContainer.localEvidenceRepository,
+                        AppContainer.evidenceUploader,
                     )
                 },
                 onBackToOperations = { navController.popBackStack() },

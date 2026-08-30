@@ -14,3 +14,7 @@
 .cxx
 local.properties
 *.zip
+
+# Keystore de firma: vive fuera del repo (ver local.properties). Por si acaso.
+*.jks
+*.keystore

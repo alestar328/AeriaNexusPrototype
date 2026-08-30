@@ -13,6 +13,8 @@ import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.data.model.SyncState
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntry
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntryType
+import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
+import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +32,13 @@ data class ActiveIncidentUiState(
     val pendingEvidence: EvidenceRecord? = null,
     val showWitnessQr: Boolean = false,
     val qrSecondsLeft: Int = 0,
+    // El agente pulso END con una nota de audio grabando: el incidente se cierra
+    // en cuanto clasifique esa nota, no antes.
+    val endAfterClassify: Boolean = false,
+    // Cierre terminado. La pantalla no navega hasta verlo en true: cerrar puede
+    // implicar cifrar una nota de audio en curso, y salir antes cancelaria ese
+    // trabajo y dejaria la nota sin enlazar al incidente.
+    val incidentEnded: Boolean = false,
 )
 
 /**
@@ -40,7 +49,18 @@ class ActiveIncidentViewModel(
     private val repositorio: IncidentRepository,
     private val bodycamRepository: BodycamRepository,
     private val localEvidence: LocalEvidenceRepository,
+    private val uploader: EvidenceUploader,
 ) : ViewModel() {
+
+    /**
+     * Manda a Nexus la captura recien cifrada. Se encola y vuelve: la transferencia
+     * corre en el scope de la aplicacion, no en el del ViewModel, porque salir de la
+     * pantalla no debe cortar una subida de 40 MB. Sube el .fev, nunca el original.
+     */
+    private fun entregar(sellada: EvidenceCrypto.Sealed?, evidenceId: String, label: String) {
+        val s = sellada ?: return   // sin cifrar no hay nada que entregar
+        uploader.enqueue(s, evidenceId, activeIncident.value?.id, label)
+    }
 
     /** True cuando no hay bodycam: video y foto se capturan con el telefono. */
     val usesPhoneCapture: Boolean get() = !bodycamRepository.isConnected
@@ -124,8 +144,10 @@ class ActiveIncidentViewModel(
     }
 
     // ── Captura con el telefono (sin bodycam) ────────────────────────────────
-    // La app de camara del sistema escribe directo en el album localIncidents;
-    // aqui solo se prepara el destino y se registra la evidencia al volver.
+    // La app de camara del sistema escribe en la carpeta privada de la app; aqui
+    // solo se prepara el destino y, al volver, se cifra y se registra la
+    // evidencia. La captura en claro no sobrevive al cifrado, asi que lo que se
+    // guarda en mediaUri es el nombre del .fev dentro de la boveda.
 
     /** Prepara el destino de una foto con el telefono y devuelve su Uri. */
     fun preparePhonePhoto(): Uri? {
@@ -143,8 +165,16 @@ class ActiveIncidentViewModel(
             localEvidence.discard(destino)
             return
         }
-        localEvidence.publish(destino)
-        registerPendingPhoto(mediaUri = destino.uri.toString())
+        // El cifrado y el hash real se hacen al cerrar la captura, fuera del hilo
+        // principal (seal suspende).
+        viewModelScope.launch {
+            val sellada = localEvidence.seal(destino)
+            registerPendingPhoto(
+                mediaUri = sellada?.file?.name,
+                hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
+                sellada = sellada,
+            )
+        }
     }
 
     /** Prepara el destino de un video con el telefono y devuelve su Uri. */
@@ -163,74 +193,95 @@ class ActiveIncidentViewModel(
             localEvidence.discard(destino)
             return
         }
-        localEvidence.publish(destino)
-        val duracion = localEvidence.mediaDuration(destino)
-        addTimelineEntry(
-            "Video recorded — ${duracion ?: "saved"} (phone camera)",
-            TimelineEntryType.RECORDING_END,
-        )
-        val video = EvidenceRecord(
-            id = UUID.randomUUID().toString(),
-            type = EvidenceType.VIDEO,
-            label = "Video recording — ${activeDevices()}",
-            time = IncidentRepository.nowTime(),
-            duration = duracion,
-            device = activeDevices(),
-            hash = IncidentRepository.fakeHash(),
-            sync = SyncState.LOCAL_ONLY,
-            mediaUri = destino.uri.toString(),
-        )
-        _uiState.update { it.copy(pendingEvidence = video) }
+        // Igual que en la foto, se cifra al cerrar. El video es el caso pesado
+        // (una grabacion larga tarda segundos), por eso nunca puede correr en el
+        // hilo principal. La duracion se lee antes de cifrar: despues el fichero
+        // original ya no existe.
+        viewModelScope.launch {
+            val duracion = localEvidence.mediaDuration(destino)
+            val sellada = localEvidence.seal(destino)
+            addTimelineEntry(
+                "Video recorded — ${duracion ?: "saved"} (phone camera)",
+                TimelineEntryType.RECORDING_END,
+            )
+            val video = EvidenceRecord(
+                id = UUID.randomUUID().toString(),
+                type = EvidenceType.VIDEO,
+                label = "Video recording — ${activeDevices()}",
+                time = IncidentRepository.nowTime(),
+                duration = duracion,
+                device = activeDevices(),
+                hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
+                sync = SyncState.LOCAL_ONLY,
+                mediaUri = sellada?.file?.name,
+            )
+            _uiState.update { it.copy(pendingEvidence = video) }
+            entregar(sellada, video.id, video.label)
+        }
     }
 
     /** Crea la evidencia de foto pendiente y abre la hoja de clasificacion. */
-    private fun registerPendingPhoto(mediaUri: String?) {
+    private fun registerPendingPhoto(
+        mediaUri: String?,
+        hash: String = IncidentRepository.fakeHash(),
+        sellada: EvidenceCrypto.Sealed? = null,
+    ) {
         val grabando = activeIncident.value?.isRecording == true
         val foto = EvidenceRecord(
             id = UUID.randomUUID().toString(),
             type = EvidenceType.PHOTO,
             label = "Photo captured",
             time = IncidentRepository.nowTime(),
-            hash = IncidentRepository.fakeHash(),
+            hash = hash,
             sync = SyncState.LOCAL_ONLY,
             linkedTimestamp = if (grabando) formatSeconds(_uiState.value.recordingSeconds) else null,
             mediaUri = mediaUri,
         )
         addTimelineEntry("Photo captured", TimelineEntryType.PHOTO)
         _uiState.update { it.copy(pendingEvidence = foto) }
+        entregar(sellada, foto.id, foto.label)
     }
 
     /**
-     * Nota de audio con el microfono del telefono (grabacion real en
-     * localIncidents). Requiere el permiso RECORD_AUDIO ya concedido.
+     * Nota de audio con el microfono del telefono. Requiere el permiso
+     * RECORD_AUDIO ya concedido.
      */
     fun toggleAudioNote() {
         if (_uiState.value.isAudioRecording) {
-            val segundos = _uiState.value.audioSeconds
-            val duracion = "${segundos / 60}m ${segundos % 60}s"
-            val destino = localEvidence.stopAudioRecording()
-            _uiState.update { it.copy(isAudioRecording = false, audioSeconds = 0) }
-            // Si stop() descarto la grabacion (demasiado corta), no hay evidencia.
-            if (destino == null) return
-            addEvidence(
-                EvidenceRecord(
-                    id = UUID.randomUUID().toString(),
-                    type = EvidenceType.AUDIO,
-                    label = "Officer audio note",
-                    time = IncidentRepository.nowTime(),
-                    duration = duracion,
-                    classification = EvidenceClass.EVIDENCE,
-                    hash = IncidentRepository.fakeHash(),
-                    sync = SyncState.LOCAL_ONLY,
-                    mediaUri = destino.uri.toString(),
-                ),
-            )
-            addTimelineEntry("Audio note added — $duracion", TimelineEntryType.AUDIO)
+            viewModelScope.launch { stopAudioNote() }
         } else {
             if (!localEvidence.startAudioRecording()) return
             _uiState.update { it.copy(isAudioRecording = true) }
             addTimelineEntry("Audio note recording started", TimelineEntryType.AUDIO)
         }
+    }
+
+    /**
+     * Cierra la nota en curso, la cifra y la deja pendiente de clasificar, igual
+     * que una foto o un video. Es suspend porque el cierre del incidente tiene que
+     * esperarla: una nota sin enlazar seria una grabacion que existe pero que
+     * nadie encuentra.
+     */
+    private suspend fun stopAudioNote() {
+        val segundos = _uiState.value.audioSeconds
+        val duracion = "${segundos / 60}m ${segundos % 60}s"
+        _uiState.update { it.copy(isAudioRecording = false, audioSeconds = 0) }
+        // Si stop() descarto la grabacion (demasiado corta), no hay evidencia.
+        val capturada = localEvidence.stopAudioRecordingSealed() ?: return
+        val nota = EvidenceRecord(
+            id = UUID.randomUUID().toString(),
+            type = EvidenceType.AUDIO,
+            label = "Officer audio note",
+            time = IncidentRepository.nowTime(),
+            duration = duracion,
+            hash = IncidentRepository.evidenceHash(capturada.sealed?.plainSha256),
+            sync = SyncState.LOCAL_ONLY,
+            mediaUri = capturada.sealed?.file?.name,
+        )
+        addTimelineEntry("Audio note added — $duracion", TimelineEntryType.AUDIO)
+        // La entrega a Nexus no espera a la clasificacion, igual que en foto y video.
+        entregar(capturada.sealed, nota.id, nota.label)
+        _uiState.update { it.copy(pendingEvidence = nota) }
     }
 
     fun generateWitnessQr() {
@@ -243,23 +294,58 @@ class ActiveIncidentViewModel(
         _uiState.update { it.copy(showWitnessQr = false) }
     }
 
-    /** Guarda la evidencia pendiente (foto o video) con la clasificacion elegida. */
+    /** Guarda la evidencia pendiente con la clasificacion elegida. */
     fun classifyPendingEvidence(clase: EvidenceClass) {
         val pendiente = _uiState.value.pendingEvidence ?: return
-        val prefijo = if (pendiente.type == EvidenceType.VIDEO) "Video" else "Photo"
+        val prefijo = when (pendiente.type) {
+            EvidenceType.VIDEO -> "Video"
+            EvidenceType.AUDIO -> "Audio note"
+            else -> "Photo"
+        }
         addEvidence(pendiente.copy(classification = clase, label = "$prefijo — ${clase.label}"))
         _uiState.update { it.copy(pendingEvidence = null) }
+        endIfWaitingForClassification()
     }
 
     /** Guarda la evidencia pendiente sin clasificar. */
     fun skipClassification() {
         _uiState.value.pendingEvidence?.let { addEvidence(it) }
         _uiState.update { it.copy(pendingEvidence = null) }
+        endIfWaitingForClassification()
     }
 
+    /**
+     * Cierra el incidente. Si el agente dejo una nota de audio grabando, primero la
+     * cierra y le da la hoja de clasificacion: antes seguia grabando sin dueno y
+     * acababa en la boveda sin aparecer en el incidente, y despues se guardaba sin
+     * que nadie pudiera clasificarla.
+     */
     fun endIncident() {
+        viewModelScope.launch {
+            if (_uiState.value.isAudioRecording) {
+                stopAudioNote()
+                // Sin nota pendiente (grabacion descartada por corta) no hay nada
+                // que esperar y el incidente se cierra igual.
+                if (_uiState.value.pendingEvidence != null) {
+                    _uiState.update { it.copy(endAfterClassify = true) }
+                    return@launch
+                }
+            }
+            closeIncident()
+        }
+    }
+
+    /** Cierra el incidente que estaba esperando a que se clasificara la ultima nota. */
+    private fun endIfWaitingForClassification() {
+        if (!_uiState.value.endAfterClassify) return
+        _uiState.update { it.copy(endAfterClassify = false) }
+        closeIncident()
+    }
+
+    private fun closeIncident() {
         addTimelineEntry("Incident ended — moved to draft", TimelineEntryType.ENDED)
         repositorio.endActiveIncident()
+        _uiState.update { it.copy(incidentEnded = true) }
     }
 
     override fun onCleared() {

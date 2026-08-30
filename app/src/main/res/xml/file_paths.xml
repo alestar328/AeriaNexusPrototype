@@ -1,11 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Carpetas publicas de evidencia servidas a la app de camara via FileProvider.
-     Solo se usa en Android 9 o menor; desde Android 10 se escribe por MediaStore. -->
+<!-- Rutas privadas de la app servidas por FileProvider. Ninguna es publica: la
+     evidencia no pasa por la galeria desde que existe la boveda cifrada.
+
+     captures  = donde la app de camara y el grabador escriben la captura en claro,
+                 solo durante los segundos que van del cierre de la captura al cifrado.
+     vault     = copias descifradas para verlas dentro de la app; se borran al
+                 bloquear la boveda. -->
 <paths>
-    <external-path
-        name="localIncidents_dcim"
-        path="DCIM/localIncidents/" />
-    <external-path
-        name="localIncidents_music"
-        path="Music/localIncidents/" />
+    <external-files-path
+        name="captures"
+        path="captures/" />
+    <!-- El mismo destino cuando el telefono no expone almacenamiento externo y
+         LocalEvidenceRepository cae al almacenamiento interno. -->
+    <files-path
+        name="captures_internas"
+        path="captures/" />
+    <cache-path
+        name="vault_descifrado"
+        path="vault/" />
 </paths>

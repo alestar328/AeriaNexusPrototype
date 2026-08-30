@@ -31,12 +31,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
-    <!-- Evidencia local en el album publico localIncidents. Desde Android 10
-         MediaStore no requiere permiso; en Android 9 o menor si. -->
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
-
     <!-- usesCleartextTraffic: el servidor HTTP de la bodycam W1 (visor remoto
          y descarga de grabaciones) es http:// en la red WiFi local; sin esto
          Android bloquea la conexion. El trafico a internet sigue siendo TLS. -->

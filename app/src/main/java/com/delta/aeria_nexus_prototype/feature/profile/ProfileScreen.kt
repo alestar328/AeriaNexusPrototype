@@ -2,6 +2,7 @@ package com.delta.aeria_nexus_prototype.feature.profile
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,13 +19,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,6 +36,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
@@ -49,6 +56,7 @@ import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 @Composable
 fun ProfileScreen(
     profile: OfficerProfile,
+    onOpenVault: () -> Unit,
     onTabSelected: (MainTab) -> Unit,
 ) {
     AppScaffold(currentTab = MainTab.PROFILE, onTabSelected = onTabSelected) { innerPadding ->
@@ -77,6 +85,9 @@ fun ProfileScreen(
             }
 
             AvatarCard(profile)
+
+            SectionLabel("Evidence Vault")
+            VaultRow(onOpenVault)
 
             SectionLabel("Officer Information")
             CardSurface {
@@ -152,6 +163,67 @@ private fun AvatarCard(profile: OfficerProfile) {
                 )
                 Text(text = profile.rank, color = TextoTerciario, fontSize = 12.sp)
             }
+        }
+    }
+}
+
+/**
+ * Acceso a la boveda de evidencia. Muestra su estado real, que es lo que decide
+ * si el agente puede ver ahora mismo lo que ha capturado con el telefono.
+ */
+@Composable
+private fun VaultRow(onOpenVault: () -> Unit) {
+    val configurada by EvidenceVault.configurada.collectAsStateWithLifecycle()
+    val desbloqueada by EvidenceVault.desbloqueada.collectAsStateWithLifecycle()
+    val estado = when {
+        !configurada -> "Not set up"
+        desbloqueada -> "Unlocked"
+        else -> "Sealed"
+    }
+    val color = if (desbloqueada) VerdeOk else TextoTerciario
+
+    CardSurface {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenVault)
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (desbloqueada) Icons.Filled.LockOpen else Icons.Filled.Lock,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "Captured evidence",
+                    color = TextoPrincipal,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Photos, video and audio stay encrypted on this phone",
+                    color = TextoTerciario,
+                    fontSize = 11.sp,
+                )
+            }
+            Text(
+                text = estado.uppercase(),
+                color = color,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+            )
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = "Open evidence vault",
+                tint = TextoTerciario,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }

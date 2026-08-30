@@ -41,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -96,6 +97,13 @@ fun ActiveIncidentScreen(
     val incidente by viewModel.activeIncident.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    // Se sale cuando el ViewModel da el cierre por terminado, no al pulsar: si la
+    // pantalla se destruye antes, se cancela el cifrado de la nota de audio que
+    // estuviera en curso.
+    LaunchedEffect(uiState.incidentEnded) {
+        if (uiState.incidentEnded) onIncidentEnded()
+    }
+
     // Captura con el telefono cuando la bodycam no esta conectada: la app de
     // camara del sistema escribe directo en la carpeta local de evidencia.
     val takePhotoLauncher = rememberLauncherForActivityResult(
@@ -134,10 +142,15 @@ fun ActiveIncidentScreen(
     ) { innerPadding ->
         val actual = incidente
         if (actual == null) {
-            NoActiveIncidentMessage(
-                modifier = Modifier.padding(innerPadding),
-                onBack = onBackToOperations,
-            )
+            // Tras cerrar el incidente tambien se queda a null, y ahi el aviso
+            // seria un parpadeo justo antes de que la navegacion se lleve la
+            // pantalla: solo se muestra si de verdad no habia nada que atender.
+            if (!uiState.incidentEnded) {
+                NoActiveIncidentMessage(
+                    modifier = Modifier.padding(innerPadding),
+                    onBack = onBackToOperations,
+                )
+            }
             return@AppScaffold
         }
 
@@ -218,12 +231,7 @@ fun ActiveIncidentScreen(
                     TimelineListCard(actual)
                 }
 
-                EndIncidentButton(
-                    onClick = {
-                        viewModel.endIncident()
-                        onIncidentEnded()
-                    },
-                )
+                EndIncidentButton(onClick = viewModel::endIncident)
             }
         }
     }

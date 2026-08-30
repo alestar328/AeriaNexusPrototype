@@ -6,6 +6,95 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-08-30 (3) — La nota de audio tambien se clasifica, y el cierre del incidente espera a esa clasificacion
+
+### Hecho
+
+- **Reporte**: "cuando el incidente registrado es un audio, no da la opcion de categorizarlo; al pararlo se cierra y nos manda a Incidents".
+  - Verificado en el Samsung: parar la nota con STOP **no** cerraba el incidente (se quedaba ACTIVE con EVIDENCE (1)). Lo que cerraba de golpe era END INCIDENT, que desde el arreglo del punto 3 del manager para la nota en curso y cerraba sin preguntar nada.
+  - Las dos partes tenian la misma causa: el audio nunca pasaba por `pendingEvidence`, asi que no habia hoja de clasificacion en ninguno de los dos caminos.
+- **`ActiveIncidentViewModel`**:
+  - `stopAudioNote()` deja la nota en `pendingEvidence` en vez de guardarla con `EvidenceClass.EVIDENCE` fijo. La entrega a Nexus sigue saliendo al parar, sin esperar a la clasificacion, igual que en foto y video.
+  - `classifyPendingEvidence` etiqueta segun el tipo (`Audio note — Witness Statement`); antes solo distinguia Video/Photo y una nota habria salido como "Photo".
+  - `endIncident()` con una nota grabando: la para, muestra la hoja y NO cierra; el cierre ocurre en `endIfWaitingForClassification()` al clasificar o hacer skip (flag `endAfterClassify`). Si la grabacion se descarto por ser demasiado corta no hay nada pendiente y cierra igual.
+- Compila limpio e instalado en el Samsung `RZCY510MBBM`.
+- `version.properties` subido a mano a 1.3 (code 4) a peticion del usuario, sin correr release: el proximo `assembleRelease` horneara esa version. FLAG_SECURE sigue desactivado por decision del usuario tras avisarle.
+
+### Verificado en dispositivo (con adb)
+
+- Parar la nota con STOP → sale CLASSIFY EVIDENCE → al elegir Evidence, el incidente sigue ACTIVE con `Audio note — Evidence` en la lista.
+- Nota grabando + END INCIDENT → sale CLASSIFY EVIDENCE → al elegir, cierra y navega a Incidents.
+- El incidente cerrado (INC-2026-28512, de prueba) queda con EVIDENCE (2): `Audio note — Evidence` y `Audio note — Witness Statement`, ambas con el candado `EVIDENCE SEALED — UNLOCK VAULT TO VIEW` por tener la boveda bloqueada.
+- Log del cifrado: `cifrado audio_..._m4a → .fev (29 KB, 7 ms, para [vault:v1, srv:dev-2026-08])` — la nota lleva los dos destinatarios.
+
+### Pendiente
+
+- Reproductor interno de la nota de audio (punto 2 del manager): sin verificar, hace falta la contrasena de la boveda del usuario para descifrar y darle al play.
+- En la lista de Incidents queda `INC-2026-28512`, basura de esta prueba.
+- Sigue abierto: avisar en la pantalla de incidente activo cuando la boveda no esta configurada.
+
+---
+
+## 2026-08-30 (2) — Feedback del manager: la nota de audio se reproduce dentro de la app y sobrevive al cierre del incidente
+
+### Hecho
+
+- **Punto 2 del manager (el audio se iba a una app externa)**: `AudioPlayRow` en `MediaPreview.kt` deja de lanzar `ACTION_VIEW` y reproduce con el `MediaPlayer` del framework (sin libreria nueva, regla de app ligera): boton play/pausa de 48.dp, barra de progreso y tiempo `m:ss / m:ss`. `DisposableEffect` libera el reproductor al salir de composicion, que ademas cierra el descriptor del fichero descifrado al bloquear la boveda. El motivo de fondo no es solo comodidad: sacar la nota al reproductor del sistema significaba entregarle a otra app la copia en claro de una evidencia. El video sigue abriendose con el reproductor del sistema (`openWithSystemPlayer`).
+- **Punto 3 del manager (audio empezado y no parado al cerrar el incidente)**: la nota seguia grabando sin dueno; se cifraba al destruirse la pantalla (`onCleared`) y acababa en la boveda, pero nunca se enlazaba al incidente, asi que el detalle no tenia playback.
+  - `ActiveIncidentViewModel`: la parte de parar la nota sale de `toggleAudioNote` a `stopAudioNote()` (suspend), y `endIncident()` la llama primero si habia grabacion en curso, antes de `endActiveIncident()`.
+  - El cierre pasa a ser asincrono, asi que la pantalla ya no navega al pulsar END: `ActiveIncidentUiState.incidentEnded` lo dispara cuando el ViewModel termina. Si navegase antes, el `viewModelScope` se cancelaria a mitad del cifrado. Con el incidente ya cerrado no se pinta `NoActiveIncidentMessage`, que si no seria un parpadeo antes de salir.
+- Compila limpio (assembleDebug) e instalado en el Samsung `RZCY510MBBM`. **Sin verificar todavia en el dispositivo.**
+
+### Pendiente (verificar en dispositivo)
+
+- Nota de audio: play/pausa dentro de la app, la barra avanza, al terminar vuelve al principio y NO se abre ninguna app externa.
+- NEW INCIDENT → empezar nota de audio → END INCIDENT sin pararla → el incidente en Incidents lleva la nota como evidencia, con su duracion, y se reproduce (con la boveda desbloqueada).
+- Salir de la pantalla del detalle mientras suena una nota: el audio se para.
+
+### Nota de la sesion
+
+- La primera foto de prueba (11:14:45) se capturo antes de crear la contrasena (11:15) y su cabecera solo lleva el destinatario `srv:dev-2026-08`: no se puede abrir en el telefono y la lista la marca `NO KEY`. Es el comportamiento correcto, pero conviene crear la boveda antes de capturar nada en la demo.
+- Sigue abierto: avisar en la pantalla de incidente activo cuando la boveda no esta configurada, con acceso directo para crearla.
+
+---
+
+## 2026-08-30 — Boveda de evidencia: la captura del telefono sale de la galeria y queda tras una contrasena
+
+### Hecho
+
+- **Peticion**: que las fotos, videos y audios generados por la app queden en una "carpeta protegida por contrasena" para ensenarselo al manager. No hay login todavia, asi que la contrasena es del dispositivo, no del agente.
+- **`data/crypto/EvidenceVault.kt` (nuevo)**: la boveda es un par RSA-2048 propio del telefono. Se cifra con la publica (siempre disponible, sin nadie delante: la captura se cierra en mitad de un servicio) y solo se descifra con la privada, que se reconstruye con la contrasena. La privada vive en `filesDir/vault.key` con doble proteccion: AES-GCM con clave PBKDF2-HMAC-SHA256 (210k iteraciones, salt aleatorio) y ese blob envuelto ademas por la clave de AndroidKeyStore, para que no se pueda hacer fuerza bruta sacando el fichero a un PC. La contrasena no se guarda en ningun formato: si es incorrecta, falla el tag de AES-GCM.
+- **`EvidenceKeys`**: `recipients()` pasa a ser boveda + Nexus (opcion C hibrida de Seguridad-Claves-Bodycam.md §3.5). `DeviceKeyWrapper` deja de ser destinatario de la DEK — descifraba sin pedir nada, que dejaba la contrasena en decorativa — y pasa a proteger el fichero de claves de la boveda. RSA-OAEP/SHA-256 extraido a `rsaOaepWrap`/`rsaOaepUnwrap` para no duplicarlo entre Nexus y la boveda. El formato FEVD no cambia ni un byte: sigue siendo el mismo que produce la unidad bodycam.
+- **`EvidenceCrypto.DELETE_PLAINTEXT` pasa a `true`** (EVD-007 resuelto): al cifrar se borra el original.
+- **`LocalEvidenceRepository` reescrito**: fuera MediaStore, `localIncidents`, `publish()` y `MediaScannerConnection`. La camara y el grabador escriben por FileProvider en `files/captures` (privado), se cifra al cerrar y el claro desaparece; solo queda el `.fev` en `files/evidence`. La nota de audio interrumpida por la destruccion de la pantalla se cifra en un scope de aplicacion, como hace `EvidenceUploader`.
+- **`data/VaultRepository.kt` (nuevo)**: lista los `.fev`, descifra bajo demanda a `cacheDir/vault` y borra esas copias al bloquear. Lee la cabecera del `.fev` para saber si se cifro para esta boveda sin descifrarlo (campo `openable`).
+- **`feature/vault/` (nuevo)**: pantalla EVIDENCE VAULT con tres estados — crear contrasena, desbloquear, y lista de evidencia donde cada fila se despliega y reproduce con `EvidenceMediaPreview`. Entrada desde Profile, con el estado real (Not set up / Sealed / Unlocked).
+- **`MediaPreview`**: recibe el nombre del `.fev` en vez de un uri y descifra si la boveda esta abierta. Estados visibles: EVIDENCE SEALED, DECRYPTING, NO KEY ON THIS DEVICE. Se quita `ContentResolver.loadThumbnail`: solo lo implementan proveedores del sistema como MediaStore, no el FileProvider propio.
+- `EvidenceRecord.mediaUri` pasa a guardar el nombre del `.fev` (no se renombra la columna para no forzar una migracion de Room).
+- Fuera el permiso `WRITE_EXTERNAL_STORAGE`: ya no se escribe nada publico.
+- Compila limpio (assembleDebug, sin warnings nuevos). Sin dispositivos por adb: APK sin instalar.
+
+### Decisiones
+
+- Contrasena unica del dispositivo mientras no exista login real (AUTH-001).
+- Si se olvida la contrasena, la evidencia local es irrecuperable a proposito; la copia entregada a Nexus se sigue abriendo en el servidor, asi que la cadena de custodia no depende de ella.
+- Lo capturado ANTES de crear la boveda no lleva su envoltorio y no se puede abrir en el telefono: la lista lo marca como NO KEY en vez de dejar una vista previa que nunca carga.
+
+### Pendiente (verificar en dispositivo)
+
+- Profile → Evidence Vault → crear contrasena → NEW INCIDENT → foto, video y nota de audio → nada aparece en la galeria del telefono ni en el explorador de archivos.
+- Volver a la boveda: las tres capturas se listan, se abren y se ven; LOCK las vuelve a sellar y la vista previa pasa a EVIDENCE SEALED.
+- Contrasena incorrecta al desbloquear: mensaje "Wrong password" y sigue sellada.
+- Matar la app y reabrir: la boveda arranca bloqueada y sigue pidiendo la contrasena.
+- Detalle del incidente cerrado: la evidencia se ve con la boveda abierta y sale el candado con la boveda cerrada.
+
+### Proximo paso
+
+Prueba en dispositivo de lo anterior. Luego, si el manager valida el enfoque: contrasena por agente cuando exista login (AUTH-001) y decidir si la boveda se bloquea sola al salir de la app o por tiempo de inactividad.
+
+---
+
+
 ## 2026-07-17 (2) — Fotos derechas en el visor y los incidents ya sobreviven al cierre de la app (Room)
 
 ### Hecho
