@@ -6,6 +6,101 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-03 — Documentos IAM de AeriaOne: lectura, reparto y estimacion (sin codigo)
+
+### Hecho
+
+- Sesion de analisis, no de desarrollo. Ciberseguridad entrego dos documentos, ya en `docs/`:
+  - `Seguridad-Claves-Bodycam.md` / `.pdf` — arquitectura IAM de AeriaOne (tenant QPD): 16 secciones,
+    requisitos IAM-01..20 y dos anexos. El unico grafico va embebido en base64 dentro del `.md`.
+  - `AeriaOne_IAM_Workflows-v1.xlsx` — catalogo de 68 workflows, 9 con hoja de detalle
+    (2, 3+4, 7, 11, 12, 21, 22+23, 27). Se lee con python-docx/zipfile; no hay que abrirlo a mano.
+- **La columna de estado del Excel es de DISENO, no de implementacion**: 5 cerrados, 3 a rehacer,
+  59 sin desarrollar, 1 sin marcar. Ninguno de los 9 detallados trata la captura de evidencia, asi
+  que en ese terreno vamos por delante de su diseno.
+- **Hallazgo de alcance**: la W1 es un Android 9 que ejecuta nuestra propia app (BodyCamServer), asi
+  que su alta como dispositivo y el emparejamiento autenticado los podemos hacer nosotros por
+  software. Lo que no podemos dar es garantia de plataforma (el alta de fabrica presupone secure boot
+  y credenciales de fabrica retiradas; la W1 lleva el launcher del proveedor como priv-app).
+- **Deuda concreta detectada**: el canal con la bodycam es `createInsecureRfcommSocketToServiceRecord`
+  con UUID fijo (`BodycamRepository.kt:462`) — sin autenticacion de ningun tipo.
+- Reparto: **47 de los 68 tocan al APK o a la bodycam**; en 24 somos el actor principal.
+- Estimacion: **414-576 h** de trabajo nuestro (500-690 con contingencia del 20 %), repartidas en
+  8 grupos G0-G7. El minimo defendible son G0-G3: 216-288 h.
+- Entregables de la sesion:
+  - Documento web (vivo, se actualiza al cerrar cada fase):
+    https://claude.ai/code/artifact/09bfff05-9c4b-488a-8311-600aead761e8
+  - `docs/Plan-IAM-Aeria-Nexus.docx` — mismo contenido para Drive, con la tabla de horas por tarea.
+
+### Decisiones tomadas
+
+- El plan se organiza en 8 grupos y no por familias del catalogo: la secuencia real del agente
+  (puesta en servicio → jornada → excepciones) es la que decide el orden de implementacion.
+- Las estimaciones incluyen pruebas (~30 %) y documentacion (~10 %) dentro de cada tarea.
+- El coste del backend (2.500-4.200 h) se documenta como orden de magnitud y NO como compromiso
+  nuestro: faltan los 10 artefactos de diseno que el propio documento reconoce pendientes.
+
+### Decisiones pendientes (bloquean el grupo G1 — ver apartado 7 del plan)
+
+1. **D1** — Un PIN o dos: el PIN de identidad frente a la contrasena de la boveda que ya existe.
+2. **D2** — Como se protege la clave del agente: Keystore atado a credencial del sistema, o PIN de
+   app con limite de intentos (el documento excluye biometria y MFA).
+3. **D3** — PKCS#10 a mano (propuesto, por la regla de app ligera) o con BouncyCastle.
+4. **D4** — La W1 no puede pasar por el alta de fabrica: periferico de garantia reducida.
+5. **D5** — La boveda local choca con la revocacion granular (IAM-14).
+6. **D6** — Clave publica real de Nexus, formato del `kid` y politica de rotacion (hoy `dev-2026-08`).
+7. **D7** — Quien opera el servicio de firma de produccion (hoy keystore local + `local.properties`).
+
+### Compromiso de septiembre (acordado 2026-09-03)
+
+Ritmo pactado: 5 h de lunes a viernes y 8 h sabados y domingos. Del 4 al 30 de septiembre son
+**159 h brutas**; descontando un 15 % por esperas de herramienta quedan **135 h efectivas**.
+Comprometidas 122 h, margen 13 h. A 20 EUR/h netos: 2.440 EUR.
+
+**Hito 1 — martes 15 de septiembre (AUDITORIA). 72 h brutas / 61 efectivas, 54 comprometidas.**
+
+| Wf. | Alcance | h |
+|---|---|---|
+| 12 | Alta del telefono: atributos, par de claves no exportable, CSR y prueba de posesion | 20 |
+| 3 | Certificado del agente: segundo par, CSR e instalacion de la cadena | 14 |
+| 4 | PIN: alta, limite de intentos y bloqueo temporal | 12 |
+| — | Backend simulado: CA de pruebas y retos | 8 |
+
+Lo que se ensena el dia 15: teléfono limpio dado de alta con clave que no sale del Keystore,
+certificado del agente separado del certificado del telefono (regla de no equivalencia), PIN con
+bloqueo, y el plan como expediente en papel.
+Lo que NO estara: la app sigue arrancando sin bloquearse, no hay token de sesion, y la evidencia
+sigue como hoy (sin manifiesto ni firma). Todo corre contra un backend simulado nuestro:
+criptografia real, plano de control fingido. **Decirlo antes de que lo pregunten.**
+
+**Hito 2 — miercoles 30 de septiembre. 87 h brutas / 74 efectivas, 68 comprometidas.**
+
+| Wf. | Alcance | h |
+|---|---|---|
+| 22+23 | Identidad de instalacion, arranque bloqueado y atadura agente-telefono | 16 |
+| 27 | Desbloqueo: PIN, firma del reto y apertura | 12 |
+| 28 | Sesion: token con alcance y custodia | 10 |
+| 30 | Cierre de sesion y vuelta a bloqueado | 4 |
+| — | Contratos G0: manifiesto de procedencia y recibo | 12 |
+| — | Resto del stub, integracion, pruebas en Samsung y Redmi, documentacion | 14 |
+
+Criterio de seleccion: son los workflows que ciberseguridad YA tiene desarrollados paso a paso en
+sus 9 hojas de detalle, asi que no hay que negociar diseno para empezar. Quedan fuera el 11 (alta
+de fabrica, no es nuestra) y el 7 (renovacion, necesita el ciclo de vida completo).
+
+Fuera de septiembre y primer hito de octubre: 36+37 (manifiesto y firma de evidencia, 24 h) y
+40 (credencial real en la subida, 6 h).
+
+### Proximo paso
+
+- **4 de septiembre**: arrancar el workflow 12 — atributos del telefono, par de claves en Keystore
+  no exportable y el codigo de PKCS#10 (decision D3: a mano, con pruebas contra `openssl`).
+- Los contratos G0 se mueven a la segunda quincena: para la auditoria pesa mas ensenar identidad
+  funcionando que papel, y el papel ya lo cubre `docs/Plan-IAM-Aeria-Nexus.docx`.
+- En paralelo, llevar a ciberseguridad las 7 decisiones y pedir los perfiles de certificado.
+
+---
+
 ## 2026-08-30 (3) — La nota de audio tambien se clasifica, y el cierre del incidente espera a esa clasificacion
 
 ### Hecho
