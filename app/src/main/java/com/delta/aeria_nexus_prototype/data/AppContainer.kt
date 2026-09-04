@@ -2,6 +2,8 @@ package com.delta.aeria_nexus_prototype.data
 
 import android.content.Context
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
+import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
+import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
@@ -26,6 +28,10 @@ object AppContainer {
         private set
     lateinit var vaultRepository: VaultRepository
         private set
+    lateinit var identityRepository: IdentityRepository
+        private set
+    lateinit var enrollmentRepository: EnrollmentRepository
+        private set
     lateinit var evidenceUploader: EvidenceUploader
         private set
 
@@ -46,6 +52,10 @@ object AppContainer {
         bodycamRepository = BodycamRepository(appContext)
         localEvidenceRepository = LocalEvidenceRepository(appContext)
         vaultRepository = VaultRepository(appContext)
+        // Decide si la app llega siquiera a la pantalla de operaciones, asi que
+        // tiene que estar lista antes de que se componga nada (ver TrustGate).
+        identityRepository = IdentityRepository(appContext)
+        enrollmentRepository = EnrollmentRepository(appContext)
         evidenceUploader = EvidenceUploader(
             context = appContext,
             config = UploadConfig(appContext),

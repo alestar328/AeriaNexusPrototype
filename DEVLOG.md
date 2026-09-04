@@ -6,6 +6,177 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-04 (2) — Workflow 12: alta del telefono con clave en Keystore y PKCS#10 a mano
+
+### Hecho
+
+De los 21 pasos del catalogo, los 9 que son nuestros. Los otros 12 son del backend y no existen.
+
+- **`data/identity/Der.kt`** — codificador DER minimo (entero, bit string, OID, UTF8String,
+  secuencia, conjunto, contexto implicito). Unas 130 lineas frente a los varios megas de
+  BouncyCastle: **confirmada la decision D3**, escribirlo a mano.
+- **`data/identity/Pkcs10.kt`** — peticion de certificado RFC 2986. Dos cosas salen gratis y estan
+  documentadas en el fichero: `PublicKey.getEncoded()` ya es un SubjectPublicKeyInfo en DER, y la
+  firma que produce `Signature` para ECDSA ya es la SEQUENCE de r y s. Se firma el bloque
+  `certificationRequestInfo` **tal y como se codifico**, sin recodificarlo, que es la forma clasica
+  de que la CA rechace la peticion.
+- **`data/identity/DeviceAttributes.kt`** — pasos 3, 5 y 6. Modelo, Android, parche de seguridad,
+  huella del firmante del APK, disponibilidad de Keystore, capacidad declarada de hardware,
+  indicios de manipulacion y emulador.
+- **`data/identity/DeviceKeystore.kt`** — pasos 10, 15 y 16. Par EC P-256 generado DENTRO del
+  Keystore; no hay ninguna funcion que devuelva la clave privada, solo un manejador para firmar.
+- **`data/identity/EnrollmentRepository.kt`** — orquesta el alta y guarda el CSR.
+- **`feature/enrollment/`** — asistente de seis pasos visibles que resume los 21 del catalogo.
+- **`tools/alta-terminal.sh`** — hace de backend a mano: saca el CSR con `run-as`, lo valida, lo
+  firma con una CA de pruebas y devuelve el certificado a la app por intent. La carpeta de la CA
+  esta en `.gitignore`.
+- **Tests** (`app/src/test/.../Pkcs10Test.kt`) — 7 pruebas en JVM: codificacion DER (entero con bit
+  alto, OID con componentes grandes, longitud en forma larga), verificacion de que la firma cubre
+  el bloque correcto **releyendo el DER con un lector independiente**, y formato PEM.
+
+### Decisiones tomadas
+
+- **La clave se intenta en tres escalones**: StrongBox con atestacion, TEE con atestacion, TEE sin
+  atestacion. Hay terminales de campo que fallan en cada uno; quedarse sin clave seria peor que
+  quedarse sin atestacion, que el backend puede exigir o no por politica.
+- **NO se llama a `setUserAuthenticationRequired`.** Eso es la decision D2, que sigue abierta: atar
+  la clave a la credencial del sistema significa que sin patron de pantalla no hay identidad. Esta
+  marcado en el KDoc de `DeviceKeystore` que cuando D2 se cierre se cambia ahi y en ningun sitio mas.
+- **`DevicePosture` no tiene ninguna propiedad "apto"**, y es a proposito: decidir la elegibilidad
+  es el paso 4 y ese paso es del backend. La app informa, no decide. Los indicios de root se
+  reportan y el alta continua.
+- **El limite de privacidad se dice antes de empezar**, en la pantalla, no en una politica que nadie
+  lee: que se lee del telefono, que la clave no sale de ahi y que las apps y archivos personales
+  quedan fuera. Es el paso 19 del workflow puesto donde se ve.
+
+### Verificado en el Redmi Note 8 Pro (`u4vcjv7xeubiljhu`)
+
+Alta real ejecutada en el terminal:
+
+| Paso | Resultado |
+|---|---|
+| 3 | Xiaomi Redmi Note 8 Pro · Android 11 · patch 2022-04-01 |
+| 5 | Keystore disponible, sin indicios de manipulacion |
+| 8 | `DEV-8DB2C628` |
+| 10 | **Trusted execution environment · cadena de atestacion de 4 certificados** |
+| 11 | PKCS#10 · ECDSA P-256 · SHA-256 |
+
+Y el circuito completo con el CSR que salio del telefono:
+
+```
+openssl req -in device.csr.pem -verify -noout
+    -> Certificate request self-signature verify OK
+    -> Subject: O=AeriaOne, OU=QPD, CN=DEV-8DB2C628
+openssl x509 -req ... -CA ca.crt      -> certificado emitido
+openssl verify -CAfile ca.crt         -> device.crt: OK
+```
+
+Certificado devuelto a la app, instalado sobre la clave del Keystore, y **prueba de posesion del
+paso 16: `true`** — la clave que vive en el TEE y la que certifico la CA son el mismo par. El
+terminal arranca ya bloqueado mostrando su Device ID real.
+
+### Lo que NO esta hecho (decirlo el dia 15 antes de que lo pregunten)
+
+- **No hay backend.** Los pasos 2, 4, 7, 13, 14, 17 y 18 no ocurren.
+- **El Device ID se lo inventa el telefono.** Lo emite el registro de dispositivos (paso 8).
+- **El reto de atestacion lo genera el propio dispositivo**, asi que la cadena sale bien formada
+  pero no prueba frescura. Es la costura mas visible de que falta la otra mitad.
+- **La app no interpreta la atestacion**, solo la transporta. Verificarla (arranque verificado,
+  nivel de la clave, reto) es del backend, y es donde se sostienen de verdad los pasos 5 y 6.
+
+### Notas de plataforma
+
+- MIUI apaga la pantalla y bloquea el terminal a mitad de sesion: `adb shell svc power stayon usb`
+  antes de una tanda de capturas.
+
+### Proximo paso
+
+- **Workflow 3** (certificado del agente: segundo par de claves, CSR e instalacion de la cadena) y
+  **workflow 4** (PIN real, que sustituye el `PIN_DEMO` de `IdentityRepository`).
+- El **backend simulado** con CA y servicio de retos, que es lo que convierte `tools/alta-terminal.sh`
+  en algo que se pueda ensenar sin explicar que lo estamos haciendo a mano.
+
+---
+
+## 2026-09-04 — Maquina de estados de confianza y pantalla de bloqueo (UX del IAM, sin criptografia)
+
+### Hecho
+
+Se adelanta la capa visual del modelo IAM antes que la logica. Justificacion: el documento de
+ciberseguridad pone el diseno de UI **fuera de su alcance** (§1.3 Out of Scope, "product UI design"),
+asi que no hay nada que negociar con ellos, y las 7 decisiones abiertas D1-D7 no bloquean ninguna
+pantalla. Ademas es un seguro para el dia 15: si el workflow 12 se atasca, hay demo igual.
+
+- **`data/identity/TrustState.kt`** — siete estados de arranque: NOT_PROVISIONED, ENROLLING, LOCKED,
+  ACTIVE, SESSION_EXPIRED, OFFLINE_GRANTED y BLOCKED. Y `TrustBlockReason` con los cortes del §13,
+  cada uno con **que ha pasado**, **que hacer** y si reintentar sirve.
+- **`data/identity/IdentityRepository.kt`** — un solo `StateFlow<TrustStatus>` (estado + motivo +
+  identidad + intentos + fin de bloqueo). Politica de reintentos del workflow 27 paso 7: 5 intentos
+  por tanda, bloqueo de 1 min -> 5 min -> 30 min. Sin criptografia: es el hueco con la forma que
+  dejaran los workflows 12, 4 y 27-28.
+- **`feature/lock/LockScreen.kt` + `LockViewModel.kt`** — pantalla de PIN. Muestra la identidad
+  provisionada y NO pide usuario (workflow 27 paso 4), teclado de 68.dp, PIN de 6 digitos con
+  validacion automatica al completarlo, cuenta atras visible en el bloqueo temporal.
+- **`feature/lock/TrustBlockedScreen.kt`** — terminal fuera de servicio, con los identificadores en
+  monoespaciada para poder dictarlos por radio.
+- **`feature/enrollment/NotProvisionedScreen.kt`** — marcador provisional del alta, con la etiqueta
+  "ENROLLMENT NOT IMPLEMENTED YET · WORKFLOW 12 / 22-23" a la vista.
+- **`navigation/TrustGate.kt`** — la puerta. MainActivity monta esto y no `AppNavHost`; la app de
+  siempre solo existe dentro de la rama ACTIVE.
+- **`navigation/TrustStateSimulator.kt`** — selector de estado en compilaciones debug (pestana
+  estrecha en el borde izquierdo), mas un atajo por intent equivalente:
+  `adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity --es trust_state BLOCKED --es block_reason DEVICE_REVOKED`
+
+### Decisiones tomadas
+
+- **Los textos de interfaz siguen en ingles**, como el resto de la app (el cliente es QPD,
+  Filipinas). La skill `ui-ux-policial` dice espanol; manda la coherencia con el codigo existente.
+- **La pantalla de bloqueo no usa `AppScaffold`.** La barra superior lleva estado de bodycam, gafas
+  e indicador REC y la inferior la navegacion: es informacion operativa y no puede verse antes de
+  autenticarse. Quien encuentre el telefono solo ve de quien es y que hace falta un PIN.
+- **Solo 7 de los 9 interruptores de corte del §13 producen pantalla completa.** Retirar un permiso
+  quita una funcion, revocar un periferico deja inservible la bodycam pero no el telefono, y cerrar
+  una sesion concreta devuelve a SESSION_EXPIRED. Esta razonado en el propio enum.
+- **PIN de 6 digitos con autovalidacion** en vez de boton de OK: con guantes, un toque de mas en
+  cada desbloqueo del turno se nota.
+- **PIN de la demostracion `004471` en claro en el fuente**, con comentario. Hasta el workflow 4 no
+  hay verificador real y esconderlo daria el espejismo de que aqui ya hay seguridad.
+
+### Verificado en el Redmi Note 8 Pro (`u4vcjv7xeubiljhu`)
+
+Recorrido completo: arranque en DEVICE NOT ENROLLED -> LOCKED con la identidad -> PIN erroneo ->
+5 fallos y bloqueo temporal con cuenta atras -> PIN correcto -> app operativa. Y el corte
+DEVICE_REVOKED. MIUI rechaza `adb shell input` (INJECT_EVENTS), asi que los toques los hizo el
+usuario; de ahi el atajo por intent, que si permite alcanzar cualquier estado desde consola.
+
+Dos fallos encontrados **en el telefono, no en el emulador ni en las previews**, ya corregidos:
+
+1. El contenido cabia justo en un 19,5:9 y se habria cortado en un 16:9. Ahora la ficha de
+   identidad va dentro de un scroll con `weight(1f)` y el teclado fuera: lo que cede es la ficha,
+   nunca las teclas.
+2. En `PinDots` la rama de error iba antes que la de relleno, asi que un PIN fallido pintaba los
+   seis puntos rojos y llenos con el campo vacio — parecia que el PIN seguia escrito. Ahora el
+   relleno dice cuantos digitos hay y el borde dice si el intento anterior fallo.
+
+### Deuda y notas
+
+- El contador de intentos vive en `SharedPreferences` sin cifrar: se borra limpiando datos de la
+  app. Aceptable hoy porque no protege nada; el workflow 4 lo mueve a Keystore.
+- **La decision D1 (un PIN o dos) ya se puede mirar en vez de discutirla**: instalado, el recorrido
+  real es PIN de 6 digitos al arrancar y despues contrasena de boveda para ver evidencia. Dos
+  secretos en el mismo turno.
+- La pestana del simulador roza el borde de la tarjeta en OPERATIONS. Solo afecta a debug.
+
+### Proximo paso
+
+- **Workflow 12**: atributos del telefono, par de claves en Keystore no exportable y PKCS#10 escrito
+  a mano (decision D3), con pruebas contra `openssl`. Aterriza sobre NOT_PROVISIONED / ENROLLING,
+  que ya existen y ya son alcanzables.
+- Llevar a ciberseguridad, ademas de las 7 decisiones: los textos de los cortes del §13 y una
+  propuesta de "grace period for ongoing recording" (§12.2 lo reconoce pendiente por su parte).
+
+---
+
 ## 2026-09-03 — Documentos IAM de AeriaOne: lectura, reparto y estimacion (sin codigo)
 
 ### Hecho
