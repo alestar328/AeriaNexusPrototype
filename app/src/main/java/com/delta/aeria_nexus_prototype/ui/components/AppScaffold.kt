@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.BodycamState
+import com.delta.aeria_nexus_prototype.data.EnlaceAutenticado
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
@@ -101,6 +102,7 @@ private fun StatusBar(isRecording: Boolean) {
     // La barra de estado es global (no pertenece a ninguna pantalla), por eso
     // observa el repositorio directamente en lugar de pasar por un ViewModel.
     val bodycamState by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
+    val enlaceBodycam by AppContainer.bodycamRepository.enlaceAutenticado.collectAsStateWithLifecycle()
 
     Row(
         modifier = Modifier
@@ -125,8 +127,22 @@ private fun StatusBar(isRecording: Boolean) {
         DeviceIndicator(
             icon = Icons.Filled.Videocam,
             description = "Falcon Camera (bodycam)",
-            tint = bodycamStateColor(bodycamState),
+            tint = bodycamStateColor(bodycamState, enlaceBodycam),
         )
+        // El estado nunca va solo en color: un enlace conectado y otro conectado
+        // pero sin acreditar se verian igual, y la diferencia importa mas que la
+        // conexion. Cuando todo esta en orden no se escribe nada; el aviso solo
+        // aparece cuando hay algo que decir.
+        avisoDelEnlace(bodycamState, enlaceBodycam)?.let { aviso ->
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = aviso.texto,
+                color = aviso.color,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+            )
+        }
         Spacer(Modifier.width(12.dp))
         // Falcon Lens (gafas): integracion pendiente, siempre desconectado.
         // El set de Material de Compose no trae gafas: el icono es el vector
@@ -143,12 +159,38 @@ private fun StatusBar(isRecording: Boolean) {
     }
 }
 
-/** Color del icono de la bodycam segun el estado de la conexion Bluetooth. */
-private fun bodycamStateColor(state: BodycamState): Color = when (state) {
-    BodycamState.CONNECTED -> VerdeOk
-    BodycamState.CONNECTING -> AmarilloAviso
-    BodycamState.ERROR -> RojoSuave
-    BodycamState.DISCONNECTED -> TextoTerciario
+/**
+ * Color del icono de la bodycam.
+ *
+ * Estar conectado y ser de fiar son dos cosas distintas (workflow 31): un enlace
+ * abierto con una camara que no ha podido acreditarse es PEOR que no tener
+ * camara, porque el agente cree que la tiene. Por eso el verde se reserva para el
+ * enlace autenticado.
+ */
+private fun bodycamStateColor(state: BodycamState, enlace: EnlaceAutenticado): Color = when {
+    state != BodycamState.CONNECTED -> when (state) {
+        BodycamState.CONNECTING -> AmarilloAviso
+        BodycamState.ERROR -> RojoSuave
+        else -> TextoTerciario
+    }
+    enlace == EnlaceAutenticado.SI -> VerdeOk
+    enlace == EnlaceAutenticado.RECHAZADO -> RojoSuave
+    else -> AmarilloAviso
+}
+
+/** Lo que se escribe junto al icono, o null si no hay nada que advertir. */
+private data class AvisoDeEnlace(val texto: String, val color: Color)
+
+private fun avisoDelEnlace(state: BodycamState, enlace: EnlaceAutenticado): AvisoDeEnlace? {
+    if (state != BodycamState.CONNECTED) return null
+    return when (enlace) {
+        // Lo normal no se anuncia: si cada enlace correcto pusiera una etiqueta,
+        // el agente dejaria de leerlas y la que importa pasaria desapercibida.
+        EnlaceAutenticado.SI -> null
+        EnlaceAutenticado.COMPROBANDO -> AvisoDeEnlace("CHECKING", AmarilloAviso)
+        EnlaceAutenticado.RECHAZADO -> AvisoDeEnlace("NOT TRUSTED", RojoSuave)
+        else -> AvisoDeEnlace("UNVERIFIED", AmarilloAviso)
+    }
 }
 
 @Composable

@@ -2,8 +2,11 @@ package com.delta.aeria_nexus_prototype.data
 
 import android.content.Context
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
+import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
+import com.delta.aeria_nexus_prototype.data.identity.PinLocal
+import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
@@ -32,6 +35,12 @@ object AppContainer {
         private set
     lateinit var enrollmentRepository: EnrollmentRepository
         private set
+    lateinit var credentialRepository: CredentialRepository
+        private set
+    lateinit var pinLocal: PinLocal
+        private set
+    lateinit var retoRepository: RetoRepository
+        private set
     lateinit var evidenceUploader: EvidenceUploader
         private set
 
@@ -54,8 +63,18 @@ object AppContainer {
         vaultRepository = VaultRepository(appContext)
         // Decide si la app llega siquiera a la pantalla de operaciones, asi que
         // tiene que estar lista antes de que se componga nada (ver TrustGate).
-        identityRepository = IdentityRepository(appContext)
+        pinLocal = PinLocal(appContext)
         enrollmentRepository = EnrollmentRepository(appContext)
+        credentialRepository = CredentialRepository(appContext)
+        retoRepository = RetoRepository(appContext)
+        // Va detras de los tres anteriores: el desbloqueo autoriza la clave del
+        // agente y firma el reto del backend, asi que los necesita ya construidos.
+        identityRepository = IdentityRepository(
+            context = appContext,
+            pinLocal = pinLocal,
+            credential = credentialRepository,
+            retos = retoRepository,
+        )
         evidenceUploader = EvidenceUploader(
             context = appContext,
             config = UploadConfig(appContext),
@@ -63,5 +82,28 @@ object AppContainer {
             dao = dao,
         )
         incidentRepository.onIncidentSaved = { evidenceUploader.reconcile() }
+        // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin
+        // esto, una camara emparejada seguiria operando en nombre de un agente que
+        // ya no esta de servicio.
+        identityRepository.alCerrarSesion = { motivo -> bodycamRepository.desatar(motivo) }
+    }
+
+    /**
+     * Destruye TODA la identidad local: la del terminal y la del agente.
+     *
+     * Van juntas siempre. El §13 lo exige al resetear ("reset must destroy /
+     * invalidate old local identity") y dejarse una a medias es peor que no
+     * borrar ninguna: el alta siguiente reutilizaria una clave vieja y no
+     * probaria nada.
+     */
+    fun destruirIdentidadLocal() {
+        enrollmentRepository.deshacerAlta()
+        credentialRepository.borrarCredencial()
+        pinLocal.borrar()
+        retoRepository.borrar()
+        // Tambien los identificadores: si se quedasen, un volcado de las
+        // preferencias seguiria mostrando a que agente y a que terminal pertenecio
+        // este telefono despues de haber destruido su identidad.
+        identityRepository.deshacerAlta()
     }
 }

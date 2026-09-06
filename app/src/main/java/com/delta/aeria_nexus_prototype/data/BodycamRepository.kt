@@ -38,10 +38,44 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import com.delta.aeria_nexus_prototype.data.identity.BindingActivo
+import com.delta.aeria_nexus_prototype.data.identity.BindingPeriferico
+import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
+import com.delta.aeria_nexus_prototype.data.identity.EmparejamientoDelTelefono
+import com.delta.aeria_nexus_prototype.data.identity.ResultadoEmparejamiento
+import java.util.Base64
 import org.json.JSONObject
 
 /** Estado de la conexion Bluetooth con la bodycam. */
 enum class BodycamState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
+
+/**
+ * Si sabemos con QUIEN estamos hablando (workflow 31).
+ *
+ * Estar conectado y estar autenticado son dos cosas distintas, y hasta hoy la app
+ * solo distinguia la primera. El canal es un RFCOMM sin cifrado con un UUID que
+ * esta publicado en nuestra propia documentacion: conectar no prueba nada.
+ */
+enum class EnlaceAutenticado {
+    /** Sin enlace, o enlace recien abierto y todavia sin intentar el intercambio. */
+    DESCONOCIDO,
+
+    /** Intercambio en curso. */
+    COMPROBANDO,
+
+    /** La bodycam demostro su identidad y nosotros la nuestra ante ella. */
+    SI,
+
+    /**
+     * El intercambio no se pudo completar: firmware sin el workflow 31, o este
+     * telefono sin ancla de confianza para perifericos. No es que mienta: es que
+     * todavia no hay con que comprobarlo.
+     */
+    NO_SOPORTADO,
+
+    /** El intercambio se completo y algo no cuadro. Este enlace NO es de fiar. */
+    RECHAZADO,
+}
 
 /**
  * Conexion y control de la bodycam W1 por Bluetooth RFCOMM (fase 4 del port
@@ -64,6 +98,23 @@ class BodycamRepository(private val context: Context) {
 
     private var socket: BluetoothSocket? = null
     private var output: OutputStream? = null
+
+    private val _enlaceAutenticado = MutableStateFlow(EnlaceAutenticado.DESCONOCIDO)
+    val enlaceAutenticado: StateFlow<EnlaceAutenticado> = _enlaceAutenticado.asStateFlow()
+
+    private val _motivoDelEnlace = MutableStateFlow<String?>(null)
+    val motivoDelEnlace: StateFlow<String?> = _motivoDelEnlace.asStateFlow()
+
+    /** Atadura agente-camara en vigor (workflow 33). Null si la camara no sirve a nadie. */
+    private val _binding = MutableStateFlow<BindingActivo?>(null)
+    val binding: StateFlow<BindingActivo?> = _binding.asStateFlow()
+
+    /** Intercambio en curso, si lo hay. Vive lo que dure una conexion. */
+    private var emparejamiento: EmparejamientoDelTelefono? = null
+    private var inicioDelEmparejamientoMillis = 0L
+
+    /** Declaracion enviada a la camara mientras se espera su BIND_OK. */
+    private var pendienteDeAtar: BindingPeriferico.Declaracion? = null
 
     // Coordina connect/disconnect con el ciclo de vida del bucle de conexion.
     private val lock = Any()
@@ -213,6 +264,7 @@ class BodycamRepository(private val context: Context) {
             lastRxMillis = System.currentTimeMillis()
             _state.value = BodycamState.CONNECTED
             Log.i(TAG, "Bodycam conectada")
+            iniciarEmparejamiento()
 
             // El poll de STATUS y el watchdog viven solo mientras dura esta
             // conexion; readUntilClosed bloquea hasta que el enlace se cae.
@@ -303,6 +355,7 @@ class BodycamRepository(private val context: Context) {
     private suspend fun watchdogLoop() {
         while (true) {
             delay(WATCHDOG_CHECK_MILLIS)
+            vigilarEmparejamiento()
             if (System.currentTimeMillis() - lastRxMillis > STALE_LINK_MILLIS) {
                 Log.w(TAG, "Sin datos de la bodycam hace ${STALE_LINK_MILLIS / 1000} s: enlace muerto")
                 closeQuietly()
@@ -311,7 +364,220 @@ class BodycamRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Arranca el intercambio del workflow 31 en cuanto hay enlace.
+     *
+     * Se hace lo primero, antes del primer STATUS: cuanto mas tarde se autentique
+     * el canal, mas comandos habran viajado por un enlace del que no sabemos nada.
+     */
+    private fun iniciarEmparejamiento() {
+        _motivoDelEnlace.value = null
+        val certificado = ClaveEnKeystore.terminal.certificado()
+        if (certificado == null) {
+            marcarEnlace(
+                EnlaceAutenticado.NO_SOPORTADO,
+                "Este telefono no esta dado de alta: no tiene certificado que presentar",
+            )
+            return
+        }
+
+        emparejamiento = EmparejamientoDelTelefono(
+            deviceId = ClaveEnKeystore.terminal.commonNameDelCertificado() ?: "DESCONOCIDO",
+            certificadoDelTelefono = certificado,
+            firmar = { datos -> ClaveEnKeystore.terminal.firmarReto(datos) },
+            anclaDePerifericos = AppContainer.enrollmentRepository.anclaDePerifericos(),
+        )
+        inicioDelEmparejamientoMillis = System.currentTimeMillis()
+        _enlaceAutenticado.value = EnlaceAutenticado.COMPROBANDO
+        sendCommand(emparejamiento!!.saludo())
+    }
+
+    /** Cada linea AUTH_* del intercambio, en el orden en que llegan. */
+    private fun continuarEmparejamiento(linea: String) {
+        val enCurso = emparejamiento ?: return
+        if (linea.startsWith("AUTH_ID")) {
+            val prueba = enCurso.responderA(linea)
+            if (prueba == null) {
+                marcarEnlace(EnlaceAutenticado.RECHAZADO, "La bodycam se identifico de forma ilegible")
+                return
+            }
+            sendCommand(prueba)
+            return
+        }
+
+        when (val resultado = enCurso.comprobar(linea)) {
+            is ResultadoEmparejamiento.Autenticado -> {
+                marcarEnlace(EnlaceAutenticado.SI, "${resultado.bwcId} · ${resultado.sujeto}")
+                // El emparejamiento dice QUE camara es; la atadura dice A QUIEN
+                // sirve. Son dos cosas distintas y esta es la segunda.
+                atarAlAgente(resultado.bwcId, resultado.nonceDeLaSesion)
+            }
+
+            is ResultadoEmparejamiento.Rechazado ->
+                marcarEnlace(EnlaceAutenticado.RECHAZADO, resultado.motivo)
+
+            is ResultadoEmparejamiento.NoSoportado ->
+                marcarEnlace(EnlaceAutenticado.NO_SOPORTADO, resultado.motivo)
+        }
+        emparejamiento = null
+    }
+
+    /**
+     * Una bodycam sin el workflow 31 no contesta al saludo: no responde nada, o
+     * responde un error de comando desconocido. Se le da un plazo y se sigue.
+     */
+    private fun vigilarEmparejamiento() {
+        if (_enlaceAutenticado.value != EnlaceAutenticado.COMPROBANDO) return
+        if (System.currentTimeMillis() - inicioDelEmparejamientoMillis < PLAZO_EMPAREJAMIENTO_MILLIS) return
+
+        emparejamiento = null
+        marcarEnlace(
+            EnlaceAutenticado.NO_SOPORTADO,
+            "La bodycam no respondio al emparejamiento: firmware sin el workflow 31",
+        )
+    }
+
+    /**
+     * QUE PASA CUANDO NO ESTA AUTENTICADO, dicho aqui para que se vea al leerlo:
+     * hoy **no se corta el enlace**. Ninguna bodycam implementa todavia su mitad
+     * —es el workflow 13 y vive en otro repositorio—, asi que cortar dejaria la
+     * camara inservible sin haber ganado nada. Se marca, se registra y se ensena.
+     *
+     * En cuanto exista una W1 con identidad propia, esto tiene que invertirse:
+     * un enlace RECHAZADO se cierra, y un NO_SOPORTADO deja de permitir grabar.
+     */
+    private fun marcarEnlace(estado: EnlaceAutenticado, motivo: String) {
+        _enlaceAutenticado.value = estado
+        _motivoDelEnlace.value = motivo
+        when (estado) {
+            EnlaceAutenticado.SI -> Log.i(TAG, "Enlace autenticado con $motivo")
+            EnlaceAutenticado.RECHAZADO -> Log.e(TAG, "ENLACE NO FIABLE: $motivo")
+            else -> Log.w(TAG, "Enlace sin autenticar: $motivo")
+        }
+    }
+
+    /**
+     * Ata la camara al agente que tiene la sesion abierta (workflow 33).
+     *
+     * La atadura es una declaracion firmada CON LA CLAVE DEL AGENTE, no con la del
+     * telefono, y ahi esta el sentido: quien autoriza a la camara a operar en su
+     * nombre es la persona, no el aparato. Por eso solo se puede crear con la
+     * sesion abierta —la clave del agente esta autorizada solo entonces— y por eso
+     * cerrar sesion la deshace.
+     */
+    private fun atarAlAgente(bwcId: String, nonceDeLaSesion: ByteArray) {
+        val identidad = AppContainer.identityRepository.status.value.identity
+        val credential = AppContainer.credentialRepository
+        if (identidad == null || !credential.puedeFirmarComoElAgente) {
+            Log.w(TAG, "camara autenticada pero sin sesion de agente: no se ata a nadie")
+            return
+        }
+        val certificado = ClaveEnKeystore.agente.certificado()
+        if (certificado == null) {
+            Log.w(TAG, "no hay certificado del agente que presentar a la camara")
+            return
+        }
+
+        val ahora = System.currentTimeMillis()
+        val declaracion = BindingPeriferico.declaracion(
+            bindingId = BindingPeriferico.nuevoId(),
+            userId = identidad.userId,
+            deviceId = identidad.deviceId,
+            bwcId = bwcId,
+            tenant = identidad.tenant,
+            nonceDeLaSesion = nonceDeLaSesion,
+            emitidoEn = ahora,
+            caducaEn = ahora + BindingPeriferico.VALIDEZ_POR_DEFECTO_MILLIS,
+        )
+        val firma = credential.firmarRetoDeSesion(declaracion.toByteArray(Charsets.UTF_8))
+        val codificador = Base64.getEncoder()
+        pendienteDeAtar = BindingPeriferico.leer(declaracion)
+        sendCommand(
+            listOf(
+                "BIND",
+                codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
+                codificador.encodeToString(firma),
+                codificador.encodeToString(certificado.encoded),
+            ).joinToString(":"),
+        )
+    }
+
+    /**
+     * Deshace la atadura (workflow 34): fin de turno, cierre de sesion, caducidad,
+     * reasignacion o revocacion.
+     *
+     * Va firmada igual que la creacion. Si cualquiera pudiera deshacerla, bastaria
+     * con acercarse a la camara para dejar al agente sin atribucion en mitad de un
+     * incidente, y la evidencia de ese rato no podria decir quien la grabo.
+     */
+    fun desatar(motivo: BindingPeriferico.MotivoDeFin) {
+        val activo = _binding.value ?: return
+        val credential = AppContainer.credentialRepository
+        _binding.value = null
+
+        if (!credential.puedeFirmarComoElAgente) {
+            // Sin sesion no se puede firmar el fin. La atadura muere igual por
+            // caducidad y al reconectar no se recrea, asi que el efecto se produce;
+            // lo que se pierde es el aviso inmediato a la camara.
+            Log.w(TAG, "sesion ya cerrada: la atadura de ${activo.bwcId} caducara sola")
+            return
+        }
+        val declaracion = BindingPeriferico.declaracionDeFin(
+            bindingId = activo.bindingId,
+            motivo = motivo,
+            momento = System.currentTimeMillis(),
+        )
+        val firma = credential.firmarRetoDeSesion(declaracion.toByteArray(Charsets.UTF_8))
+        val codificador = Base64.getEncoder()
+        sendCommand(
+            listOf(
+                "UNBIND",
+                codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
+                codificador.encodeToString(firma),
+            ).joinToString(":"),
+        )
+        Log.i(TAG, "atadura de ${activo.bwcId} deshecha: ${motivo.name}")
+    }
+
+    private fun atenderRespuestaDeAtadura(linea: String) {
+        when {
+            linea.startsWith("BIND_OK") -> {
+                val declaracion = pendienteDeAtar
+                if (declaracion == null) {
+                    Log.w(TAG, "BIND_OK sin atadura pendiente")
+                    return
+                }
+                _binding.value = BindingActivo(
+                    bindingId = declaracion.bindingId,
+                    userId = declaracion.userId,
+                    bwcId = declaracion.bwcId,
+                    caducaEn = declaracion.caducaEn,
+                )
+                Log.i(TAG, "camara ${declaracion.bwcId} atada a ${declaracion.userId}")
+            }
+
+            linea.startsWith("BIND_FAIL") -> {
+                _binding.value = null
+                Log.e(TAG, "la camara rechazo la atadura: $linea")
+            }
+
+            linea.startsWith("UNBIND_OK") -> Log.i(TAG, "la camara confirmo el desatado")
+        }
+        pendienteDeAtar = null
+    }
+
     private fun handleLine(line: String) {
+        // El intercambio del workflow 31 viaja por el mismo canal de texto, asi
+        // que se atiende aqui antes que nada: si se hiciera con lecturas
+        // bloqueantes aparte, competiria con este bucle por las mismas lineas.
+        if (line.startsWith("AUTH_")) {
+            continuarEmparejamiento(line)
+            return
+        }
+        if (line.startsWith("BIND_") || line.startsWith("UNBIND_")) {
+            atenderRespuestaDeAtadura(line)
+            return
+        }
         when {
             // STATUS:{json} — estado periodico de la bodycam.
             line.startsWith("STATUS:") -> {
@@ -364,6 +630,14 @@ class BodycamRepository(private val context: Context) {
     }
 
     private fun closeQuietly() {
+        emparejamiento = null
+        // La atadura NO sobrevive al enlace: un corte de Bluetooth es rutinario y
+        // se recrea al reconectar, pero mientras no hay enlace la camara no esta
+        // sirviendo a nadie y la interfaz no debe decir lo contrario.
+        pendienteDeAtar = null
+        _binding.value = null
+        _enlaceAutenticado.value = EnlaceAutenticado.DESCONOCIDO
+        _motivoDelEnlace.value = null
         try { output?.close() } catch (_: IOException) {}
         try { socket?.close() } catch (_: IOException) {}
         output = null
@@ -460,6 +734,9 @@ class BodycamRepository(private val context: Context) {
 
         // Mismo UUID que BodyCamServer en la bodycam (RFCOMM custom de Falcon).
         private val FALCON_UUID: UUID = UUID.fromString("FA1C0000-1337-4242-CAFE-DEADBEEF0001")
+
+        /** Lo que se espera a que la bodycam conteste al saludo antes de seguir sin el. */
+        private const val PLAZO_EMPAREJAMIENTO_MILLIS = 6_000L
 
         private const val STATUS_POLL_MILLIS = 5_000L
         private const val WATCHDOG_CHECK_MILLIS = 3_000L

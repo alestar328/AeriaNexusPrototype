@@ -59,14 +59,33 @@ openssl x509 -req -in "$TRABAJO/device.csr.pem" \
     -days 30 -sha256 -out "$TRABAJO/device.crt" 2>/dev/null
 openssl verify -CAfile "$CA_DIR/ca.crt" "$TRABAJO/device.crt"
 
-# --- Pasos 15 a 18: devolver el certificado a la app -------------------------
+# El certificado emitido se guarda porque alta-agente.sh lo necesita: es con lo
+# que se comprueba que la solicitud del agente salio de un terminal dado de alta.
+mkdir -p "$CA_DIR/dispositivos"
+CERT_GUARDADO="$CA_DIR/dispositivos/$SERIAL.crt"
+cp "$TRABAJO/device.crt" "$CERT_GUARDADO"
 
-echo "==> Instalando el certificado en el terminal"
+# --- Pasos 15 a 18: devolver el certificado a la app -------------------------
+# El certificado y el reto de la prueba de posesion viajan en el mismo intent. El
+# nonce lo genera este script: el telefono no puede predecirlo, y eso es lo que
+# convierte el paso 16 en prueba de frescura y no solo de correspondencia.
+RETOS_DIR="$CA_DIR/retos"
+mkdir -p "$RETOS_DIR"
+openssl rand -out "$RETOS_DIR/posesion_terminal.nonce" 32
+
+echo "==> Instalando el certificado y emitiendo el reto del paso 16"
 adb -s "$SERIAL" logcat -c
 adb -s "$SERIAL" shell am force-stop "$PAQUETE"
 adb -s "$SERIAL" shell am start -n "$PAQUETE/.MainActivity" \
-    --es device_cert "$(openssl base64 -A -in "$TRABAJO/device.crt")" > /dev/null
+    --es device_cert "$(openssl base64 -A -in "$TRABAJO/device.crt")" \
+    --es challenge_purpose POSESION_TERMINAL \
+    --es challenge "$(openssl base64 -A -in "$RETOS_DIR/posesion_terminal.nonce")" \
+    --es challenge_issuer AeriaOne-challenge-service-test \
+    --es challenge_ttl 300 > /dev/null
 
 sleep 3
 echo "==> Resultado (paso 16, prueba de posesion):"
-adb -s "$SERIAL" logcat -d -s AeriaAlta | tail -5
+adb -s "$SERIAL" logcat -d -s AeriaAlta | tail -4
+
+echo "==> Verificando la respuesta al reto contra el certificado emitido"
+"$(dirname "$0")/reto.sh" "$SERIAL" verificar POSESION_TERMINAL "$CERT_GUARDADO"

@@ -19,5 +19,6 @@ local.properties
 *.jks
 *.keystore
 
-# Claves de la CA de pruebas del alta de terminales (tools/alta-terminal.sh).
+# Claves de las CA de pruebas del alta (tools/alta-terminal.sh y tools/alta-agente.sh),
+# mas los certificados de terminal que emiten.
 tools/ca-pruebas/

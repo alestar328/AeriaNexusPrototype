@@ -87,28 +87,30 @@ object EvidenceKeys {
  * Cifra y descifra con una clave AES-256 de AndroidKeyStore que **no sale del
  * dispositivo**: no hay ningún secreto en el APK que filtrar.
  *
- * Ya no es un destinatario de la DEK. Su trabajo es proteger el fichero de claves de
- * la bóveda ([EvidenceVault]): que la clave privada del agente esté además envuelta
- * por el Keystore obliga a que cualquier intento de adivinar la contraseña se haga
- * en este teléfono y uno por uno. Copiando el fichero a un PC no se puede hacer
- * fuerza bruta contra él, que es el ataque realista contra una contraseña corta.
+ * Su trabajo es que un fichero protegido por una contraseña o un PIN no se pueda
+ * atacar fuera de este teléfono: envuelto además por el Keystore, adivinarlos
+ * obliga a hacerlo aquí y uno por uno. Copiando el fichero a un PC no se puede
+ * hacer fuerza bruta contra él, que es el ataque realista contra un secreto corto.
+ *
+ * Hay **dos instancias con dos claves distintas**, y no es cosmética: el documento
+ * de arquitectura pide claves separadas por propósito e independientemente
+ * revocables (IAM-05). Comprometer la evidencia no puede comprometer la identidad.
  *
  * blob = IV(12) ‖ ciphertext ‖ tag(16).
  *
- * No se pide autenticación de usuario (setUserAuthenticationRequired): esta clave se
- * usa también al cerrar una captura, sin nadie delante. Quien pone al agente delante
- * es la contraseña de la bóveda.
+ * No se pide autenticación de usuario (setUserAuthenticationRequired): la clave de
+ * evidencia se usa al cerrar una captura, sin nadie delante. Quien pone al agente
+ * delante es la contraseña de la bóveda o el PIN, según el caso.
  */
-object DeviceKeyWrapper {
+class DeviceKeyWrapper private constructor(private val alias: String) {
 
-    private const val ALIAS = "aeria_evidence_v1"
-    private const val STORE = "AndroidKeyStore"
-    private const val IV_BYTES = 12
-    private const val TAG_BITS = 128
+    private val STORE = "AndroidKeyStore"
+    private val IV_BYTES = 12
+    private val TAG_BITS = 128
 
     fun wrap(claro: ByteArray): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, requireNotNull(key()) { "sin clave de Keystore" })
+        cipher.init(Cipher.ENCRYPT_MODE, requireNotNull(key()) { "sin clave de Keystore ($alias)" })
         val sellado = cipher.doFinal(claro)
         return cipher.iv + sellado
     }
@@ -117,14 +119,14 @@ object DeviceKeyWrapper {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(
             Cipher.DECRYPT_MODE,
-            requireNotNull(key()) { "sin clave de Keystore" },
+            requireNotNull(key()) { "sin clave de Keystore ($alias)" },
             GCMParameterSpec(TAG_BITS, blob, 0, IV_BYTES),
         )
         cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES)
     } catch (e: Exception) {
         // Esperable si la clave se perdió al reinstalar el sistema o al borrar los
         // datos de la app. No es un fallo del formato.
-        Log.w(TAG, "no se pudo abrir el envoltorio de Keystore: ${e.message}")
+        Log.w(TAG, "no se pudo abrir el envoltorio de Keystore ($alias): ${e.message}")
         null
     }
 
@@ -132,18 +134,18 @@ object DeviceKeyWrapper {
     @Synchronized
     private fun key(): SecretKey? = try {
         val store = KeyStore.getInstance(STORE).apply { load(null) }
-        (store.getKey(ALIAS, null) as? SecretKey) ?: generate()
+        (store.getKey(alias, null) as? SecretKey) ?: generate()
     } catch (e: Exception) {
         Log.e(TAG, "Keystore no disponible: ${e.message}")
         null
     }
 
     private fun generate(): SecretKey {
-        Log.d(TAG, "generando la clave de evidencia en Keystore ($ALIAS)")
+        Log.d(TAG, "generando clave de Keystore ($alias)")
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, STORE)
         gen.init(
             KeyGenParameterSpec.Builder(
-                ALIAS,
+                alias,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -153,6 +155,15 @@ object DeviceKeyWrapper {
                 .build()
         )
         return gen.generateKey()
+    }
+
+    companion object {
+
+        /** Protege el fichero de claves de la bóveda de evidencia ([EvidenceVault]). */
+        val evidencia = DeviceKeyWrapper("aeria_evidence_v1")
+
+        /** Protege el verificador del PIN del agente (workflow 4). Otra clave, a propósito. */
+        val identidad = DeviceKeyWrapper("aeria_identity_v1")
     }
 }
 

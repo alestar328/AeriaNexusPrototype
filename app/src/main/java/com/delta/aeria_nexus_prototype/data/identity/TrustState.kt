@@ -21,6 +21,13 @@ enum class TrustState {
     /** Alta en curso: generando claves, pidiendo certificado o esperando aprobacion. */
     ENROLLING,
 
+    /**
+     * El agente ya tiene certificado y todavia no ha elegido su PIN (workflow 4,
+     * paso 13). Es el ultimo tramo del alta y el unico que depende de una persona:
+     * hasta aqui no ha habido nada que decidir.
+     */
+    PIN_SETUP,
+
     /** Provisionada y en reposo. Pide el PIN para autorizar el uso de la clave (workflow 27). */
     LOCKED,
 

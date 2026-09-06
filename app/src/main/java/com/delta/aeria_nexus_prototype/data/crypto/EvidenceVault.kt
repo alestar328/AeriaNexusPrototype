@@ -39,7 +39,7 @@ private const val TAG = "EvidenceVault"
  *
  * La privada se guarda en `vault.key` protegida en dos capas: primero AES-GCM con
  * una clave derivada de la contraseña (PBKDF2-HMAC-SHA256), y ese resultado envuelto
- * otra vez por la clave de AndroidKeyStore ([DeviceKeyWrapper]). La segunda capa es
+ * otra vez por la clave de AndroidKeyStore ([DeviceKeyWrapper.evidencia]). La segunda capa es
  * lo que impide sacar el fichero del teléfono y probar contraseñas en un PC.
  *
  * ── Consecuencia que hay que tener presente ───────────────────────────────────
@@ -126,7 +126,7 @@ object EvidenceVault {
                 put("version", VERSION)
                 put("salt", codificar(salt))
                 put("iterations", ITERACIONES)
-                put("private_key", codificar(DeviceKeyWrapper.wrap(protegida)))
+                put("private_key", codificar(DeviceKeyWrapper.evidencia.wrap(protegida)))
                 put("public_key", codificar(par.public.encoded))
             }
             fichero.writeText(json.toString())
@@ -152,7 +152,7 @@ object EvidenceVault {
         return try {
             val json = JSONObject(fichero.readText())
             val salt = decodificar(json.getString("salt"))
-            val protegida = DeviceKeyWrapper.unwrap(decodificar(json.getString("private_key")))
+            val protegida = DeviceKeyWrapper.evidencia.unwrap(decodificar(json.getString("private_key")))
                 ?: return false
             val pkcs8 = descifrarConContrasena(
                 blob = protegida,

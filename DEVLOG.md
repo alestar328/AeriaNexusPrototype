@@ -6,6 +6,618 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-06 (5) — Workflows 33 y 34: la camara sirve a un agente sin convertirse en el
+
+### Hecho
+
+Es la pieza menos evidente del modelo. La evidencia tiene que poder decir **quien** la
+grabo, no solo con que aparato; la forma facil seria darle a la camara la identidad
+del agente, y el documento lo prohibe: "a peripheral binding does not copy the officer
+identity to the peripheral", y en la capa de evidencia "the capture device signs as
+itself; user attribution comes through the validated session and binding".
+
+Asi que la atadura es una **declaracion firmada por el agente**: yo,
+cmendez.aeriaone.com, autorizo a BWC-896E a operar en mi nombre desde DEV-74435826
+hasta tal hora. La camara la guarda y la presenta; **no puede firmar como el agente**
+porque nunca ha tenido su clave. Perder la camara obliga a revocar la camara, no al
+agente.
+
+- **`data/identity/BindingPeriferico.kt`** (Nexus) — el modelo y las dos declaraciones
+  (crear y deshacer), en JSON canonico compuesto a mano: se firma el texto tal cual,
+  asi que los dos extremos tienen que construirlo igual byte a byte y un serializador
+  que reordene claves lo romperia.
+- **`BodycamRepository`** — ata al terminar el emparejamiento y expone la atadura viva.
+- **`BodyCamServer/BindingAgente.kt`** — el lado de la camara, con **dos anclas**: la
+  de dispositivos para validar al telefono (workflow 31) y la de USUARIO para validar
+  al agente (workflow 33). Son dos porque el documento separa los dominios de
+  confianza; con una sola, revocar un agente y revocar un terminal serian lo mismo.
+- **`tools/alta-bodycam.sh`** reparte ahora las dos anclas a la camara.
+
+### Cuatro decisiones que sostienen esto
+
+1. **Firma la clave del AGENTE, no la del telefono.** Quien autoriza es la persona.
+   Por eso solo se puede atar con la sesion abierta —la clave del agente esta
+   autorizada solo entonces— y por eso cerrar sesion la deshace.
+2. **La declaracion lleva dentro el nonce de la sesion de emparejamiento.** Sin eso,
+   una atadura capturada ayer valdria hoy; con eso es tan efimera como el
+   emparejamiento que la respalda.
+3. **El fin va firmado igual que la creacion.** Si cualquiera pudiera deshacerla,
+   bastaria acercarse a la camara para dejar al agente sin atribucion en mitad de un
+   incidente.
+4. **La caducidad se comprueba al leer, no con un temporizador.** Un temporizador que
+   no salta —proceso dormido, reloj cambiado— deja una atadura viva de mas, y aqui lo
+   seguro es lo contrario.
+
+La camara comprueba cuatro cosas antes de aceptar: que el certificado del agente lo
+emitio la CA de usuario, que la firma cubre la declaracion, que la atadura habla de
+ESTA camara y ESTA sesion, y que el nombre comun del certificado es el agente
+declarado. Sin la ultima, un agente con certificado valido podria atar la camara a
+nombre de otro.
+
+En `IdentityRepository.lock()` el orden importa y esta comentado: primero se avisa
+para deshacer las ataduras y despues se retira la autorizacion de la clave, porque
+para firmar el fin hace falta esa clave.
+
+### Estado: ESCRITO Y COMPILA, SIN VERIFICAR EN DISPOSITIVO
+
+Los dos APK compilan limpios y las 24 pruebas JVM siguen en verde, pero **el
+intercambio BIND/UNBIND no se ha ejecutado nunca contra el hardware**. Se cerro la
+jornada antes. Lo pendiente, con los dos aparatos conectados:
+
+1. Desbloquear y conectar la bodycam: en el telefono
+   `camara BWC-896E atada a cmendez.aeriaone.com`, y en la camara
+   `camara al servicio de cmendez.aeriaone.com`.
+2. Bloquear la app y comprobar que la atadura se deshace con motivo CIERRE_DE_SESION.
+3. La prueba que de verdad importa: que una atadura con el nonce de otra sesion se
+   rechaza. El codigo lo contempla y nadie lo ha visto fallar.
+
+Faltan tambien tres de los cinco motivos de fin del catalogo: reasignacion, revocacion
+y fin de turno explicito. Solo estan cierre de sesion y caducidad.
+
+### Cierre de la jornada
+
+Se actualizo `tabla_horas_facturacion_proyecto.xlsx` con las tres sesiones del sistema
+de autenticacion (10,4 h en total, bloques nuevos AN-2, AN-3 y BC-7) y se dejo anotado
+en la propia hoja de donde sale cada numero: las del 4 y el 6 de septiembre del reloj
+de sesion, el reparto por tarea dentro del 6 estimado sobre un total medido, y la del
+3 de septiembre ESTIMADA y pendiente de confirmar.
+
+---
+
+## 2026-09-06 (4) — Workflows 13 y 31: la bodycam gana identidad propia y el canal deja de fiarse
+
+### Hecho
+
+Se ataca la deuda mas grave del repositorio: el canal con la W1 era un RFCOMM sin
+cifrado de enlace con un UUID fijo **publicado en nuestra propia documentacion**.
+Cualquiera que lo conociera podia mandarle `REC_STOP` a la camara, y la camara no
+tenia forma de saber que no eramos nosotros; al reves igual, el telefono se conectaba
+a la primera MAC que respondiera y se fiaba.
+
+Es autenticacion MUTUA, asi que necesita las dos puntas. **BodyCamServer esta en
+`C:\Users\newge\Desktop\Variedades\BodyCam\BodyCamServer`** (la ruta que figuraba en
+`docs/bodycam-contexto.md` estaba desactualizada; conviene corregirla).
+
+**En Aeria Nexus:**
+
+- **`data/identity/EmparejamientoBodycam.kt`** — el protocolo y el lado del telefono,
+  separados del transporte: recibe lineas y devuelve lineas. Eso es lo que permite
+  probarlo entero sin hardware.
+- **`data/BodycamRepository.kt`** — la app distingue por fin **conectado** de
+  **autenticado** (`EnlaceAutenticado`: DESCONOCIDO, COMPROBANDO, SI, NO_SOPORTADO,
+  RECHAZADO). El intercambio se atiende dentro del bucle de lectura que ya existia,
+  no con lecturas bloqueantes aparte, porque competirian por las mismas lineas.
+- **`EnrollmentRepository`** guarda el ancla de perifericos; se instala por intent.
+
+**En BodyCamServer:**
+
+- **`BodycamIdentity.kt`** — workflow 13: par EC P-256 en el Keystore de la W1, CSR,
+  instalacion del certificado y prueba de posesion. `Der.kt` y `Pkcs10.kt` se copian
+  de Aeria Nexus tal cual.
+- **`Emparejamiento.kt`** — el lado de la camara. La camara valida al telefono con el
+  mismo rigor con el que el telefono la valida a ella: si el telefono no se acredita,
+  no se le firma nada.
+- **`BtServerService`** — un intercambio por conexion: el nonce vale para esa y solo
+  esa, que es lo que impide reutilizar una respuesta capturada.
+- Se activa `buildConfig` en Gradle, que hacia falta para `BuildConfig.DEBUG`.
+
+**`tools/alta-bodycam.sh`** — alta de la W1 con **la misma CA de dispositivos** que
+los telefonos, como pide el documento ("Device Identity CA ... Android/BWC/goggles"),
+y reparto del ancla a las dos puntas.
+
+### El protocolo
+
+    telefono -> bodycam   AUTH_HELLO:<version>:<deviceId>:<nonceA>
+    bodycam  -> telefono  AUTH_ID:<bwcId>:<nonceB>:<certificado>
+    telefono -> bodycam   AUTH_PROOF:<firma>:<certificado>
+    bodycam  -> telefono  AUTH_OK:<firma>          o  AUTH_FAIL:<motivo>
+
+Cada lado firma una transcripcion con **version, rol, los dos identificadores y los
+dos nonces**. Cada trozo impide una cosa concreta: la version que se negocie a la
+baja; **el rol** que se devuelva la firma del telefono haciendola pasar por la de la
+camara; los dos IDs que valga una prueba de otro par; los dos nonces que un extremo
+precalcule lo que va a firmar. Quitar cualquiera rompe una de las cuatro.
+
+### Verificado (JVM, los dos extremos hablando entre si)
+
+`EmparejamientoBodycamTest`, **6 pruebas**, con el responsable de la bodycam escrito
+como implementacion de referencia en el codigo de pruebas. **Las negativas son el
+motivo de que el fichero exista**: que el caso bueno funcione no demuestra nada.
+
+| Ataque | Resultado |
+|---|---|
+| Devolver la firma del telefono como propia (reflexion) | rechazado |
+| Firmar sobre otro nonce (respuesta de otra sesion) | rechazado |
+| Camara con clave propia pero certificado de otra CA | rechazado |
+| Sin ancla de confianza instalada | no se completa, y se distingue del rechazo |
+
+Total del proyecto: **24 pruebas en verde**. Los dos APK compilan limpios.
+
+### Lo que NO hace
+
+- **No cifra el canal.** Autentica quien habla, no oculta lo que dice. Cifrarlo pide
+  un acuerdo de claves efimero y nuestras claves son de firma (`PURPOSE_SIGN`): no
+  sirven para derivar un secreto compartido. Es lo que queda del paso 6.
+- **No corta el enlace cuando falla**, ni en el telefono ni en la camara. Hay
+  terminales en campo con la version anterior y unidades sin dar de alta; cortar los
+  dejaria sin camara sin ganar nada. Se marca, se registra y se ensena. **En los dos
+  ficheros esta escrito donde y cuando invertir esto**: cuando toda la flota lleve la
+  version nueva, un enlace RECHAZADO se cierra y uno NO_SOPORTADO deja de grabar.
+- La W1 sigue sin poder pasar el alta de fabrica (decision D4). Lo que se acredita es
+  que **esta instalacion de BodyCamServer** posee una clave que no sale del Keystore:
+  periferico de garantia reducida, y llamarlo de otra forma seria mentir.
+
+### Verificado en hardware real (W1 `30393016471440` + Redmi `u4vcjv7xeubiljhu`)
+
+**Workflow 13, alta de la camara.** Par de claves generado en el Keystore de la W1
+**con el reto emitido por el servicio**, CSR `CN=BWC-896E` con `verify OK`, emision
+por `AeriaOne Device CA test` —la misma CA que los telefonos— y **prueba de posesion
+true**. La camara ya es un tercer sujeto de confianza y no una extension del telefono.
+
+**Workflow 31, caso bueno.** Del socket abierto al enlace acreditado, **229 ms**:
+
+    telefono   I BodycamRepository: Enlace autenticado con BWC-896E · CN=BWC-896E,OU=QPD,O=AeriaOne
+    bodycam    I Emparejamiento: telefono DEV-74435826 autenticado
+
+**Workflow 31, prueba negativa.** Es la que da valor a la anterior: se le instalo al
+telefono un ancla EQUIVOCADA (la CA de usuario, que no emitio ese certificado) y se
+repitio el emparejamiento sin cambiar nada mas.
+
+    telefono   E BodycamRepository: ENLACE NO FIABLE: El certificado de la bodycam no lo emitio AeriaOne
+    bodycam    I Emparejamiento: telefono DEV-74435826 autenticado
+
+El telefono rechazo a la camara **y la camara siguio aceptando al telefono**, que es
+exactamente lo correcto: la camara tenia el ancla buena y el certificado del telefono
+es legitimo. Cada punta valida por su cuenta, y eso es lo que hace que esto sea
+autenticacion mutua y no un login. Sin esta prueba, un fallo de cableado —que el
+ancla no llegara a leerse y se aceptara cualquier cosa— habria pasado las pruebas de
+JVM y el log del caso bueno sin que nadie lo notara.
+
+### Fallo de diseno encontrado al verificarlo
+
+**El estado del enlace no se veia en ninguna parte.** Se construyo `EnlaceAutenticado`
+y no se saco a la pantalla, asi que la app se veia IGUAL con un enlace autenticado que
+con uno rechazado. El usuario, mirando la app durante la prueba negativa, concluyo que
+habia funcionado y pregunto si habia que olvidar el emparejamiento Bluetooth. Tenia
+toda la razon en no verlo: un dato que solo existe en el log no protege a nadie.
+
+Corregido en `ui/components/AppScaffold.kt`, en la barra superior que el agente ve
+siempre:
+
+| Enlace | Icono | Etiqueta |
+|---|---|---|
+| Autenticado | verde | *(nada)* |
+| Comprobando | ambar | CHECKING |
+| Sin acreditar | ambar | UNVERIFIED |
+| Rechazado | rojo | NOT TRUSTED |
+
+Dos decisiones detras: **el verde se reserva para el enlace autenticado** —hasta
+ahora "conectado" era verde a secas, y un enlace abierto con una camara que no ha
+podido acreditarse es peor que no tener camara, porque el agente cree que la tiene—;
+y **cuando todo esta bien no se escribe nada**, porque si cada enlace correcto pusiera
+etiqueta, el agente dejaria de leerlas y la unica que importa pasaria desapercibida.
+Va en texto ademas de en color: en esa barra el rojo ya significaba "error de
+conexion".
+
+### Nota para el dia 15: bonding no es autenticacion
+
+Salio como duda durante la prueba y conviene tenerlo dicho. El emparejamiento
+Bluetooth de Android es del TRANSPORTE: abre el socket. Nuestro intercambio viaja
+como lineas de texto DENTRO de ese socket. Olvidar el bonding solo impediria
+conectar; no cambia nada de la comprobacion criptografica. Por eso "se conecta sin
+problema" y "el telefono la rechaza" son compatibles, y por eso hacia falta el
+indicador.
+
+### Proximo paso
+
+- Cerrar la verificacion en campo de lo anterior.
+- Workflows 33 y 34: binding agente-camara con caducidad y desemparejado al fin de
+  turno. Ahora si tienen sobre que apoyarse.
+- Corregir la ruta de BodyCamServer en `docs/bodycam-contexto.md`.
+
+---
+
+## 2026-09-06 (3) — Servicio de retos y workflow 27: el PIN autoriza la clave y esa clave firma
+
+### Hecho
+
+Se cierra la costura que veniamos arrastrando desde el workflow 12 y que estaba anotada en cada
+entrega: las pruebas de posesion se firmaban sobre un valor que se inventaba el propio telefono
+—`SecureRandom` para la atestacion y la cadena literal `"prueba-de-posesion"` para las firmas—, asi
+que acreditaban que las dos mitades del par se corresponden pero **no que quien responde tenga la
+clave ahora**. Una respuesta capturada valia para siempre. Es el IAM-04 textual, "fresh
+challenge-response".
+
+- **`data/identity/RetoRepository.kt` (nuevo)** — retos con **proposito**, **un solo uso** y
+  **caducidad**. Cuatro propositos y no uno compartido: atestacion del terminal (wf 12 paso 10),
+  posesion del terminal (paso 16), posesion del agente (wf 3 paso 14) y login (wf 27 pasos 11-12).
+  Si el mismo nonce valiera para el alta y para el desbloqueo, quien capturase una respuesta de alta
+  podria presentarla como inicio de sesion. El reto se retira ANTES de firmar, no despues: si se
+  retirase despues, un fallo a mitad lo dejaria disponible para un segundo intento.
+- **`tools/reto.sh` (nuevo)** — emite y verifica. El nonce sale de `openssl rand` en el PC, asi que
+  el telefono no puede predecirlo. Al verificar comprueba **primero que la respuesta contesta al
+  reto que emitimos** y despues la firma; sin esa primera comprobacion, una firma valida sobre
+  cualquier otro valor pasaria por buena, que es justo el ataque que el reto viene a impedir.
+- **`alta-terminal.sh` y `alta-agente.sh`** llevan ahora su reto dentro del mismo intent que el
+  certificado, y verifican la respuesta al terminar.
+- **Degradacion visible.** Si no hay reto emitido la app sigue funcionando —el agente tiene que
+  poder trabajar sin backend— pero lo dice: en la pantalla del alta sale `SELF-CHALLENGED (proves
+  no freshness)` y en el log un aviso de que esa firma es reutilizable.
+
+Y con eso encima, los dos pasos del **workflow 27** que faltaban:
+
+- **Paso 8, autorizar la clave.** `CredentialRepository` gana una autorizacion que solo el
+  desbloqueo concede, y `firmarRetoDeSesion` **falla** si nadie ha puesto el PIN. La firma del alta
+  va por otra funcion, `pruebaDePosesionDelAlta`, porque ocurre antes de que exista PIN alguno.
+- **Paso 12, firmar el reto.** Tras verificar el PIN se firma el reto `LOGIN` con la clave del
+  agente y la respuesta queda donde el servicio pueda verificarla. La autorizacion vive en memoria y
+  muere con el proceso: cerrar la app obliga a volver a poner el PIN.
+- **`OrigenDeSesion`** en `TrustStatus`: NINGUNA, SOLO_LOCAL o ACREDITADA. Un PIN correcto sin reto
+  que firmar demuestra que quien tiene el telefono conoce el PIN y **nada mas**; nadie ha comprobado
+  que la credencial siga siendo valida ni que el agente siga de alta. Eso no puede quedarse en un
+  log, asi que la pantalla de bloqueo avisa ANTES de teclear: `AERIAONE CHALLENGE PENDING · your PIN
+  will sign it with your credential`. Cuando ese aviso no aparece, tampoco es un detalle.
+- Si la firma falla se entra igual y la sesion queda marcada como local: que falle el backend no
+  puede dejar a un agente fuera de su terminal a las tres de la manana.
+
+### Hasta donde llega la autorizacion, dicho sin adornos
+
+**No es una barrera criptografica.** La clave del Keystore la puede usar el proceso pase lo que
+pase, y quien ejecute codigo dentro de la app se salta ese booleano. Lo que si garantiza es
+estructural y no es poco: **ningun camino del codigo puede firmar como el agente sin que se haya
+introducido el PIN en esta sesion**, ni por un descuido nuestro ni desde un servicio en segundo
+plano. La barrera de verdad —atar la clave a una autenticacion del sistema— es la decision D2.
+
+### Verificado en el Redmi Note 8 Pro (`u4vcjv7xeubiljhu`), recorrido completo desde cero
+
+| Paso | Reto | Resultado |
+|---|---|---|
+| wf 12 · 10 · atestacion | del servicio | TEE, cadena de 4, **"challenged by AeriaOne-challenge-service-test"** en pantalla |
+| wf 12 · 16 · posesion del terminal | propio, un solo uso | nonce correcto · **Verified OK** |
+| wf 3 · 8 · contrafirma del terminal | — | **Verified OK** |
+| wf 3 · 14 · posesion del agente | propio, un solo uso | nonce correcto · **Verified OK** |
+| wf 27 · 12 · login | propio, un solo uso | `sesion acreditada` · **Verified OK** |
+
+Cinco comprobaciones criptograficas encadenadas, cada una con su nonce, y dos CA separadas.
+`DEV-74435826` emitido por `AeriaOne Device CA test` y `cmendez.aeriaone.com` por
+`AeriaOne User CA test`.
+
+**Prueba negativa, que es la que da valor a las anteriores:** repetir la verificacion con la misma
+respuesta devuelve `RECHAZADO: la respuesta no contesta al reto emitido`. El reto se destruye al
+usarse en los dos extremos.
+
+Antes de esto, el log de un desbloqueo decia
+`desbloqueo sin reto del backend: la sesion es SOLO local`. Ahora dice
+`reto de AeriaOne-challenge-service-test firmado como cmendez.aeriaone.com: sesion acreditada`.
+Esa es la diferencia entre "la app pide un PIN" y "el agente demuestra quien es".
+
+### Corregido: el PIN se pedia tres veces
+
+Lo reporto el usuario. Elegir, confirmar y **desbloquear**. Las dos primeras se quedan —el PIN no se
+puede recuperar y el workflow 6 no existe— pero la tercera sobraba: el agente acababa de teclearlo
+dos veces doce segundos antes.
+
+Ahora se entra directamente al confirmar, **llamando al mismo `unlock()`** y no a un atajo, aunque
+cueste una derivacion mas de ~600 ms. Asi hay **un solo camino para abrir sesion** y ese camino
+siempre pasa por el verificador, autoriza la clave y firma el reto. Un segundo camino que abriese
+sesion sin verificar nada es la clase de atajo que despues aparece en produccion sin que nadie
+recuerde haberlo escrito. Va fuera del hilo de la interfaz, como el resto.
+
+### Tambien corregido
+
+- **`destruirIdentidadLocal` dejaba los identificadores.** Tras un reset seguian en las
+  preferencias el Device ID y el agente. Funcionalmente daba igual, pero un volcado en la auditoria
+  habria mostrado a que agente y a que terminal pertenecio un telefono cuya identidad se supone
+  destruida; el §13 pide destruirla, no olvidarla. Ahora el XML queda con dos booleanos y nada mas.
+- Un reset mio no llego a aplicarse porque mande el `am start` con la salida a `/dev/null` y no vi
+  el fallo. Lo detecto el usuario al ver que el telefono seguia enrolado. Nota operativa: no silenciar
+  la salida de los intents de depuracion.
+
+### Pendiente
+
+- Rechazos de la politica de PIN y bloqueo escalonado **en pantalla** (la logica tiene pruebas JVM).
+- El nonce de atestacion se queda sin consumir en `tools/ca-pruebas/retos/`: el script lo emite pero
+  no lo verifica, porque interpretar la cadena de atestacion es del backend. Es coherente, pero
+  conviene decirlo antes de que alguien vea el fichero suelto.
+
+### Proximo paso
+
+- **Workflow 28**: token de sesion. Es el siguiente por dependencia, pero obliga a inventarnos el
+  formato del token y sus claims, y ya van tres formatos propuestos por nosotros (solicitud del
+  agente, fichero de retos y ahora el token). Conviene llevarlos juntos a ciberseguridad el dia 15
+  antes de anadir un cuarto.
+- Alternativa con mas valor por hora: **workflow 31**, el canal con la bodycam, que sigue siendo la
+  deuda mas grave del repositorio y no depende de nadie.
+
+---
+
+## 2026-09-06 (2) — Workflow 4: el PIN deja de ser una constante y pasa a ser un verificador
+
+### Hecho
+
+- **`data/identity/PinLocal.kt` (nuevo)** — el PIN **no se guarda en ninguna forma**, ni en claro ni
+  en resumen. Se guarda un testigo conocido cifrado con AES-GCM bajo una clave derivada del PIN con
+  PBKDF2-HMAC-SHA256: si el PIN es el correcto el testigo sale entero, y si no falla el tag y no hay
+  nada que comparar. Es el mismo mecanismo que la boveda de evidencia, que lleva desde agosto.
+- **El fichero va ademas envuelto por una clave de AndroidKeyStore propia**, distinta de la de la
+  evidencia. `DeviceKeyWrapper` pasa de `object` a clase con dos instancias (`evidencia` e
+  `identidad`), que es la separacion por proposito que pide IAM-05: comprometer la evidencia no
+  puede comprometer la identidad. Esa segunda capa es la que importa de verdad con seis digitos:
+  sin ella, sacar el fichero con `adb` y probar el millon de combinaciones en un PC son minutos.
+- **El contador de intentos sale de SharedPreferences en claro** y entra en ese mismo fichero. Si se
+  pudiera poner a cero editando un XML, el limite de intentos no limitaria nada. No hace falta el
+  PIN para leerlo ni escribirlo —hay que contar los fallos precisamente cuando el PIN no se sabe—,
+  solo la clave de Keystore. Ademas se borran del XML las claves viejas `fallos`, `bloqueos` y
+  `fin_bloqueo`: quien abriera ese fichero el dia 15 concluiria justo lo contrario de lo que pasa.
+- **`TrustState.PIN_SETUP`** — con certificado y sin PIN el alta no ha terminado. El alta pasa a
+  tener tres tramos, y el ultimo es el unico que depende de una persona.
+- **`feature/enrollment/PinSetupViewModel` + `PinSetupScreen`** — alta del PIN con confirmacion.
+  Se pide dos veces porque el PIN no se puede recuperar: un digito mal al crearlo deja al agente
+  fuera de su terminal en el arranque siguiente, y el workflow 6 no existe.
+- **`ui/components/TecladoPin.kt`** — el teclado y los puntos salen de `LockScreen` porque los usan
+  dos pantallas. No es solo no duplicar: el agente elige aqui el secreto que va a teclear cada dia,
+  y si la pantalla donde lo elige tuviera otras teclas se equivocaria al crearlo.
+- **`PoliticaPin`** — politica minima **propuesta por nosotros**: se rechaza el mismo digito seis
+  veces y las secuencias en los dos sentidos, y nada mas. Reglas mas duras, con guantes y de noche,
+  acaban en un PIN apuntado en la funda del telefono.
+- **`PIN_DEMO` deja de ser el verificador de nadie.** Solo queda como el PIN que se pone el
+  simulador de compilaciones debug al saltar a un estado bloqueado sin pasar por el alta.
+- **Tests**: 4 pruebas JVM de la politica. Total del proyecto, **18 en verde**.
+
+### El coste del PIN: por que 210.000 iteraciones estaban mal y que se hace ahora
+
+Esto salio porque el usuario dijo que al desbloquear "tarda como 4 segundos". Tenia razon y la
+explicacion que le di primero —"son cientos de milisegundos, es el precio de la seguridad"— era
+falsa. Medido en el Redmi Note 8 Pro:
+
+| Configuracion | Coste de una derivacion |
+|---|---|
+| 210.000 iteraciones (recomendacion de OWASP, copiada de la boveda) | **2.703 ms** |
+| 50.000 iteraciones (calibrado) | **843 ms** |
+
+Dos cosas iban mal y son distintas:
+
+1. **El calculo corria en el hilo de la interfaz.** La app no tardaba: se congelaba. Por eso ademas
+   el sexto punto del PIN no llegaba a pintarse nunca, que fue el sintoma que reporto el usuario
+   antes. Ahora va en `Dispatchers.Default`, y la pausa de 150 ms deja de ser fija: es un **suelo**
+   que solo se aplica si el trabajo real volvio antes, que es el caso de los rechazos por politica.
+2. **El numero de iteraciones estaba copiado, no medido.** 210.000 es la recomendacion de OWASP para
+   bases de datos de contrasenas; aqui el fichero va ademas sellado con una clave no exportable del
+   Keystore, asi que el modelo de ataque no es el mismo.
+
+**Ahora se calibra al crear el PIN**: se mide una muestra de 20.000 iteraciones, se extrapola a un
+presupuesto de 400 ms y el resultado se guarda en el propio fichero, que ya tenia el campo. Un
+terminal rapido usara mas iteraciones y uno lento seguira siendo usable, y ninguno recalibra al
+desbloquear. Techo 600.000 (recomendacion actual de OWASP), suelo 50.000.
+
+En el Redmi la calibracion dio `20.000 iteraciones en 381 ms -> se fijan 50.000`: **manda el suelo,
+no el presupuesto**, y el desbloqueo cuesta 843 ms. Es tres veces mejor que antes y sigue sin llegar
+a los 400 ms; se acepta porque el suelo esta para que un terminal lento no calibre la seguridad
+hasta hacerla desaparecer.
+
+**Por que se puede bajar aqui y no en la boveda**, que es la pregunta que van a hacer: la boveda
+protege evidencia que puede salir del dispositivo. Este fichero no: va envuelto por una clave de
+Keystore no exportable, asi que copiarlo a un PC no sirve de nada y el ataque realista es ejecutar
+codigo como la app en este telefono. Ahi el millon de PIN posibles por 843 ms son mas de una semana
+de computo continuo, y ese es el orden de magnitud que compra el parametro.
+
+**ESTO NO PUEDE QUEDARSE DECIDIDO POR NOSOTROS.** El coste del KDF es politica de credenciales, y la
+politica de credenciales es uno de los diez artefactos de diseno que el propio documento reconoce
+pendientes. Va a la lista de decisiones como **D8**, con la medida delante, que es mucha mejor
+posicion para discutirlo que en abstracto.
+
+### Hasta donde llega el PIN, dicho claro
+
+El PIN autoriza el uso de la credencial **dentro de la aplicacion**: es la app la que se niega a
+seguir, no el Keystore. Atar la clave del agente a una autenticacion del sistema es la decision D2,
+que sigue abierta. Lo que si es cierto: la clave privada no sale del Keystore pase lo que pase, y
+borrar los datos de la app para reiniciar el contador destruye tambien las claves y deja el terminal
+sin identidad. El atajo existe, pero cuesta la credencial.
+
+### Verificado en el Redmi Note 8 Pro (`u4vcjv7xeubiljhu`)
+
+- **Tercer caso de migracion**: un terminal con el alta completa bajo el codigo anterior arranca en
+  PIN_SETUP y pide el PIN, en vez de quedarse con un verificador que ya no existe.
+- Alta del PIN con calibracion (`se fijan 50000`) y desbloqueo correcto a continuacion (843 ms).
+- Las claves viejas del XML de confianza ya no estan: el volcado solo tiene estado no secreto
+  (device_id, user_id y las dos marcas de etapa).
+
+### Pendiente (verificar en dispositivo)
+
+- Rechazos por politica y PIN que no coincide **en pantalla** (la logica tiene pruebas JVM, el
+  recorrido visual no se llego a hacer).
+- Bloqueo temporal escalonado 1 / 5 / 30 min con el contador ya dentro del fichero sellado.
+
+### Fallos encontrados al ejecutarlo, ya corregidos
+
+1. **El sexto punto del PIN no se pintaba.** Se actualizaba el estado y se resolvia en la misma
+   pasada, asi que Compose solo renderizaba el estado final, ya vacio. Lo reporto el usuario. Afecta
+   a las dos pantallas —crear el PIN y desbloquear— y en la de desbloqueo importa mas: con un PIN
+   erroneo el agente veia los puntos vaciarse sin haber visto nunca el ultimo.
+2. **El simulador dejaba PIN_SETUP incoherente**: marcaba la credencial como no emitida cuando en
+   ese tramo el certificado si existe y lo unico que falta es el PIN. El terminal habria vuelto a
+   ENROLLING en el arranque siguiente.
+
+### Deuda que se cierra
+
+- Contador de intentos en SharedPreferences en claro: **cerrada**.
+- PIN de demostracion como verificador: **cerrada**; la constante solo se alcanza en debug.
+
+### Proximo paso
+
+- **Servicio de retos del backend simulado**, que es lo que queda del hito del 15. Es ademas la
+  costura mas visible que arrastramos: hoy el reto de la prueba de posesion se lo inventa el propio
+  telefono, asi que acredita que las dos mitades del par se corresponden pero **no frescura**
+  (IAM-04). Con el, los pasos 11 a 14 del workflow 27 dejan de ser papel.
+
+---
+
+## 2026-09-06 — Workflow 3: la credencial del agente, separada de la del telefono
+
+### Hecho
+
+Antes del codigo, una sesion de inventario: se cruzo el catalogo de 68 workflows y el documento de
+arquitectura contra el repositorio y se dejo el resultado en **`Seguimiento-IAM-AeriaOne.xlsx`**
+(10 hojas: catalogo, los 162 pasos de las 8 hojas de detalle marcados uno a uno, lo accionable sin
+backend, lo bloqueado, el plan G0-G7, septiembre, las decisiones D1-D7, los requisitos IAM-01..20 y
+la deuda). El recuento: **4 hechos, 22 parciales, 25 sin empezar y 17 que no nos tocan**; y
+**21 workflows se cierran enteros sin backend**, 29 a medias y 18 no.
+
+Y despues el workflow 3, que es el que tocaba por orden del plan.
+
+- **`data/identity/ClaveEnKeystore.kt` (nuevo, sustituye a `DeviceKeystore.kt`)** — una clase por
+  alias, con dos instancias: `terminal` (`aeria.device.key`, workflow 12) y `agente`
+  (`aeria.user.key`, workflow 3). El fichero anterior era un `object` con el alias incrustado, asi
+  que la segunda clave habria significado copiar 120 lineas de mecanica de Keystore. La diferencia
+  real entre las dos es una sola: la del terminal se genera con reto de atestacion y la del agente
+  no, porque la atestacion acredita la plataforma, no a la persona, y la plataforma ya quedo
+  acreditada en el alta anterior.
+- **`data/identity/CredentialRepository.kt` (nuevo)** — los 5 pasos nuestros de los 16: par de
+  claves del agente (6), peticion (7), entrega (8), instalacion del certificado (11) y prueba de
+  posesion (14). Al instalar se comprueba ademas que el nombre comun del certificado es el agente
+  que pedimos: sin eso, una CA mal configurada podria devolver un certificado a nombre de otro y el
+  telefono lo aceptaria sin rechistar.
+- **La solicitud del agente va contrafirmada por el terminal.** El paso 8 del catalogo dice que la
+  peticion viaja "through the authenticated AeriaOne backend together with the relevant enrollment
+  context", y ese contexto es justo lo que se pierde al dejar un fichero suelto: cualquiera podria
+  presentar un CSR de agente. Asi que el terminal firma el DER del CSR con SU clave y la solicitud
+  lleva dentro la prueba de que salio de un telefono dado de alta. Es la mitad del paso 5 (atadura
+  agente-dispositivo) que se puede hacer desde este lado. **El formato del fichero es propuesta
+  nuestra** y esta marcado como tal: la especificacion de API es uno de los diez artefactos que el
+  propio documento reconoce pendientes.
+- **`data/identity/Pem.kt` (nuevo)** — lectura de certificados en PEM, que iban a ser dos copias de
+  la misma expresion regular. `instalarCertificadoEmitido` tambien sube a `ClaveEnKeystore`, con la
+  comprobacion de que el certificado corresponde a la clave.
+- **El alta pasa a tener dos etapas visibles.** `IdentityRepository` lleva ahora dos marcas
+  separadas, una por identidad: terminal acreditado y agente con credencial. Entre las dos el
+  telefono se queda en ENROLLING, no en LOCKED, y esa es la traduccion literal de la regla de no
+  equivalencia: el telefono esta acreditado y aun asi no hay a quien pedirle un PIN, porque todavia
+  no hay identidad de persona.
+- **`feature/enrollment/`** — el asistente gana la fase del agente (4 pasos), que arranca sola en
+  cuanto el terminal tiene certificado, sin boton: en el modelo real es el IAM quien entrega la
+  identidad activa al proceso de credenciales, y pedirle al agente una confirmacion seria
+  inventarse una decision que no es suya. `EnrollmentScreen.kt` se paso de las 300 lineas de la
+  regla del proyecto y el dibujo de los pasos salio a `EnrollmentPasos.kt`.
+- **`tools/alta-agente.sh` (nuevo)** — hace de backend para el workflow 3. **Firma con una CA
+  distinta** de la del terminal, como pide el documento (dominios de confianza "User Identity CA" y
+  "Device Identity CA" separados, con perfiles y politicas propios). Antes de emitir comprueba la
+  contrafirma del terminal contra el certificado que emitio `alta-terminal.sh`, que ahora lo guarda.
+- **Tests** (`CredencialDelAgenteTest.kt`) — 5 pruebas JVM: que la peticion va al nombre del agente
+  y NO lleva el Device ID; que la contrafirma del terminal verifica; que **la clave del agente no
+  sirve para firmar como el terminal**, que es la prueba que sostiene toda la regla de no
+  equivalencia; y que cambiar un solo byte del CSR invalida la contrafirma.
+
+### Decisiones tomadas
+
+- **La clave del agente se genera sin reto de atestacion.** El workflow solo pide que sea
+  "hardware-backed/non-exportable"; atestar otra vez la misma plataforma no anade nada que el
+  backend vaya a comprobar en el paso 14, que es prueba de posesion.
+- **D2 sigue abierta y sigue marcada en un solo sitio.** Tampoco aqui se llama a
+  `setUserAuthenticationRequired`. Ahora el KDoc que lo explica esta en `ClaveEnKeystore`, que es el
+  unico punto donde habra que tocar cuando se cierre — antes estaba en `DeviceKeystore`.
+- **El identificador del agente deja de ser una constante en cuanto hay certificado**: sale del
+  nombre comun que emitio la CA. Es el primer dato de la identidad que ya no nos inventamos.
+
+### Verificado
+
+- `assembleDebug` y `testDebugUnitTest` limpios, sin warnings nuevos. **13 pruebas JVM en verde**
+  (8 del workflow 12 y 5 del 3).
+- Las dos peticiones, validadas desde fuera con `openssl req -verify`:
+  `CN=DEV-92A71C` y `CN=cmendez.aeriaone.com`, ambas "self-signature verify OK".
+- El circuito de `alta-agente.sh` se probo entero con openssl, sin telefono: extraccion de los
+  campos del JSON, decodificacion de la contrafirma, `openssl dgst -verify` contra el certificado
+  del terminal (**Verified OK**), emision con la CA de usuario y `openssl verify` (**OK**). Y la
+  comprobacion negativa: la contrafirma de OTRO telefono se rechaza.
+- Contraste de los dos certificados emitidos, que es lo que hay que ensenar:
+  `CN=cmendez.aeriaone.com` emitido por `AeriaOne User CA test`, frente a `CN=DEV-8DB2C628` del
+  terminal. Dos sujetos y dos emisores.
+
+### Verificado en el Redmi Note 8 Pro (`u4vcjv7xeubiljhu`), mismo dia
+
+**Migracion de un telefono ya dado de alta.** El Redmi tenia el workflow 12 cerrado desde el
+2026-09-04 (`provisionada=true`, sin marca de credencial). Se instalo encima sin desinstalar y al
+arrancar hizo exactamente lo previsto sin tocar nada: entro en ENROLLING en vez de LOCKED, arranco
+sola la fase del agente, genero el segundo par **en el TEE** ("separate from the device key" en la
+propia pantalla) y dejo la solicitud contrafirmada por `DEV-8DB2C628`.
+
+**Circuito completo con las dos CA:**
+
+| Paso | Resultado |
+|---|---|
+| CSR del agente | `Certificate request self-signature verify OK` · `CN=cmendez.aeriaone.com` |
+| Contrafirma del terminal | `openssl dgst -verify` -> **Verified OK** |
+| Emision con la CA de usuario | `openssl verify` -> **OK** |
+| Certificado instalado | `CN=cmendez.aeriaone.com` emitido por `CN=AeriaOne User CA test` |
+| Prueba de posesion (paso 14) | **true** |
+
+Y el contraste que es lo que hay que ensenar el dia 15: el mismo telefono lleva
+`CN=DEV-8DB2C628` emitido por `AeriaOne Device CA test` y `CN=cmendez.aeriaone.com` emitido por
+`AeriaOne User CA test`. Dos claves, dos CA, dos certificados.
+
+Arranque en frio despues: **LOCKED con `cmendez.aeriaone.com`**, que es el nombre comun que emitio
+la CA y no la constante del fuente.
+
+**Destruccion de la identidad (§13).** Forzar NOT_PROVISIONED por intent deja las dos carpetas
+(`files/enrollment` y `files/credential`) vacias, `aeria_credential.xml` vacio y las dos claves
+borradas del Keystore. Se destruyen las dos o ninguna, que es lo que hace `destruirIdentidadLocal`.
+
+### Fallo encontrado al ejecutarlo, ya corregido
+
+`tools/alta-agente.sh` no podia decodificar la contrafirma: `JSONObject` escribe `\/` donde hay una
+barra —JSON legal— y el lector de campos a base de `sed` se lo tragaba tal cual, con lo que el
+base64 salia invalido y openssl daba `Error reading signature file`. El `campo()` deshace ahora ese
+escapado. Un parser de verdad lo habria hecho solo; este lector de andar por casa no.
+
+**Recorrido desde cero, encadenado.** Con el terminal limpio (el boton "ENROLL THIS PHONE" lo pulso
+el usuario: MIUI rechaza `adb shell input` por `INJECT_EVENTS`):
+
+1. Fase 1 sola -> Device ID **nuevo**, `DEV-0F6A5674`, distinto del anterior, que es la prueba de
+   que el borrado destruyo la identidad y no solo la olvido. `files/credential` vacio: la fase 2
+   espera al certificado en vez de adelantarse.
+2. `alta-terminal.sh` -> certificado del terminal, prueba de posesion **true**.
+3. **La fase 2 arranco sola** al llegar ese certificado, y la solicitud salio contrafirmada ya con
+   `DEV-0F6A5674`.
+4. `alta-agente.sh` -> contrafirma **Verified OK**, emision **OK**, posesion **true**.
+5. Arranque en frio: **LOCKED** con `cmendez.aeriaone.com` y `DEV-0F6A5674`.
+
+### Notas
+
+- La regla de no equivalencia deja de ser una frase del documento y pasa a ser algo que se puede
+  ensenar: dos claves, dos CA, dos certificados, y una prueba que falla si se intercambian.
+- Lo que sigue faltando y conviene decir el dia 15: el reto de la prueba de posesion se lo sigue
+  inventando el telefono, asi que acredita que las dos mitades del par se corresponden pero no
+  frescura; y la identidad del agente no la emite ningun IAM.
+
+### Proximo paso
+
+- **Workflow 4**: PIN real que sustituya el `PIN_DEMO` de `IdentityRepository` y que autorice el uso
+  de la clave del agente, con el contador de intentos fuera de SharedPreferences. Es lo unico que
+  falta del hito del 15.
+- Antes, en cuanto haya un telefono conectado, cerrar la verificacion en campo de esta entrada.
+
+---
+
+
 ## 2026-09-04 (2) — Workflow 12: alta del telefono con clave en Keystore y PKCS#10 a mano
 
 ### Hecho

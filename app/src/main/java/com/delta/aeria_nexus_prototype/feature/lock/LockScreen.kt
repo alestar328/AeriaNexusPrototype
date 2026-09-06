@@ -3,9 +3,7 @@ package com.delta.aeria_nexus_prototype.feature.lock
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,11 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -39,8 +35,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.identity.ProvisionedIdentity
+import com.delta.aeria_nexus_prototype.ui.components.PinDots
+import com.delta.aeria_nexus_prototype.ui.components.TecladoPin
 import com.delta.aeria_nexus_prototype.ui.theme.AeriaNexusPrototypeTheme
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -48,7 +45,6 @@ import com.delta.aeria_nexus_prototype.ui.theme.BordeSutil
 import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
 import com.delta.aeria_nexus_prototype.ui.theme.RojoSuave
 import com.delta.aeria_nexus_prototype.ui.theme.Superficie
-import com.delta.aeria_nexus_prototype.ui.theme.TextoDeshabilitado
 import com.delta.aeria_nexus_prototype.ui.theme.TextoPrincipal
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
@@ -101,6 +97,7 @@ private fun LockContent(
             verticalArrangement = Arrangement.Center,
         ) {
             Cabecera(sessionExpired = uiState.sessionExpired)
+            uiState.emisorDelRetoPendiente?.let { AvisoDeReto(it) }
             Spacer(Modifier.height(20.dp))
             uiState.identity?.let { TarjetaIdentidad(it) }
         }
@@ -111,7 +108,7 @@ private fun LockContent(
         Aviso(uiState = uiState, bloqueado = bloqueado)
 
         Spacer(Modifier.height(16.dp))
-        Teclado(habilitado = !bloqueado, onDigito = onDigito, onBorrar = onBorrar)
+        TecladoPin(habilitado = !bloqueado, onDigito = onDigito, onBorrar = onBorrar)
     }
 }
 
@@ -152,6 +149,31 @@ private fun Cabecera(sessionExpired: Boolean) {
         },
         color = TextoSecundario,
         fontSize = 14.sp,
+    )
+}
+
+/**
+ * Aviso de que el PIN, ademas de abrir la app, va a firmar un reto de AeriaOne.
+ *
+ * Se dice antes y no despues porque cambia lo que el agente esta haciendo: no
+ * esta abriendo un cajon, esta acreditandose. Y cuando NO aparece, tampoco es un
+ * detalle: significa que nadie del otro lado ha comprobado nada.
+ */
+@Composable
+private fun AvisoDeReto(emisor: String) {
+    Spacer(Modifier.height(14.dp))
+    Text(
+        text = "AERIAONE CHALLENGE PENDING",
+        color = AzulClaro,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.5.sp,
+    )
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "Your PIN will sign it with your credential · $emisor",
+        color = TextoSecundario,
+        fontSize = 13.sp,
     )
 }
 
@@ -212,36 +234,6 @@ private fun FilaDato(etiqueta: String, valor: String) {
     }
 }
 
-/** Un punto por digito. El PIN nunca se pinta, ni siquiera el ultimo caracter. */
-@Composable
-private fun PinDots(longitud: Int, enFallo: Boolean) {
-    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        repeat(IdentityRepository.PIN_LENGTH) { indice ->
-            val relleno = indice < longitud
-            Box(
-                Modifier
-                    .size(16.dp)
-                    // El relleno dice cuantos digitos hay y el borde dice si el
-                    // intento anterior fallo. Son dos cosas distintas: pintar de
-                    // rojo un punto vacio hace creer que el PIN sigue escrito.
-                    .background(
-                        color = when {
-                            !relleno -> Color.Transparent
-                            enFallo -> RojoSuave
-                            else -> AzulClaro
-                        },
-                        shape = CircleShape,
-                    )
-                    .border(
-                        width = 1.5.dp,
-                        color = if (enFallo) RojoSuave else TextoDeshabilitado,
-                        shape = CircleShape,
-                    ),
-            )
-        }
-    }
-}
-
 /**
  * Linea de aviso bajo los puntos: error, intentos restantes o cuenta atras.
  * Reserva altura fija para que el teclado no salte cuando aparece el mensaje.
@@ -293,107 +285,30 @@ private fun Aviso(uiState: LockUiState, bloqueado: Boolean) {
     }
 }
 
-@Composable
-private fun Teclado(habilitado: Boolean, onDigito: (Char) -> Unit, onBorrar: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        FILAS_TECLADO.forEach { fila ->
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                fila.forEach { tecla ->
-                    when (tecla) {
-                        TECLA_VACIA -> Spacer(Modifier.weight(1f))
-                        TECLA_BORRAR -> TeclaBorrar(
-                            habilitado = habilitado,
-                            onClick = onBorrar,
-                            modifier = Modifier.weight(1f),
-                        )
-                        else -> TeclaDigito(
-                            digito = tecla,
-                            habilitado = habilitado,
-                            onClick = { onDigito(tecla) },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TeclaDigito(
-    digito: Char,
-    habilitado: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    BaseTecla(habilitado = habilitado, onClick = onClick, modifier = modifier) {
-        Text(
-            text = digito.toString(),
-            color = if (habilitado) TextoPrincipal else TextoDeshabilitado,
-            fontSize = 26.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun TeclaBorrar(habilitado: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    BaseTecla(habilitado = habilitado, onClick = onClick, modifier = modifier) {
-        Icon(
-            Icons.AutoMirrored.Filled.Backspace,
-            contentDescription = "Delete last digit",
-            tint = if (habilitado) TextoSecundario else TextoDeshabilitado,
-            modifier = Modifier.size(24.dp),
-        )
-    }
-}
-
-/** Tecla de 68.dp: se usa con guantes y sin mirar la pantalla. */
-@Composable
-private fun BaseTecla(
-    habilitado: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
-    Box(
-        modifier = modifier
-            .heightIn(min = 68.dp)
-            .background(Superficie, RoundedCornerShape(12.dp))
-            .border(BorderStroke(1.dp, BordeSutil), RoundedCornerShape(12.dp))
-            .clickable(enabled = habilitado, onClick = onClick),
-        contentAlignment = Alignment.Center,
-        content = { content() },
-    )
-}
-
 private fun formatearCuentaAtras(segundos: Int): String =
     "%d:%02d".format(segundos / 60, segundos % 60)
-
-private const val TECLA_VACIA = ' '
-private const val TECLA_BORRAR = '<'
-
-private val FILAS_TECLADO = listOf(
-    listOf('1', '2', '3'),
-    listOf('4', '5', '6'),
-    listOf('7', '8', '9'),
-    listOf(TECLA_VACIA, '0', TECLA_BORRAR),
-)
-
-private val IDENTIDAD_PREVIEW = ProvisionedIdentity(
-    userId = "cmendez.aeriaone.com",
-    tenant = "QPD",
-    deviceId = "DEV-92A71C",
-    appInstanceId = "APPINST-8F27A91C",
-    release = "1.5",
-)
 
 @Preview(name = "Bloqueada", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
 @Composable
 private fun LockScreenPreview() {
     AeriaNexusPrototypeTheme {
         LockContent(
-            uiState = LockUiState(identity = IDENTIDAD_PREVIEW, pin = "004"),
+            uiState = LockUiState(identity = IDENTIDAD_PREVIEW),
+            onDigito = {},
+            onBorrar = {},
+        )
+    }
+}
+
+@Preview(name = "Con reto pendiente", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
+@Composable
+private fun LockScreenConRetoPreview() {
+    AeriaNexusPrototypeTheme {
+        LockContent(
+            uiState = LockUiState(
+                identity = IDENTIDAD_PREVIEW,
+                emisorDelRetoPendiente = "AeriaOne-challenge-service-test",
+            ),
             onDigito = {},
             onBorrar = {},
         )
@@ -427,3 +342,11 @@ private fun LockScreenLockoutPreview() {
         )
     }
 }
+
+private val IDENTIDAD_PREVIEW = ProvisionedIdentity(
+    userId = "cmendez.aeriaone.com",
+    tenant = "QPD",
+    deviceId = "DEV-92A71C",
+    appInstanceId = "APPINST-8F27A91C",
+    release = "1.5",
+)

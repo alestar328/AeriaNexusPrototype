@@ -5,7 +5,7 @@ Aeria Nexus (Kotlin). Consolidado el 2026-07-09 a partir del codigo real y de
 las memorias de desarrollo de los dos proyectos originales:
 
 - App del telefono (Flutter): `C:\Users\newge\Desktop\Nueva carpeta (3)\BodyCam\Falcon-One-Demo-main\Falcon-One-Demo-main`
-- App de la bodycam (Kotlin): `C:\Users\newge\Desktop\Nueva carpeta (3)\BodyCam\BodyCamServer`
+- App de la bodycam (Kotlin): `C:\Users\newge\Desktop\Variedades\BodyCam\BodyCamServer`
   (rutas actualizadas 2026-07-10; en esa misma carpeta estan los APKs del fabricante MCP_*/Wear*)
 
 ---

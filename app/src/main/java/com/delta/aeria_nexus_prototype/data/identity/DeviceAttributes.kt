@@ -50,7 +50,7 @@ data class DeviceAttributes(
  * comprobacion que hace la app puede falsearla quien controle el sistema, que es
  * precisamente el caso del que queremos protegernos. La prueba de verdad del
  * arranque verificado y del respaldo por hardware es la atestacion de la clave
- * (`DeviceKeystore.cadenaDeAtestacion`), que va firmada por Google y la verifica
+ * (`ClaveEnKeystore.cadenaDeCertificados`), que va firmada por Google y la verifica
  * el backend.
  *
  * Por eso esta clase no tiene ninguna propiedad del tipo "apto": decidir la
@@ -97,7 +97,7 @@ object DeviceInspector {
     )
 
     private fun keystoreDisponible(): Boolean = runCatching {
-        java.security.KeyStore.getInstance(DeviceKeystore.PROVEEDOR).apply { load(null) }
+        java.security.KeyStore.getInstance(ClaveEnKeystore.PROVEEDOR).apply { load(null) }
         true
     }.getOrDefault(false)
 

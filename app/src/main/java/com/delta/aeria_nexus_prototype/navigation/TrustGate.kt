@@ -14,6 +14,8 @@ import com.delta.aeria_nexus_prototype.data.identity.TrustBlockReason
 import com.delta.aeria_nexus_prototype.data.identity.TrustState
 import com.delta.aeria_nexus_prototype.feature.enrollment.EnrollmentScreen
 import com.delta.aeria_nexus_prototype.feature.enrollment.EnrollmentViewModel
+import com.delta.aeria_nexus_prototype.feature.enrollment.PinSetupScreen
+import com.delta.aeria_nexus_prototype.feature.enrollment.PinSetupViewModel
 import com.delta.aeria_nexus_prototype.feature.lock.LockScreen
 import com.delta.aeria_nexus_prototype.feature.lock.LockViewModel
 import com.delta.aeria_nexus_prototype.feature.lock.TrustBlockedScreen
@@ -45,7 +47,7 @@ fun TrustGate() {
             TrustState.ACTIVE, TrustState.OFFLINE_GRANTED -> AppNavHost()
 
             TrustState.LOCKED, TrustState.SESSION_EXPIRED -> LockScreen(
-                viewModel = viewModel { LockViewModel(identityRepository) },
+                viewModel = viewModel { LockViewModel(identityRepository, AppContainer.retoRepository) },
             )
 
             // El asistente de alta lleva su propio progreso, asi que las dos ramas
@@ -53,7 +55,24 @@ fun TrustGate() {
             // una pantalla distinta.
             TrustState.NOT_PROVISIONED, TrustState.ENROLLING -> EnrollmentScreen(
                 viewModel = viewModel {
-                    EnrollmentViewModel(AppContainer.enrollmentRepository, identityRepository)
+                    EnrollmentViewModel(
+                        enrollment = AppContainer.enrollmentRepository,
+                        credential = AppContainer.credentialRepository,
+                        identity = identityRepository,
+                        retos = AppContainer.retoRepository,
+                    )
+                },
+            )
+
+            // Ultimo tramo del alta: el agente elige su PIN. Pantalla aparte
+            // porque es un teclado y no una lista de pasos que ocurren solos.
+            TrustState.PIN_SETUP -> PinSetupScreen(
+                viewModel = viewModel {
+                    PinSetupViewModel(
+                        pinLocal = AppContainer.pinLocal,
+                        credential = AppContainer.credentialRepository,
+                        identity = identityRepository,
+                    )
                 },
             )
 
@@ -76,7 +95,7 @@ fun TrustGate() {
                     // Volver a "sin dar de alta" tiene que destruir la clave, o el
                     // alta siguiente reutilizaria la anterior y no probaria nada.
                     if (estado == TrustState.NOT_PROVISIONED) {
-                        AppContainer.enrollmentRepository.deshacerAlta()
+                        AppContainer.destruirIdentidadLocal()
                     }
                     identityRepository.forzarEstado(estado, motivo)
                 },
