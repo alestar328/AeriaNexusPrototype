@@ -20,6 +20,7 @@ val localProperties = Properties().apply {
 val mapboxAccessToken: String = localProperties.getProperty("MAPBOX_ACCESS_TOKEN") ?: ""
 val agoraAppId: String = localProperties.getProperty("AGORA_APP_ID") ?: ""
 val bodycamMac: String = localProperties.getProperty("BODYCAM_MAC") ?: ""
+val gafasMac: String = localProperties.getProperty("GAFAS_MAC") ?: ""
 
 // La version vive en version.properties (raiz del repo, versionado en git) en
 // vez de escribirse aqui, para que la tarea incrementarVersion de mas abajo
@@ -47,6 +48,7 @@ android {
         buildConfigField("String", "MAPBOX_ACCESS_TOKEN", "\"$mapboxAccessToken\"")
         buildConfigField("String", "AGORA_APP_ID", "\"$agoraAppId\"")
         buildConfigField("String", "BODYCAM_MAC", "\"$bodycamMac\"")
+        buildConfigField("String", "GAFAS_MAC", "\"$gafasMac\"")
     }
 
     // Firma de release. La ruta y las contrasenas viven en local.properties, que

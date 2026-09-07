@@ -27,6 +27,8 @@ object AppContainer {
         private set
     lateinit var bodycamRepository: BodycamRepository
         private set
+    lateinit var gafasRepository: GafasRepository
+        private set
     lateinit var localEvidenceRepository: LocalEvidenceRepository
         private set
     lateinit var vaultRepository: VaultRepository
@@ -59,6 +61,7 @@ object AppContainer {
         batteryRepository = BatteryRepository(appContext)
         agoraRepository = AgoraRepository(appContext, locationRepository)
         bodycamRepository = BodycamRepository(appContext)
+        gafasRepository = GafasRepository(appContext)
         localEvidenceRepository = LocalEvidenceRepository(appContext)
         vaultRepository = VaultRepository(appContext)
         // Decide si la app llega siquiera a la pantalla de operaciones, asi que

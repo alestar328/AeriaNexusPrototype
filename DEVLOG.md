@@ -6,6 +6,105 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-07 — Gafas BleeqUp: mirar el enlace en vez de fabricarlo
+
+### Hecho
+
+Segundo periferico del cinturon: las gafas de realidad aumentada **BleeqUp Ranger**
+(`BleeqUp-Ranger-901FC`, MAC `F0:74:E4:79:7C:B1`). De momento solo conectividad: el
+icono de gafas de la barra superior se pone verde cuando estan enlazadas, igual que
+el de la bodycam. Desde el telefono no se controla nada de ellas.
+
+- **`data/GafasRepository.kt`** (nuevo) — sigue el enlace y lo publica en un
+  `StateFlow<GafasState>` con tres valores (DISCONNECTED, CONNECTING, CONNECTED).
+- **`AppContainer` + `AeriaNexusApp`** — se construye con el resto y empieza a vigilar
+  en el arranque, junto a la red tactica.
+- **`ui/components/AppScaffold.kt`** — el icono de gafas deja de estar fijo en gris y
+  toma el color del estado.
+- **`OperationsScreen` + `OperationsViewModel` + `AppNavHost`** — el permiso de
+  Bluetooth se pide al entrar en Operations (ver mas abajo).
+- **`GAFAS_MAC`** en `local.properties` y `BuildConfig`, igual que `BODYCAM_MAC`.
+  Ojo: `local.properties` no va a git, asi que en una maquina nueva hay que anadirlo
+  a mano o las gafas quedan deshabilitadas (queda avisado en el log).
+
+### Por que no se parece por dentro a la bodycam
+
+La bodycam es nuestra: corre `BodyCamServer`, el telefono abre un RFCOMM contra un
+UUID propio y ese socket ES el enlace. Con las gafas no hay nada que abrir —no son
+nuestras y no exponen ningun servicio que nos interese— asi que el repositorio **no
+conecta: observa**. Se apunta a los avisos del sistema y pregunta al perfil de audio
+por el que las gafas se enlazan. De ahi que no haya servicio en primer plano, ni
+backoff, ni watchdog: no hay enlace propio que mantener vivo, y montar uno para
+enterarse de algo que el sistema ya sabe seria gastar radio y bateria a cambio de nada.
+
+Tres detalles que si tienen su porque:
+
+1. **Manda el ACL, no el perfil.** El aviso de perfil solo se usa para el amarillo de
+   "conectando", que el ACL no da. Su desconexion se ignora a proposito: un perfil de
+   audio puede caerse con las gafas todavia puestas y enlazadas, y eso pintaria el
+   icono en gris con las gafas funcionando.
+2. **Se escucha tambien el apagado del Bluetooth.** Al apagar la radio no llega
+   ninguna desconexion por dispositivo; sin ese caso el icono se quedaria verde para
+   siempre.
+3. **No hay verde condicionado.** En la bodycam el verde exige enlace autenticado
+   (workflow 31). Las gafas no se acreditan ante el telefono ni reciben ordenes suyas,
+   asi que lo unico que se puede afirmar es si el agente las lleva enlazadas, y eso es
+   justo lo que dice el color.
+
+### El fallo que aparecio al probarlo: un indicador que mentia
+
+Con las gafas puestas y conectadas, el icono seguia gris en el Samsung. No era el
+observador: **`BLUETOOTH_CONNECT` estaba denegado**, y ese permiso solo se pedia desde
+BODYCAM CONTROL. Sin el, Android no entrega los avisos de conexion y tampoco deja leer
+el perfil, asi que los DOS iconos de la barra se quedan en gris con los aparatos
+funcionando. Un agente que nunca entrase en esa pantalla tendria un indicador que le
+miente, que es justo lo que el comentario del color de la bodycam dice que hay que
+evitar.
+
+Se pide ahora al entrar en Operations, una sola vez por sesion (`rememberSaveable`,
+para no ponerle el dialogo delante una y otra vez a quien diga que no). Al conceder se
+relee el estado en el acto: los avisos que no llegaron mientras faltaba el permiso no
+vuelven solos.
+
+### Estado: VERIFICADO EN EL SAMSUNG
+
+`assembleDebug` limpio (sin warnings nuevos; el `getParcelableExtra` deprecado se
+cambio por `IntentCompat`) y las 24 pruebas JVM en verde. En el Samsung, con las gafas
+puestas:
+
+1. Instalacion con el permiso revocado -> al entrar en Operations sale el dialogo.
+2. Al concederlo, `Gafas: CONNECTED` en logcat e icono verde en el acto, sin reiniciar.
+
+Tambien los dos sentidos del enlace, desconectando y reconectando las gafas desde los
+ajustes del telefono (apagarlas no valia: estaban cargando del ordenador y no se
+apagan enchufadas):
+
+    22:17:28  Gafas: CONNECTED      icono verde
+    22:31:56  Gafas: DISCONNECTED   icono gris
+    22:36:45  Gafas: CONNECTED      icono verde otra vez
+
+**El detalle que casi pasa por bug**: la reconexion de las 22:36 la hizo el sistema a
+las 22:34 y la app no se entero hasta que volvio al primer plano. No es un fallo del
+observador: con la app en segundo plano, Android APLAZA los broadcasts a los procesos
+en cache. La bodycam no lo sufre porque su servicio en primer plano mantiene el proceso
+despierto; las gafas no tienen servicio a proposito, asi que el estado se corrige al
+volver a la app, con la relectura de la barra. Queda comentado en `AppScaffold`.
+
+El Redmi (MIUI) sirvio para el arranque en gris con las gafas desconectadas, y de paso
+para sacar la MAC de los emparejados. Sigue sin verse el apagado del Bluetooth y el
+amarillo de CONNECTING (que en un reenlace dura un suspiro).
+
+Aparte, el Samsung avisa de que las bibliotecas nativas de Agora y Mapbox no estan
+alineadas a paginas de 16 kB. No afecta a esto, pero habra que mirarlo antes de
+publicar.
+
+### Proximo paso
+
+Decidir si las gafas tienen que aparecer en algun sitio mas que la barra (ficha en
+Operations, por ejemplo) o si con el icono basta.
+
+---
+
 ## 2026-09-06 (5) — Workflows 33 y 34: la camara sirve a un agente sin convertirse en el
 
 ### Hecho

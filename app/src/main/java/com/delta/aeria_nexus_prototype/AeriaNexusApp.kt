@@ -13,6 +13,10 @@ class AeriaNexusApp : Application() {
         // La red tactica se conecta desde el arranque: asi el telefono recibe
         // alertas SOS de otros agentes aunque nunca se abra la pestana Map.
         AppContainer.agoraRepository.ensureStarted()
+        // Las gafas se conectan solas al telefono cuando el agente se las pone;
+        // la app solo mira ese enlace, y tiene que mirarlo desde el arranque
+        // para que el estado sea correcto la primera vez que se ve la barra.
+        AppContainer.gafasRepository.vigilar()
         // Una subida que se corto porque el sistema mato el proceso se retoma aqui,
         // por el offset guardado. Es el equivalente movil de lo que en la bodycam
         // hace BootReceiver.

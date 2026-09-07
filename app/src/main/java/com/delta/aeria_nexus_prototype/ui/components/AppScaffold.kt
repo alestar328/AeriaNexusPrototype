@@ -44,6 +44,7 @@ import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.data.EnlaceAutenticado
+import com.delta.aeria_nexus_prototype.data.GafasState
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
@@ -103,6 +104,15 @@ private fun StatusBar(isRecording: Boolean) {
     // observa el repositorio directamente en lugar de pasar por un ViewModel.
     val bodycamState by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
     val enlaceBodycam by AppContainer.bodycamRepository.enlaceAutenticado.collectAsStateWithLifecycle()
+    val gafasState by AppContainer.gafasRepository.state.collectAsStateWithLifecycle()
+
+    // Releer al componer la barra tapa los dos huecos que tiene observar el
+    // enlace de las gafas: el permiso de Bluetooth puede concederse despues del
+    // arranque, y con la app en segundo plano Android aplaza los avisos a los
+    // procesos en cache (verificado el 2026-09-07: una reconexion no llego hasta
+    // volver a la app). La bodycam no lo sufre porque su servicio en primer plano
+    // mantiene el proceso despierto; las gafas no tienen ninguno, a proposito.
+    LaunchedEffect(Unit) { AppContainer.gafasRepository.refrescar() }
 
     Row(
         modifier = Modifier
@@ -144,13 +154,14 @@ private fun StatusBar(isRecording: Boolean) {
             )
         }
         Spacer(Modifier.width(12.dp))
-        // Falcon Lens (gafas): integracion pendiente, siempre desconectado.
+        // Falcon Lens (gafas BleeqUp): SOLO indicador. Las gafas se conectan
+        // solas al telefono; desde la app no se controla nada de ellas.
         // El set de Material de Compose no trae gafas: el icono es el vector
         // eyeglasses_2 de Material Symbols importado en drawable.
         DeviceIndicator(
             icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
             description = "Falcon Lens (gafas)",
-            tint = TextoTerciario,
+            tint = gafasStateColor(gafasState),
         )
         if (isRecording) {
             Spacer(Modifier.width(12.dp))
@@ -176,6 +187,19 @@ private fun bodycamStateColor(state: BodycamState, enlace: EnlaceAutenticado): C
     enlace == EnlaceAutenticado.SI -> VerdeOk
     enlace == EnlaceAutenticado.RECHAZADO -> RojoSuave
     else -> AmarilloAviso
+}
+
+/**
+ * Color del icono de las gafas.
+ *
+ * Aqui no hay verde condicionado como en la bodycam: las gafas no se acreditan
+ * ante el telefono ni reciben ordenes suyas, asi que lo unico que se puede
+ * afirmar (y lo unico que el agente necesita saber) es si las lleva enlazadas.
+ */
+private fun gafasStateColor(state: GafasState): Color = when (state) {
+    GafasState.CONNECTED -> VerdeOk
+    GafasState.CONNECTING -> AmarilloAviso
+    GafasState.DISCONNECTED -> TextoTerciario
 }
 
 /** Lo que se escribe junto al icono, o null si no hay nada que advertir. */

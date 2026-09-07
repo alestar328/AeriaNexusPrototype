@@ -112,7 +112,11 @@ fun AppNavHost() {
         composable(Routes.OPERATIONS) {
             OperationsScreen(
                 viewModel = viewModel {
-                    OperationsViewModel(repositorio, AppContainer.agoraRepository)
+                    OperationsViewModel(
+                        repositorio,
+                        AppContainer.agoraRepository,
+                        AppContainer.gafasRepository,
+                    )
                 },
                 onOpenActiveIncident = { id -> navController.navigate(Routes.activeIncident(id)) },
                 onOpenSosLivestream = {

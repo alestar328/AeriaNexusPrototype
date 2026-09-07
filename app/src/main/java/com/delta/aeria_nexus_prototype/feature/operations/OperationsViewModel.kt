@@ -2,6 +2,7 @@ package com.delta.aeria_nexus_prototype.feature.operations
 
 import androidx.lifecycle.ViewModel
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
+import com.delta.aeria_nexus_prototype.data.GafasRepository
 import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.model.ActiveIncident
 import kotlinx.coroutines.flow.StateFlow
@@ -9,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 class OperationsViewModel(
     private val repositorio: IncidentRepository,
     private val agoraRepository: AgoraRepository,
+    private val gafasRepository: GafasRepository,
 ) : ViewModel() {
 
     /** Incidente activo compartido; null cuando no hay ninguno en curso. */
@@ -27,4 +29,9 @@ class OperationsViewModel(
 
     /** Cancela el SOS propio y corta el livestream. */
     fun cancelSos() = agoraRepository.cancelSos()
+
+    fun tienePermisoBluetooth(): Boolean = gafasRepository.tienePermisoBluetooth()
+
+    /** Tras conceder el permiso hay que releer: los avisos perdidos no vuelven. */
+    fun alConcederBluetooth() = gafasRepository.refrescar()
 }

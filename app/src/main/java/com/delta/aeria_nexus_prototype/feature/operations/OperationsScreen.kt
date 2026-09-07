@@ -35,7 +35,11 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -86,6 +90,25 @@ fun OperationsScreen(
     ) {
         viewModel.activateSos()
         onOpenSosLivestream()
+    }
+
+    // Los indicadores de bodycam y gafas de la barra superior no valen nada sin
+    // el permiso de Bluetooth: sin el, Android no entrega los avisos de conexion
+    // y los iconos se quedan en gris con los aparatos puestos y funcionando. Se
+    // pide aqui, al empezar el turno, y no solo en BODYCAM CONTROL, porque un
+    // agente que nunca entre en esa pantalla tendria un indicador que le miente.
+    val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { viewModel.alConcederBluetooth() }
+
+    // Una sola vez por sesion: pedirlo en cada vuelta a Operations le pondria el
+    // dialogo delante una y otra vez a quien ya haya dicho que no.
+    var yaSePidioBluetooth by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (!yaSePidioBluetooth && !viewModel.tienePermisoBluetooth()) {
+            yaSePidioBluetooth = true
+            bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
     }
 
     AppScaffold(
