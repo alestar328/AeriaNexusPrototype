@@ -1,6 +1,9 @@
 package com.delta.aeria_nexus_prototype
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
@@ -8,6 +11,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.identity.Pkcs10
 import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
@@ -36,8 +41,19 @@ private const val RETO_SIN_EMISOR = "prueba-de-posesion"
 
 /** Actividad unica: toda la app vive en Compose con navegacion propia. */
 class MainActivity : ComponentActivity() {
+
+    /**
+     * La notificacion de RadioService es la unica cara de la radio cuando la app
+     * no esta delante. Sin POST_NOTIFICATIONS (Android 13+) el servicio corre
+     * igual, pero su notificacion no se ve y el agente no tiene forma de saber si
+     * sigue a la escucha ni quien esta hablando.
+     */
+    private val pedirNotificaciones =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pedirNotificacionesSiHaceFalta()
         // La app muestra evidencia y datos de agentes: FLAG_SECURE bloquea las
         // capturas y la grabacion de pantalla en toda la aplicacion, y ademas
         // oculta la vista previa en el selector de apps recientes.
@@ -65,6 +81,15 @@ class MainActivity : ComponentActivity() {
                 TrustGate()
             }
         }
+    }
+
+    private fun pedirNotificacionesSiHaceFalta() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val concedido = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!concedido) pedirNotificaciones.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 }
 

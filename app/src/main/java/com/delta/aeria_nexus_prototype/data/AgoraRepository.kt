@@ -210,7 +210,7 @@ class AgoraRepository(
                 onBodycamStreamChanged(streaming = false)
                 // Si se va del canal con el PTT abierto no llega ningun cambio de
                 // estado de audio, y el aviso se quedaria colgado para siempre.
-                _bodycamHablando.value = false
+                marcarBodycamHablando(false)
                 _oficialHablando.value = null
             }
             // Un emisor que se desconecta equivale a un livestream cortado.
@@ -235,12 +235,14 @@ class AgoraRepository(
          */
         override fun onRemoteAudioStateChanged(uid: Int, state: Int, reason: Int, elapsed: Int) {
             if (uid != BODYCAM_UID) return
-            _bodycamHablando.value = when (state) {
-                Constants.REMOTE_AUDIO_STATE_STOPPED,
-                Constants.REMOTE_AUDIO_STATE_FAILED,
-                -> false
-                else -> true
-            }
+            marcarBodycamHablando(
+                when (state) {
+                    Constants.REMOTE_AUDIO_STATE_STOPPED,
+                    Constants.REMOTE_AUDIO_STATE_FAILED,
+                    -> false
+                    else -> true
+                },
+            )
         }
 
         override fun onRemoteVideoStateChanged(uid: Int, state: Int, reason: Int, elapsed: Int) {
@@ -441,9 +443,20 @@ class AgoraRepository(
      */
     fun iniciarPtt(officer: String): Boolean {
         ensureStarted()
-        val rtcEngine = engine ?: return false
+        // Sin motor o sin permiso el PTT no se abre, y el agente tiene que OIRLO:
+        // el indicador de "transmitiendo" no se enciende, pero nadie mira la
+        // pantalla mientras habla por radio.
+        val rtcEngine = engine ?: run { PttTones.denegado(); return false }
         if (_pttPropioActivo.value) return true
-        if (!tienePermisoMicrofono()) return false
+        if (!tienePermisoMicrofono()) {
+            PttTones.denegado()
+            return false
+        }
+
+        // El tono arranca antes de publicar el microfono: asi el pitido se queda
+        // en el telefono del que habla y no sale al canal; del solape que quede se
+        // encarga el cancelador de eco de Agora.
+        PttTones.abrir()
 
         // El telefono es receptor estricto: fuera del SOS la captura esta apagada
         // y el volumen de grabacion a cero. Hay que deshacer las tres cosas.
@@ -481,6 +494,11 @@ class AgoraRepository(
         // livestream y apagar el microfono aqui dejaria la emergencia muda.
         if (_sosActive.value) return
         apagarMicrofono()
+        // Despues de apagarlo, no antes: el tono de cierre solo suena cuando el
+        // microfono esta cerrado de verdad. Por eso NO suena en el caso de arriba
+        // — con el SOS emitiendo la voz sigue saliendo, y decirle al agente que ha
+        // soltado seria justo la mentira que hay que evitar.
+        PttTones.cerrar()
     }
 
     /** Devuelve el microfono al estado de receptor estricto. */
@@ -495,11 +513,29 @@ class AgoraRepository(
     }
 
     /**
+     * Unico sitio donde cambia [_bodycamHablando], y a proposito: el tono de
+     * recepcion tiene que sonar en el FLANCO, no en cada aviso.
+     * onRemoteAudioStateChanged repite "true" cada pocos segundos mientras dura la
+     * transmision (el estado va y viene entre DECODING y FROZEN con el PTT
+     * perfectamente abierto). El StateFlow se traga la repeticion porque el valor
+     * no cambia, pero un pitido por aviso seria un chasquido continuo encima de la
+     * voz del companero.
+     */
+    private fun marcarBodycamHablando(hablando: Boolean) {
+        if (_bodycamHablando.value == hablando) return
+        _bodycamHablando.value = hablando
+        if (hablando) PttTones.entra() else PttTones.sale()
+    }
+
+    /**
      * Cierra el PTT del agente [uid]: quita su banda y vuelve a silenciarlo, salvo
      * que se le este viendo el livestream (ese audio no lo abrio el PTT) o sea la
      * bodycam, cuya escucha es permanente.
      */
     private fun cerrarPttRemoto(uid: Int) {
+        // Solo suena si ese agente estaba hablando: aqui se entra tambien por
+        // onUserOffline, que llama por cualquiera que se va del canal.
+        if (uid in _pttsRemotos.value) PttTones.sale()
         _pttsRemotos.update { it - uid }
         if (uid == BODYCAM_UID || uid in uidsEnEscucha) return
         engine?.muteRemoteAudioStream(uid, true)
@@ -730,6 +766,9 @@ class AgoraRepository(
                 // aleatorio (a diferencia del 9001 de la bodycam), asi que la
                 // suscripcion no puede estar cableada: se abre al oir el anuncio.
                 engine?.muteRemoteAudioStream(remoteUid, false)
+                // El tono va antes de apuntarlo, para no sonar dos veces si
+                // llegase un "ptt_on" repetido del mismo agente.
+                if (remoteUid !in _pttsRemotos.value) PttTones.entra()
                 _pttsRemotos.update { it + (remoteUid to mensaje.optString("officer")) }
             }
 

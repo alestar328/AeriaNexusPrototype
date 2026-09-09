@@ -31,6 +31,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
+    <!-- Radio tactica siempre a la escucha: el PTT tiene que sonar con la app
+         cerrada. specialUse en vez de mediaPlayback porque desde Android 15 un
+         BOOT_COMPLETED no puede levantar mediaPlayback; ver RadioService. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Sin este permiso el servicio corre igual pero su notificacion no se ve, y
+         es la unica senal de que el telefono sigue en el canal. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- usesCleartextTraffic: el servidor HTTP de la bodycam W1 (visor remoto
          y descarga de grabaciones) es http:// en la red WiFi local; sin esto
          Android bloquea la conexion. El trafico a internet sigue siendo TLS. -->
@@ -63,6 +72,31 @@
             android:name=".BodycamService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Sostiene la radio tactica (canal de Agora) cuando la app no esta
+             delante; lo arranca y para AeriaNexusApp segun el estado de sesion.
+             PENDIENTE: para poder HABLAR con la app cerrada habria que anadir
+             android:foregroundServiceType="specialUse|microphone" y levantarlo con
+             los dos tipos solo desde primer plano — `microphone` no se puede
+             arrancar ni desde boot ni desde background. Ver RadioService. -->
+        <service
+            android:name=".RadioService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Radio tactica push-to-talk entre agentes: el telefono permanece en el canal de voz para recibir transmisiones de otras unidades con la app cerrada" />
+        </service>
+
+        <!-- Despierta el proceso tras un reinicio para retomar subidas y volver al
+             canal. La radio no arranca aqui: la sesion vuelve a LOCKED. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"
