@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +48,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -82,6 +85,21 @@ fun OperationsScreen(
 ) {
     val activeIncident by viewModel.activeIncident.collectAsStateWithLifecycle()
     val sosActive by viewModel.sosActive.collectAsStateWithLifecycle()
+    val pttActivo by viewModel.pttActivo.collectAsStateWithLifecycle()
+
+    // El PTT necesita el microfono. Se pide al primer intento de hablar y esa
+    // pulsacion se pierde a proposito: mientras el dialogo esta delante no hay
+    // captura, y abrir el canal al conceder el permiso dejaria el microfono
+    // abierto sin que nadie mantenga el boton.
+    val pttPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {}
+
+    // Salir de la pantalla con el boton pulsado (una notificacion, el boton atras)
+    // no genera evento de soltar: sin esto el microfono se quedaria abierto.
+    DisposableEffect(Unit) {
+        onDispose { viewModel.terminarPtt() }
+    }
 
     // El livestream necesita camara y microfono. Se piden al tocar EMERGENCY y
     // el SOS se emite aunque se nieguen: la alerta llega igual, solo sin video.
@@ -147,21 +165,34 @@ fun OperationsScreen(
                         modifier = Modifier.weight(1f),
                     )
                     BodycamControlButton(compacto = compacto, onClick = onOpenBodycamControl)
-                 /**   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Botones de radio y llamada: decorativos en el prototipo.
-                        RadioActionButton(
-                            icon = Icons.Filled.Mic,
-                            description = "Push to talk",
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // El PTT ya no es decorativo: manda la voz de este
+                        // telefono al canal de Agora, igual que el boton F2 de
+                        // la bodycam pero para el agente que no la lleva encima.
+                        PttButton(
+                            activo = pttActivo,
                             compacto = compacto,
+                            onPress = {
+                                if (viewModel.tienePermisoMicrofono()) {
+                                    viewModel.iniciarPtt()
+                                } else {
+                                    pttPermissionLauncher.launch(
+                                        Manifest.permission.RECORD_AUDIO,
+                                    )
+                                }
+                            },
+                            onRelease = { viewModel.terminarPtt() },
                             modifier = Modifier.weight(1f),
                         )
+                        // La llamada a central sigue siendo decorativa: no hay
+                        // telefonia en el prototipo.
                         RadioActionButton(
                             icon = Icons.Filled.Phone,
                             description = "Call dispatch",
                             compacto = compacto,
                             modifier = Modifier.weight(1f),
                         )
-                    }**/
+                    }
                 }
             }
 
@@ -376,6 +407,94 @@ private fun RadioActionButton(
                 contentDescription = description,
                 tint = AzulClaro,
                 modifier = Modifier.size(if (compacto) 28.dp else 36.dp),
+            )
+        }
+    }
+}
+
+/**
+ * PTT del propio telefono: mantener pulsado para hablar, soltar para cerrar.
+ *
+ * Aqui SI es mantener-para-hablar, al reves que en la bodycam, donde el firmware
+ * de la W1 solo avisa al SOLTAR la tecla F2 y obliga a un conmutador. En una
+ * pantalla no existe esa limitacion, y mantener es lo que evita el fallo clasico
+ * de la radio: dejarse el microfono abierto sin darse cuenta.
+ *
+ * El indicador se enciende con lo que el repositorio confirma haber abierto, no
+ * con la pulsacion: un boton que dice ON AIR sin que salga voz es peor que uno
+ * que no responde, porque el agente cree que le estan oyendo.
+ */
+@Composable
+private fun PttButton(
+    activo: Boolean,
+    compacto: Boolean,
+    onPress: () -> Unit,
+    onRelease: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // Late mientras se transmite, como el SOS: tiene que verse de reojo.
+    val latido by rememberInfiniteTransition(label = "pttLatido").animateFloat(
+        initialValue = 1f,
+        targetValue = 0.5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 600),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pttLatido",
+    )
+
+    Box(
+        modifier = modifier
+            .heightIn(min = if (compacto) 64.dp else 96.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(if (activo) AzulPrimario.copy(alpha = 0.35f) else AzulOscuroPanel)
+            .border(
+                1.dp,
+                if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
+                RoundedCornerShape(24.dp),
+            )
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        onPress()
+                        // tryAwaitRelease vuelve tanto al soltar como al cancelarse
+                        // el gesto (el dedo se sale del boton, un scroll lo roba):
+                        // en los dos casos hay que cerrar el microfono.
+                        tryAwaitRelease()
+                        onRelease()
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(if (compacto) 40.dp else 56.dp)
+                    .alpha(if (activo) latido else 1f)
+                    .background(
+                        if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
+                        RoundedCornerShape(16.dp),
+                    )
+                    .border(1.dp, AzulClaro.copy(alpha = 0.2f), RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Mic,
+                    contentDescription = "Push to talk",
+                    tint = if (activo) AzulOscuroPanel else AzulClaro,
+                    modifier = Modifier.size(if (compacto) 24.dp else 32.dp),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            // El texto esta siempre puesto, tambien en reposo: si apareciera solo
+            // al transmitir, el boton cambiaria de alto en mitad de la pulsacion.
+            Text(
+                text = if (activo) "ON AIR" else "PTT",
+                color = if (activo) AzulClaro else TextoTerciario,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 2.sp,
             )
         }
     }

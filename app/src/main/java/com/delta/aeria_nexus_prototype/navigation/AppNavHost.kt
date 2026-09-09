@@ -35,6 +35,8 @@ import com.delta.aeria_nexus_prototype.feature.operations.OperationsViewModel
 import com.delta.aeria_nexus_prototype.feature.profile.ProfileScreen
 import com.delta.aeria_nexus_prototype.feature.rmsform.RmsFormScreen
 import com.delta.aeria_nexus_prototype.feature.rmsform.RmsFormViewModel
+import com.delta.aeria_nexus_prototype.feature.ptt.PttAvisoOverlay
+import com.delta.aeria_nexus_prototype.feature.ptt.PttAvisoViewModel
 import com.delta.aeria_nexus_prototype.feature.sos.SosAlertOverlay
 import com.delta.aeria_nexus_prototype.feature.sos.SosAlertViewModel
 import com.delta.aeria_nexus_prototype.feature.submitted.SubmissionSuccessScreen
@@ -292,6 +294,15 @@ fun AppNavHost() {
             navController.navigate(Routes.mapFocusedAt(latitude, longitude)) {
                 popUpTo(Routes.OPERATIONS)
             }
+        },
+    )
+
+    // Aviso de PTT: un companero esta comunicando por la bodycam. Se monta
+    // DESPUES del SOS a proposito — si coinciden, la emergencia manda. Es una
+    // banda superior, no un dialogo: no roba el foco ni tapa la pantalla.
+    PttAvisoOverlay(
+        viewModel = viewModel {
+            PttAvisoViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
         },
     )
 }

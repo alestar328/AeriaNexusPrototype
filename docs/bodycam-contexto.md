@@ -56,7 +56,7 @@ permiso: cualquier app lo recibe, incluso en segundo plano.
 
 | key_code | Tecla | Boton fisico | Accion en BodyCamServer | Notificacion BT |
 |---|---|---|---|---|
-| 132 | F2 | PTT / audio | toggle microfono del livestream | `BTN_PTT` |
+| 132 | F2 | PTT / audio | conmuta el microfono en el canal Agora | `BTN_PTT_ON` / `BTN_PTT_OFF` |
 | 133 | F3 | **SOS** | toggle livestream Agora (uid 9001) | `BTN_STREAM_START/STOP` |
 | 134 | F4 | Grabacion | toggle grabacion local | `BTN_REC_START/STOP` |
 
@@ -124,7 +124,8 @@ del SOS por si se perdio el `BTN_STREAM_START`).
 ```
 BTN_REC_START / BTN_REC_STOP        (boton 134: grabacion local)
 BTN_STREAM_START / BTN_STREAM_STOP  (boton 133 SOS: livestream = emergencia)
-BTN_PTT                             (boton 132: mic on/off, informativo)
+BTN_PTT_ON / BTN_PTT_OFF            (boton 132: microfono del PTT abierto/cerrado;
+                                     tambien en el campo "ptt" del STATUS)
 ```
 
 Interpretacion en el telefono (asi lo hace map_controller.dart y asi debe
@@ -190,9 +191,16 @@ En el proyecto Flutter el codigo BT del telefono YA es Kotlin nativo
   Flutter. En Aeria Nexus NO hace falta: el controller se conecta directo a un
   repositorio Kotlin (patron AppContainer).
 - **Flujo de UI acordado ("solo conectar", 2026-06-02):** el boton de bodycam
-  del panel SOLO conecta/desconecta el BT. Grabacion, livestream y PTT los
-  dispara UNICAMENTE la bodycam con sus botones fisicos. Al conectar se inicia
-  el poll de STATUS (bateria); nada de auto-grabar ni auto-stream.
+  del panel SOLO conecta/desconecta el BT. Grabacion, livestream y el PTT **de
+  la bodycam** los dispara UNICAMENTE la bodycam con sus botones fisicos. Al
+  conectar se inicia el poll de STATUS (bateria); nada de auto-grabar ni
+  auto-stream.
+  **Matiz desde el 2026-09-08:** el telefono tiene ademas su **propio** PTT
+  (boton de Operations, mantener para hablar). No es una excepcion a lo
+  anterior: no manda nada a la bodycam ni toca su microfono — publica el
+  microfono del telefono en el mismo canal de Agora y se anuncia por el data
+  stream (`ptt_on` / `ptt_off`), porque su uid es aleatorio y los demas entran
+  con `autoSubscribeAudio = false`. La bodycam no participa ni escucha.
 - **Deteccion SOS de bodycam por dos vias** (deben coexistir, con guard
   anti-doble-popup): (a) rapida: `BTN_STREAM_START` por BT; (b) confiable y
   sin BT: el uid 9001 aparece/publica video en el canal Agora. Ambas terminan

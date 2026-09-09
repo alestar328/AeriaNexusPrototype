@@ -103,6 +103,56 @@ class AgoraRepository(
     private val _remoteVideoStopped = MutableStateFlow<Int?>(null)
     val remoteVideoStopped: StateFlow<Int?> = _remoteVideoStopped.asStateFlow()
 
+    // Una bodycam del sistema tiene el PTT abierto y su voz esta sonando en el
+    // canal. Se deduce del estado del audio remoto de uid 9001, igual que el SOS
+    // de la bodycam se deduce de su video: la camara no manda nada por el data
+    // stream, asi que su propio audio es el unico anuncio que llega a todos.
+    //
+    // Es un aviso, NO una alarma: el PTT es trafico de radio rutinario y no debe
+    // usar el popup del SOS. Ver PttAvisoOverlay.
+    private val _bodycamHablando = MutableStateFlow(false)
+    val bodycamHablando: StateFlow<Boolean> = _bodycamHablando.asStateFlow()
+
+    // PENDIENTE (bloqueado por BODYCAM_UID fijo): identidad del oficial que habla.
+    //
+    // Hoy TODAS las bodycams comparten el uid 9001, asi que no se puede saber cual
+    // habla — ni siquiera pueden coexistir dos en el canal, porque Agora expulsa al
+    // duplicado. Por eso el aviso es generico y este flujo se queda preparado sin
+    // alimentar.
+    //
+    // Cuando haya autenticacion y usuarios de prueba reales, el camino mas corto NO
+    // pasa por tocar la bodycam (que no publica en el data stream): es el TELEFONO
+    // EMPAREJADO quien lo anuncia, porque ya sabe los tres datos que hacen falta:
+    //   1. la atadura (bwcId, userId, sujeto) → quien lleva esa camara
+    //   2. el estado del PTT por Bluetooth → BTN_PTT_ON/OFF y el campo "ptt" del STATUS
+    //   3. el data stream ya abierto, donde manda su GPS cada 3 s
+    // Bastaria con un mensaje del tipo que ya existe ("emergency"/"emergency_cancel"):
+    //   {"type":"ptt","officer":<sujeto>,"bwc":<bwcId>,"ts":<millis>}
+    // y atenderlo en handleStreamMessage() para rellenar este flujo.
+    //
+    // El aviso generico debe SEGUIR funcionando aunque eso llegue: si el telefono del
+    // agente esta apagado o fuera de alcance BT, el anuncio no sale pero el audio si,
+    // y los demas tienen que enterarse igual.
+    private val _oficialHablando = MutableStateFlow<String?>(null)
+    val oficialHablando: StateFlow<String?> = _oficialHablando.asStateFlow()
+
+    // El PTT de ESTE telefono: el agente mantiene pulsado el boton de Operations y
+    // su voz sale al canal. Es el mismo servicio de radio que el boton F2 de la
+    // bodycam, para el agente que no la lleva puesta o la tiene en la mochila.
+    private val _pttPropioActivo = MutableStateFlow(false)
+    val pttPropioActivo: StateFlow<Boolean> = _pttPropioActivo.asStateFlow()
+
+    // Companeros con el PTT abierto DESDE SU TELEFONO, por uid → numero de oficial.
+    // La bodycam no entra aqui: su PTT se detecta por el audio del uid fijo 9001
+    // (bodycamHablando), porque no publica nada en el data stream.
+    private val _pttsRemotos = MutableStateFlow<Map<Int, String>>(emptyMap())
+    val pttsRemotos: StateFlow<Map<Int, String>> = _pttsRemotos.asStateFlow()
+
+    // Uids cuyo audio esta abierto porque se esta viendo su livestream. Hay que
+    // llevar la cuenta: sin ella, el "ptt_off" de un agente al que ademas se le
+    // esta viendo el video lo dejaria mudo en mitad de su propia emergencia.
+    private val uidsEnEscucha = mutableSetOf<Int>()
+
     // Cortes de senal SOS que el mapa muestra como aviso fijo, por uid del
     // emisor. Solo se alimenta con cancelaciones recibidas por el data stream:
     // como Agora nunca devuelve al emisor sus propios mensajes, el agente que
@@ -136,6 +186,14 @@ class AgoraRepository(
             // La bodycam (uid fijo 9001) es un dispositivo, no un agente: no
             // debe inflar el contador de usuarios.
             if (uid != BODYCAM_UID) _connectedUsers.value++
+            // Excepcion al autoSubscribeAudio=false: a la bodycam se la escucha
+            // siempre, sin aceptar ningun livestream. Es el PTT — el agente pulsa
+            // F2 y su voz tiene que llegar a TODOS los telefonos del sistema, que
+            // es justo lo que el Bluetooth no puede hacer porque solo alcanza al
+            // movil emparejado. No reabre el problema que cerraba
+            // autoSubscribeAudio=false (que cada voz sonase en todo el canal):
+            // la bodycam solo publica audio mientras el PTT esta abierto.
+            if (uid == BODYCAM_UID) escucharBodycam()
             // Reenviamos posicion y SOS activo para que el recien llegado nos
             // vea de inmediato, sin esperar al siguiente heartbeat.
             sendCurrentLocation()
@@ -144,7 +202,17 @@ class AgoraRepository(
 
         override fun onUserOffline(uid: Int, reason: Int) {
             if (uid != BODYCAM_UID && _connectedUsers.value > 1) _connectedUsers.value--
-            if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = false)
+            // Quien se va del canal con el PTT abierto no llega a mandar su
+            // "ptt_off": sin esto su banda se quedaria puesta para siempre.
+            uidsEnEscucha.remove(uid)
+            cerrarPttRemoto(uid)
+            if (uid == BODYCAM_UID) {
+                onBodycamStreamChanged(streaming = false)
+                // Si se va del canal con el PTT abierto no llega ningun cambio de
+                // estado de audio, y el aviso se quedaria colgado para siempre.
+                _bodycamHablando.value = false
+                _oficialHablando.value = null
+            }
             // Un emisor que se desconecta equivale a un livestream cortado.
             _remoteVideoStopped.value = uid
             // Solo se quita el marcador si el agente salio del canal a proposito.
@@ -152,6 +220,26 @@ class AgoraRepository(
             // ultima posicion conocida y el mapa lo pinta como "sin senal".
             if (reason == Constants.USER_OFFLINE_QUIT) {
                 _remoteAgents.update { it - uid }
+            }
+        }
+
+        /**
+         * El PTT de la bodycam visto desde fuera: mientras su pista de audio siga
+         * viva, hay un companero con el microfono abierto.
+         *
+         * Solo STOPPED y FAILED cierran el aviso. FROZEN (3) NO: medido con la W1
+         * el 2026-09-08, el estado va y viene entre DECODING y FROZEN cada pocos
+         * segundos con el PTT perfectamente abierto — basta un silencio del agente
+         * para que el flujo se congele. Tratar FROZEN como "ya no habla" haria
+         * parpadear la banda durante toda la transmision.
+         */
+        override fun onRemoteAudioStateChanged(uid: Int, state: Int, reason: Int, elapsed: Int) {
+            if (uid != BODYCAM_UID) return
+            _bodycamHablando.value = when (state) {
+                Constants.REMOTE_AUDIO_STATE_STOPPED,
+                Constants.REMOTE_AUDIO_STATE_FAILED,
+                -> false
+                else -> true
             }
         }
 
@@ -233,6 +321,8 @@ class AgoraRepository(
                 clientRoleType = Constants.CLIENT_ROLE_BROADCASTER
                 // El audio ajeno se escucha solo al aceptar un livestream; con
                 // auto-subscribe cada voz publicada sonaria en todo el canal.
+                // Unica excepcion: la bodycam (uid 9001), que se suscribe a mano en
+                // onUserJoined porque su audio ES el PTT. Ver escucharBodycam().
                 autoSubscribeAudio = false
                 autoSubscribeVideo = true
                 publishMicrophoneTrack = false
@@ -306,6 +396,7 @@ class AgoraRepository(
     fun startWatching(uid: Int) {
         val rtcEngine = engine ?: return
         if (_remoteVideoStopped.value == uid) _remoteVideoStopped.value = null
+        uidsEnEscucha.add(uid)
         rtcEngine.muteRemoteVideoStream(uid, false)
         rtcEngine.muteRemoteAudioStream(uid, false)
     }
@@ -313,8 +404,105 @@ class AgoraRepository(
     /** Deja de escuchar al agente [uid] y libera su vista al salir de la pantalla. */
     fun stopWatching(uid: Int) {
         val rtcEngine = engine ?: return
-        rtcEngine.muteRemoteAudioStream(uid, true)
+        uidsEnEscucha.remove(uid)
+        // A la bodycam se la sigue oyendo aunque se cierre su livestream: su audio
+        // es el PTT, que vive por su cuenta y no se apaga al dejar de ver el video.
+        // Por lo mismo tampoco se silencia a un agente que este hablando por su PTT:
+        // cerrar su video no cierra su radio.
+        if (uid != BODYCAM_UID && uid !in _pttsRemotos.value) {
+            rtcEngine.muteRemoteAudioStream(uid, true)
+        }
         rtcEngine.setupRemoteVideo(VideoCanvas(null, VideoCanvas.RENDER_MODE_HIDDEN, uid))
+    }
+
+    /**
+     * Abre la escucha del audio de la bodycam (uid 9001) y la deja abierta. Es el
+     * canal del PTT: la bodycam solo publica voz mientras el agente tiene el
+     * microfono abierto, asi que suscribirse de forma permanente no mete ruido.
+     */
+    fun escucharBodycam() {
+        engine?.muteRemoteAudioStream(BODYCAM_UID, false)
+    }
+
+    /** True si el sistema ya concedio el microfono; el PTT no puede abrirse sin el. */
+    fun tienePermisoMicrofono(): Boolean = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Abre el microfono de ESTE telefono y lo publica al canal: el PTT propio,
+     * el mismo servicio de radio que el boton F2 de la bodycam pero para el agente
+     * que no la lleva encima. Se mantiene abierto mientras dure la pulsacion.
+     *
+     * Devuelve false si no se pudo abrir (sin permiso de microfono o sin motor);
+     * la pantalla lo usa para no encender el indicador de "transmitiendo" cuando
+     * en realidad no sale voz — el error que la bodycam ya pago una vez.
+     */
+    fun iniciarPtt(officer: String): Boolean {
+        ensureStarted()
+        val rtcEngine = engine ?: return false
+        if (_pttPropioActivo.value) return true
+        if (!tienePermisoMicrofono()) return false
+
+        // El telefono es receptor estricto: fuera del SOS la captura esta apagada
+        // y el volumen de grabacion a cero. Hay que deshacer las tres cosas.
+        rtcEngine.enableLocalAudio(true)
+        rtcEngine.adjustRecordingSignalVolume(100)
+        rtcEngine.muteLocalAudioStream(false)
+        rtcEngine.updateChannelMediaOptions(
+            ChannelMediaOptions().apply { publishMicrophoneTrack = true },
+        )
+        _pttPropioActivo.value = true
+
+        // Publicar no basta: los demas entran con autoSubscribeAudio = false y no
+        // oirian nada. Es el mismo problema que resuelve escucharBodycam(), pero
+        // aqui el uid es aleatorio y no se puede cablear, asi que hay que
+        // anunciarse por el data stream para que abran la escucha.
+        sendJson(
+            JSONObject()
+                .put("type", "ptt_on")
+                .put("officer", officer)
+                .put("ts", System.currentTimeMillis()),
+        )
+        return true
+    }
+
+    /** Cierra el PTT propio: avisa a los demas y vuelve a apagar el microfono. */
+    fun terminarPtt() {
+        if (!_pttPropioActivo.value) return
+        _pttPropioActivo.value = false
+        sendJson(
+            JSONObject()
+                .put("type", "ptt_off")
+                .put("ts", System.currentTimeMillis()),
+        )
+        // El SOS manda: si esta emitiendo, la voz sigue publicada como parte del
+        // livestream y apagar el microfono aqui dejaria la emergencia muda.
+        if (_sosActive.value) return
+        apagarMicrofono()
+    }
+
+    /** Devuelve el microfono al estado de receptor estricto. */
+    private fun apagarMicrofono() {
+        val rtcEngine = engine ?: return
+        rtcEngine.updateChannelMediaOptions(
+            ChannelMediaOptions().apply { publishMicrophoneTrack = false },
+        )
+        rtcEngine.muteLocalAudioStream(true)
+        rtcEngine.enableLocalAudio(false)
+        rtcEngine.adjustRecordingSignalVolume(0)
+    }
+
+    /**
+     * Cierra el PTT del agente [uid]: quita su banda y vuelve a silenciarlo, salvo
+     * que se le este viendo el livestream (ese audio no lo abrio el PTT) o sea la
+     * bodycam, cuya escucha es permanente.
+     */
+    private fun cerrarPttRemoto(uid: Int) {
+        _pttsRemotos.update { it - uid }
+        if (uid == BODYCAM_UID || uid in uidsEnEscucha) return
+        engine?.muteRemoteAudioStream(uid, true)
     }
 
     /**
@@ -344,16 +532,21 @@ class AgoraRepository(
     /** Vuelve al modo receptor estricto: nada de este telefono sale al canal. */
     private fun stopCameraPublish() {
         val rtcEngine = engine ?: return
+        // El PTT puede seguir pulsado cuando se cancela el SOS: la camara se corta,
+        // la voz no. Quitar el microfono aqui dejaria al agente hablando en vacio.
+        val mantenerMicrofono = _pttPropioActivo.value
         rtcEngine.updateChannelMediaOptions(
             ChannelMediaOptions().apply {
                 publishCameraTrack = false
-                publishMicrophoneTrack = false
+                publishMicrophoneTrack = mantenerMicrofono
             },
         )
         rtcEngine.muteLocalVideoStream(true)
-        rtcEngine.muteLocalAudioStream(true)
-        rtcEngine.enableLocalAudio(false)
-        rtcEngine.adjustRecordingSignalVolume(0)
+        if (!mantenerMicrofono) {
+            rtcEngine.muteLocalAudioStream(true)
+            rtcEngine.enableLocalAudio(false)
+            rtcEngine.adjustRecordingSignalVolume(0)
+        }
         rtcEngine.stopPreview()
     }
 
@@ -531,6 +724,16 @@ class AgoraRepository(
                     _incomingSos.tryEmit(alerta)
                 }
             }
+
+            "ptt_on" -> {
+                // Un companero abre su microfono desde el telefono. Su uid es
+                // aleatorio (a diferencia del 9001 de la bodycam), asi que la
+                // suscripcion no puede estar cableada: se abre al oir el anuncio.
+                engine?.muteRemoteAudioStream(remoteUid, false)
+                _pttsRemotos.update { it + (remoteUid to mensaje.optString("officer")) }
+            }
+
+            "ptt_off" -> cerrarPttRemoto(remoteUid)
 
             "emergency_cancel" -> {
                 val cancelacion = SosCancel(

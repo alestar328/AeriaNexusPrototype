@@ -149,6 +149,13 @@ class BodycamRepository(private val context: Context) {
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
+    // PTT: el agente abrio el microfono de la bodycam con el boton fisico F2. No
+    // es un livestream — la bodycam entra en el canal de Agora solo con audio, sin
+    // video, y por eso no dispara SOS. Este flag es para la interfaz: quien lleva
+    // la voz es el canal de Agora, no el enlace Bluetooth.
+    private val _isPttOn = MutableStateFlow(false)
+    val isPttOn: StateFlow<Boolean> = _isPttOn.asStateFlow()
+
     // Visor remoto de foto: la bodycam mantiene su camara abierta y sirve
     // frames JPEG por HTTP mientras este flag sea true.
     private val _isPreviewing = MutableStateFlow(false)
@@ -587,13 +594,14 @@ class BodycamRepository(private val context: Context) {
                     _isRecording.value = estado.optBoolean("recording", _isRecording.value)
                     _isStreaming.value = estado.optBoolean("streaming", _isStreaming.value)
                     _isPreviewing.value = estado.optBoolean("preview", _isPreviewing.value)
+                    _isPttOn.value = estado.optBoolean("ptt", _isPttOn.value)
                     fileServerIp = estado.optString("file_server_ip").takeIf { it.isNotEmpty() }
                     fileServerPort = estado.optInt("file_server_port", fileServerPort)
                 } catch (e: Exception) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
             }
-            // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT).
+            // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
             line.startsWith("BTN_") -> {
                 applyStateChange(line)
                 _buttonEvents.tryEmit(line)
@@ -626,6 +634,10 @@ class BodycamRepository(private val context: Context) {
             }
             "OK:PREVIEW_START" -> _isPreviewing.value = true
             "OK:PREVIEW_STOP" -> _isPreviewing.value = false
+            // El PTT no toca grabacion ni livestream: la bodycam solo abre o
+            // cierra su microfono en el canal, sin cederle la camara a nadie.
+            "BTN_PTT_ON" -> _isPttOn.value = true
+            "BTN_PTT_OFF" -> _isPttOn.value = false
         }
     }
 

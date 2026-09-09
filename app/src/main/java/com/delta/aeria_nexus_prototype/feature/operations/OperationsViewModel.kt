@@ -30,6 +30,21 @@ class OperationsViewModel(
     /** Cancela el SOS propio y corta el livestream. */
     fun cancelSos() = agoraRepository.cancelSos()
 
+    /** True mientras este telefono tiene el PTT abierto y su voz sale al canal. */
+    val pttActivo: StateFlow<Boolean> = agoraRepository.pttPropioActivo
+
+    fun tienePermisoMicrofono(): Boolean = agoraRepository.tienePermisoMicrofono()
+
+    /**
+     * Abre el PTT propio con el numero de oficial, que es lo que ven los demas en
+     * la banda de aviso. Devuelve false si no se pudo abrir el microfono.
+     */
+    fun iniciarPtt(): Boolean =
+        agoraRepository.iniciarPtt(repositorio.officerProfile.officerNum)
+
+    /** Cierra el PTT propio al soltar el boton. */
+    fun terminarPtt() = agoraRepository.terminarPtt()
+
     fun tienePermisoBluetooth(): Boolean = gafasRepository.tienePermisoBluetooth()
 
     /** Tras conceder el permiso hay que releer: los avisos perdidos no vuelven. */

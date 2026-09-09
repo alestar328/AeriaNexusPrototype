@@ -6,6 +6,161 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-08 — PTT en las dos direcciones: oir a la bodycam y hablar desde el telefono
+
+### Lo que habia y lo que faltaba
+
+El PTT nacio en la bodycam: boton fisico F2, la voz sale por **Agora** y no por
+Bluetooth, porque el requisito es que llegue a **todos** los moviles del sistema y el
+BT solo alcanza al emparejado. Esa mitad quedo cerrada hoy en las dos apps (ver abajo).
+Faltaba la otra: un agente **sin la bodycam encima** no tenia forma de hablar. El boton
+"Push to talk" de Operations existia comentado desde el prototipo, decorativo.
+
+### Mitad 1 — escuchar el PTT de la bodycam
+
+Los telefonos entran al canal con `autoSubscribeAudio = false` (si no, cada voz
+publicada sonaria en todo el canal). La bodycam publicaba y **no la oia nadie**. Se
+abrio una excepcion explicita: `AgoraRepository.escucharBodycam()`, llamada desde
+`onUserJoined` cuando el uid es 9001, y `stopWatching(9001)` ya no la silencia — el PTT
+vive aunque se cierre el livestream.
+
+El estado se pinta con `onRemoteAudioStateChanged`, y ahi hubo una trampa medida con la
+W1: con el PTT abierto y sano el estado **va y viene entre DECODING (2) y FROZEN (3)**
+cada pocos segundos, porque basta un silencio del agente para congelar el flujo. Solo
+STOPPED y FAILED cierran el aviso; tratar FROZEN como "ya no habla" hacia parpadear la
+banda durante toda la transmision.
+
+La UI es `PttAvisoOverlay`: banda superior azul, sin sonido, no descartable, montada en
+`AppNavHost` **despues** del SOS para que la emergencia quede por encima. Deliberadamente
+NO es el popup del SOS: el PTT es trafico rutinario y una alarma modal por cada
+transmision acabaria enseñando a los agentes a descartar tambien las de verdad.
+
+### Mitad 2 — hablar desde el telefono (lo de hoy)
+
+`PttButton` en Operations, **mantener pulsado para hablar**. Aqui si se puede, al reves
+que en la bodycam: el firmware de la W1 solo emite el broadcast al **soltar** F2 y
+obliga a un conmutador; en una pantalla no hay esa limitacion, y mantener es lo que
+evita el fallo clasico de la radio, dejarse el microfono abierto.
+
+En `AgoraRepository`, `iniciarPtt(officer)` / `terminarPtt()`. Deshacen las tres cosas
+del modo receptor estricto (`enableLocalAudio`, `adjustRecordingSignalVolume`,
+`muteLocalAudioStream`) y publican el microfono en caliente con
+`updateChannelMediaOptions`, sin salir del canal.
+
+**Lo que no es obvio: publicar no basta.** Los demas siguen con
+`autoSubscribeAudio = false`. Con la bodycam se resolvio cableando el uid 9001, pero el
+uid de un telefono es **aleatorio**, asi que hay que anunciarse: dos mensajes nuevos por
+el data stream que ya llevaba el GPS y el SOS.
+
+    {"type":"ptt_on","officer":"<num>","ts":<millis>}
+    {"type":"ptt_off","ts":<millis>}
+
+Al recibir `ptt_on` el receptor abre `muteRemoteAudioStream(uid, false)` y pinta la
+banda — esta si **con nombre**, porque el anuncio lleva el numero de oficial dentro, al
+contrario que la de la bodycam, condenada a ser generica mientras todas compartan el uid
+9001. Con `ptt_off` vuelve a silenciar.
+
+### Los cuatro cruces que habia que atar
+
+- **Quien se va del canal con el PTT abierto no manda su `ptt_off`.** `onUserOffline`
+  cierra el PTT de ese uid o la banda se quedaria puesta para siempre.
+- **`ptt_off` no puede silenciar a quien se esta viendo en livestream**: ese audio lo
+  abrio `startWatching`, no el PTT. Se lleva la cuenta en `uidsEnEscucha`.
+- **Cancelar el SOS no puede cortar un PTT abierto.** `stopCameraPublish` mantiene el
+  microfono si el PTT sigue pulsado; la camara se corta, la voz no.
+- **Salir de la pantalla con el boton pulsado** no genera evento de soltar. Un
+  `DisposableEffect` cierra el microfono al desmontar.
+
+El indicador ON AIR se enciende con lo que el repositorio **confirma** haber abierto, no
+con la pulsacion: un boton que dice ON AIR sin que salga voz es peor que uno que no
+responde, porque el agente cree que le estan oyendo. Es la misma leccion que la bodycam
+pago con el micro ocupado.
+
+### Limite conocido, a proposito
+
+**La bodycam no oye el PTT de los telefonos.** Entra al canal con
+`autoSubscribeAudio = false` y nunca se suscribe a nadie: es una camara, no una radio.
+El agente que la lleva escucha por su telefono, que si esta suscrito. Si algun dia se
+pide que la unidad reproduzca por su altavoz, es un cambio del lado BodyCamServer.
+
+Sigue sin verificar el **eco en el telefono emparejado** con la bodycam que transmite:
+la prueba de hoy se hizo con ese movil sin volumen. Si aparece, la solucion es que el
+telefono atado a esa camara no se suscriba a su audio.
+
+### Estado
+
+Compila (`compileDebugKotlin`, BUILD SUCCESSFUL). El PTT del telefono **no se ha
+probado todavia en aparatos**.
+
+### Proximo paso
+
+Probar el PTT del telefono con dos moviles reales (Samsung + Redmi), que es la unica
+forma de ver el `ptt_on`/`ptt_off` viajando de verdad, y de paso cerrar lo del eco.
+
+---
+
+## 2026-09-07 (2) - Que se puede hacer con las gafas: averiguarlo antes de prometer cifrado
+
+### La pregunta
+
+Con la conectividad ya funcionando, la siguiente era la de verdad: se puede cifrar el
+video de las gafas y podemos crear funcionalidades dentro de ellas. Se investigo antes
+de escribir una linea de codigo, que era justo lo pedido.
+
+### Lo que hay dentro del aparato
+
+Se desmonto la app oficial (`com.bleequp.cycleride.cycleride`, instalada en el Samsung;
+Flutter, todo en `libapp.so`) y se leyeron los servicios que las gafas anuncian por
+Bluetooth. Tres canales:
+
+- **BLE GATT** con notificaciones para el control, con dos servicios propietarios
+  (`66666666-...` y `77777777-...`), sin documentar.
+- **Bluetooth clasico HFP/A2DP** para audio e intercomunicador. Usa **Agora RTC**, el
+  mismo SDK que Nexus para la red tactica.
+- **WiFi propio de las gafas para el video**: levantan un punto de acceso y sirven HTTP
+  en `192.168.43.1` (80 y 443; los logs de IMU por `https://.../imu_log?fileName=`). Ni
+  RTSP ni HLS: el video no se emite, se descarga. La app avisa al usuario de que se
+  desconecta de ese WiFi durante la grabacion para ahorrar bateria de las gafas.
+
+### Las dos respuestas
+
+**Funcionalidades internas: no.** No hay SDK ni API publica, el firmware es OTA firmado
+por el fabricante (`FirmwareUpgradeManager`) y ni ellos tienen paridad de plataformas
+(3K/60 fps solo en iOS). La unica puerta es comercial: partner.bleequp.com.
+
+**Cifrado: solo en el telefono**, y ahi ya esta hecho (la boveda). El problema no es
+cifrar, es como llega el fichero: **la app oficial lo descarga a
+`/storage/emulated/0/DCIM/BleeqUp/MEDIA`**, la galeria publica, justo lo que el proyecto
+dejo de hacer el 2026-08-30. Apoyarse en ella significaria cifrar una copia mientras el
+original se queda en claro y legible por cualquier app con permiso de medios: peor que
+no cifrar, porque parece resuelto.
+
+La via limpia es que Nexus hable directo con las gafas (unirse a su AP, listar,
+descargar contra la boveda, no tocar la galeria). Es posible en Android, pero exige
+reventar el protocolo propietario, sin documentar y roto potencialmente en cada
+actualizacion de firmware.
+
+### Ademas, y pesa mas que el cifrado
+
+La app del fabricante manda datos a `bleequp.cloud`, `bleequp.net.cn`, `111.230.42.62`
+(Tencent) y un bucket de Aliyun en Pekin. Con las gafas dentro del flujo de evidencia y
+esa app en el mismo telefono, eso es una decision de cliente, no tecnica.
+
+### Entregado
+
+`docs/preguntar al manager sobre las gafas.docx`: el informe con las dos respuestas, los
+tres caminos (preguntar al fabricante bajo NDA / medir el protocolo capturando trafico /
+apoyarse en su app, descartado) y cuatro decisiones que no son tecnicas.
+
+### Proximo paso
+
+Esperar la decision. Si sale la via 2, lo primero es una captura de trafico (HCI snoop
+del telefono + HTTP) mientras la app oficial hace una transferencia: un par de horas
+dicen si el protocolo es abordable o un pozo, y solo despues se puede estimar de verdad.
+Sin decision, no se escribe codigo de esto.
+
+---
+
 ## 2026-09-07 — Gafas BleeqUp: mirar el enlace en vez de fabricarlo
 
 ### Hecho
