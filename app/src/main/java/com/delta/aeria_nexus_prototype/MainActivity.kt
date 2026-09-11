@@ -1,10 +1,14 @@
 package com.delta.aeria_nexus_prototype
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import android.view.WindowManager
@@ -13,7 +17,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.delta.aeria_nexus_prototype.data.model.EvidenceSource
+import kotlinx.coroutines.launch
 import com.delta.aeria_nexus_prototype.data.AppContainer
+import com.delta.aeria_nexus_prototype.data.GafasApPrueba
 import com.delta.aeria_nexus_prototype.data.identity.Pkcs10
 import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
 import com.delta.aeria_nexus_prototype.data.identity.TrustBlockReason
@@ -39,6 +47,12 @@ private const val EXTRA_RETO_VALIDEZ = "challenge_ttl"
  */
 private const val RETO_SIN_EMISOR = "prueba-de-posesion"
 
+/** Marca de que ya se ofrecio la exencion de bateria; no se insiste. */
+private const val YA_PREGUNTADO = "exencion_bateria_preguntada"
+
+/** Idem para el autoarranque del fabricante, que va por otra pantalla. */
+private const val YA_AUTOARRANQUE = "autoarranque_fabricante_ofrecido"
+
 /** Actividad unica: toda la app vive en Compose con navegacion propia. */
 class MainActivity : ComponentActivity() {
 
@@ -54,6 +68,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pedirNotificacionesSiHaceFalta()
+        pedirExencionDeBateriaUnaVez()
+        ofrecerAutoarranqueDelFabricanteUnaVez()
         // La app muestra evidencia y datos de agentes: FLAG_SECURE bloquea las
         // capturas y la grabacion de pantalla en toda la aplicacion, y ademas
         // oculta la vista previa en el selector de apps recientes.
@@ -72,6 +88,8 @@ class MainActivity : ComponentActivity() {
             instalarAnclaDePerifericosDebug(intent)
             importarCertificadoDelTerminalDebug(intent)
             importarCertificadoDelAgenteDebug(intent)
+            importarEnBrutoDebug(intent)
+            encenderApDeLasGafasDebug(intent)
         }
         enableEdgeToEdge()
         setContent {
@@ -83,6 +101,71 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Pide una sola vez que el sistema deje de optimizar la bateria de la app.
+     *
+     * Sin esto, quitar la app del multitarea o dejar el telefono quieto acaba
+     * matando el proceso, y con el la radio: el agente deja de recibir el PTT sin
+     * enterarse. Se pregunta una vez y no se vuelve a insistir — si el agente dice
+     * que no, es su decision y repetirsela cada arranque solo consigue que la
+     * conceda sin leerla.
+     *
+     * **No basta en Xiaomi, Huawei ni Oppo**: ahi ademas hay que conceder el
+     * autoarranque y poner la bateria en "sin restricciones" a mano, en los ajustes
+     * del sistema. Eso no se puede pedir por intent.
+     */
+    private fun pedirExencionDeBateriaUnaVez() {
+        val prefs = getSharedPreferences("aeria_radio", Context.MODE_PRIVATE)
+        if (prefs.getBoolean(YA_PREGUNTADO, false)) return
+        val power = getSystemService(PowerManager::class.java)
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        prefs.edit().putBoolean(YA_PREGUNTADO, true).apply()
+        runCatching {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+        }.onFailure { Log.w(TAG_ALTA, "El sistema no ofrece la exencion de bateria", it) }
+    }
+
+    /**
+     * Lleva al agente a la pantalla de autoarranque del fabricante, una sola vez.
+     *
+     * En MIUI ese interruptor es lo que decide si la radio sigue viva al quitar la
+     * app de recientes, y **las apps instaladas por adb o desde Android Studio lo
+     * llevan apagado de fabrica**. No se puede conceder por codigo ni consultar: lo
+     * unico que esta en nuestra mano es abrir la pantalla en vez de esperar que el
+     * agente la encuentre entre los menus de seguridad de Xiaomi.
+     *
+     * Solo en Xiaomi/Redmi/POCO, que es el fabricante que tenemos delante. Huawei,
+     * Oppo y Vivo tienen pantallas equivalentes con otros nombres de componente, y
+     * no se cablean a ciegas: si el componente no existe, el salto falla en
+     * silencio y el agente se queda sin el ajuste creyendo que lo hizo. Cuando haya
+     * uno de esos terminales en la flota se anade con el componente comprobado.
+     */
+    private fun ofrecerAutoarranqueDelFabricanteUnaVez() {
+        val prefs = getSharedPreferences("aeria_radio", Context.MODE_PRIVATE)
+        if (prefs.getBoolean(YA_AUTOARRANQUE, false)) return
+        if (Build.MANUFACTURER.lowercase() !in setOf("xiaomi", "redmi", "poco")) return
+        prefs.edit().putBoolean(YA_AUTOARRANQUE, true).apply()
+
+        val autoarranqueMiui = Intent().setClassName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.autostart.AutoStartManagementActivity",
+        )
+        // Si MIUI ha movido ese componente, la ficha de la app siempre existe y
+        // desde ahi se llega igual.
+        val fichaDeLaApp = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName"),
+        )
+        runCatching { startActivity(autoarranqueMiui) }
+            .recoverCatching { startActivity(fichaDeLaApp) }
+            .onFailure { Log.w(TAG_ALTA, "No se pudo abrir el autoarranque del fabricante", it) }
+    }
+
     private fun pedirNotificacionesSiHaceFalta() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         val concedido = ContextCompat.checkSelfPermission(
@@ -91,6 +174,84 @@ class MainActivity : ComponentActivity() {
         ) == PackageManager.PERMISSION_GRANTED
         if (!concedido) pedirNotificaciones.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
+}
+
+/**
+ * Marca un `.fev` que YA esta en la boveda como si acabara de importarse de las
+ * gafas, para poder probar la categorizacion sin tener el protocolo resuelto.
+ *
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es import_raw last
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es import_raw video_agent_007_2026-09-09_10-11-12.mp4.fev  *         --el recorded_at 1757404272000
+ *
+ * `last` coge el .fev mas reciente. Sin `recorded_at` la fila queda **sin fecha de
+ * grabacion**, que es el caso que hay que ver funcionando: es lo que pasara con un
+ * aparato que no la reporte.
+ *
+ * El hash de custodia va como `DEBUG-IMPORT-NO-HASH` y no se disimula: esta fila
+ * no viene de un cifrado nuestro y su evidencia no esta verificada. Solo existe
+ * bajo BuildConfig.DEBUG.
+ */
+private fun ComponentActivity.importarEnBrutoDebug(intent: Intent) {
+    val cual = intent.getStringExtra("import_raw") ?: return
+    val enBoveda = AppContainer.vaultRepository.list()
+    val elegido = if (cual == "last") enBoveda.firstOrNull() else enBoveda.find { it.name == cual }
+    if (elegido == null) {
+        Log.e(TAG_ALTA, "No hay ningun .fev en la boveda que se llame '$cual'")
+        return
+    }
+    lifecycleScope.launch {
+        AppContainer.rawEvidenceRepository.registrar(
+            fileName = elegido.name,
+            bytes = elegido.bytes,
+            plainSha256 = "DEBUG-IMPORT-NO-HASH",
+            source = EvidenceSource.FALCON_LENS,
+            originalName = elegido.name.removeSuffix(".fev"),
+            recordedAtMillis = intent.getLongExtra("recorded_at", 0L),
+        )
+        Log.w(TAG_ALTA, "IMPORTACION DE PRUEBA: ${elegido.name} espera categorizacion")
+    }
+}
+
+/**
+ * Enciende el punto de acceso de las gafas y deja el SSID y la clave en logcat.
+ *
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity \
+ *         --es gafas_ap Aeria123
+ *
+ * Con `--es gafas_scan 1` en vez de `gafas_ap` hace solo el escaneo BLE crudo,
+ * para ver si las gafas se anuncian.
+ *
+ * La clave tiene que ser de **exactamente 8 letras o digitos**; el SDK la rechaza
+ * antes de mandar nada. El resultado sale con la etiqueta `AeriaGafasAP`:
+ *
+ *     adb logcat -s AeriaGafasAP
+ *
+ * Es una sonda, no una funcion: sirve para confirmar que el AP se enciende y con
+ * que credenciales, que es lo que le faltaba a GafasMediaRepository. Solo existe
+ * bajo BuildConfig.DEBUG. Ver GafasApPrueba.
+ */
+private fun ComponentActivity.encenderApDeLasGafasDebug(intent: Intent) {
+    if (intent.hasExtra("gafas_scan")) {
+        GafasApPrueba.escanearCrudo(this)
+        return
+    }
+    if (intent.hasExtra("gafas_gatt")) {
+        GafasApPrueba.volcarGatt(this)
+        return
+    }
+    intent.getStringExtra("gafas_solo_unir")?.let { clave ->
+        intent.removeExtra("gafas_solo_unir")
+        GafasApPrueba.soloUnirse(lifecycleScope, "BleeqUp-Ranger-901FC", clave)
+        return
+    }
+    val password = intent.getStringExtra("gafas_ap") ?: return
+    // Si el sistema recrea la actividad, onCreate vuelve con el MISMO intent y la
+    // sonda se disparaba dos veces, pisandose el GATT. Se consume el extra.
+    intent.removeExtra("gafas_ap")
+    GafasApPrueba.paisForzado = intent.getStringExtra("gafas_pais")
+    // Con gafas_unir, tras encender el AP el telefono se une a el.
+    GafasApPrueba.alcance = if (intent.hasExtra("gafas_unir")) lifecycleScope else null
+    GafasApPrueba.encender(this, password)
 }
 
 /**

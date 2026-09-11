@@ -13,6 +13,16 @@ mapboxMaps = "11.8.0"
 playServicesLocation = "21.3.0"
 agora = "4.5.2"
 room = "2.7.2"
+# Dependencias del AAR de BleeqUp (las gafas). Un .aar no declara las suyas:
+# si no se ponen aqui, la app compila y revienta en tiempo de ejecucion.
+okhttp = "4.12.0"
+gson = "2.11.0"
+# Grabacion de video del telefono a 1080p (el intent de la camara del sistema no
+# deja fijar resolucion) y copia ligera de 720p para el backend.
+camerax = "1.6.2"
+# 1.11 ya viene compilada con Kotlin 2.2 y este proyecto esta en 2.0.21: no la
+# puede leer. Subir juntas cuando se suba Kotlin.
+media3 = "1.10.1"
 # La version de KSP va atada a la de Kotlin (prefijo 2.0.21): subir ambas juntas.
 ksp = "2.0.21-1.0.28"
 
@@ -44,6 +54,18 @@ agora-full-sdk = { group = "io.agora.rtc", name = "full-sdk", version.ref = "ago
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+# Las usa por dentro bleequplibrary-release.aar (app/libs): OkHttp para hablar
+# con el servidor de las gafas y Gson para leer su JSON.
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+# CameraX: la camara la gestiona Jetpack y nosotros solo pedimos la calidad (FHD).
+androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+androidx-camera-video = { group = "androidx.camera", name = "camera-video", version.ref = "camerax" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
+# Media3 Transformer: genera la copia de 720p/15 fps del video original.
+androidx-media3-transformer = { group = "androidx.media3", name = "media3-transformer", version.ref = "media3" }
+androidx-media3-effect = { group = "androidx.media3", name = "media3-effect", version.ref = "media3" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

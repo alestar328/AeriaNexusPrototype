@@ -92,6 +92,7 @@ fun ActiveIncidentScreen(
     viewModel: ActiveIncidentViewModel,
     onBackToOperations: () -> Unit,
     onIncidentEnded: () -> Unit,
+    onOpenSosLivestream: () -> Unit,
     onTabSelected: (MainTab) -> Unit,
 ) {
     val incidente by viewModel.activeIncident.collectAsStateWithLifecycle()
@@ -104,17 +105,14 @@ fun ActiveIncidentScreen(
         if (uiState.incidentEnded) onIncidentEnded()
     }
 
-    // Captura con el telefono cuando la bodycam no esta conectada: la app de
-    // camara del sistema escribe directo en la carpeta local de evidencia.
+    // Foto con el telefono cuando la bodycam no esta conectada: la app de camara
+    // del sistema escribe directo en la carpeta local de evidencia.
     val takePhotoLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture(),
     ) { exito -> viewModel.onPhonePhotoResult(exito) }
-    val recordVideoLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CaptureVideo(),
-    ) { exito -> viewModel.onPhoneVideoResult(exito) }
 
     // La app declara CAMERA (livestream), por eso Android exige tenerlo
-    // concedido antes de poder abrir la app de camara con estos intents. En
+    // concedido antes de poder abrir la app de camara con este intent. En
     // Android 9 o menor se suma el permiso de almacenamiento (album publico).
     val photoPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -123,16 +121,42 @@ fun ActiveIncidentScreen(
             viewModel.preparePhonePhoto()?.let { takePhotoLauncher.launch(it) }
         }
     }
+    // Video con CameraX, dentro de la app. Sin camara no hay nada que hacer; sin
+    // microfono se graba igual, sin sonido.
     val videoPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { resultados ->
-        if (resultados.values.all { it }) {
-            viewModel.preparePhoneVideo()?.let { recordVideoLauncher.launch(it) }
-        }
+        if (resultados[Manifest.permission.CAMERA] == true) viewModel.openPhoneCamera()
     }
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { resultados -> if (resultados.values.all { it }) viewModel.toggleAudioNote() }
+
+    LaunchedEffect(uiState.openSosLivestream) {
+        if (uiState.openSosLivestream) {
+            onOpenSosLivestream()
+            viewModel.onSosLivestreamOpened()
+        }
+    }
+
+    // La camara ocupa la pantalla entera mientras esta abierta. La hoja de
+    // clasificacion y los dialogos esperan a que se cierre.
+    val archivoVideo = uiState.phoneVideoFile
+    if (archivoVideo != null) {
+        PhoneCameraOverlay(
+            videoFile = archivoVideo,
+            isRecording = incidente?.isRecording == true,
+            recordingSeconds = uiState.recordingSeconds,
+            autoStart = uiState.phoneCameraAutoStart,
+            stopRequested = uiState.stopPhoneRecordingRequested,
+            onRecordingStarted = viewModel::onPhoneRecordingStarted,
+            onRecordingFinalized = viewModel::onPhoneRecordingFinalized,
+            onClose = viewModel::closePhoneCamera,
+            onSos = viewModel::sosFromPhoneCamera,
+            onCameraReleased = viewModel::onPhoneCameraReleased,
+        )
+        return
+    }
 
     AppScaffold(
         currentTab = null,
@@ -201,7 +225,9 @@ fun ActiveIncidentScreen(
                     // con bodycam, los comandos Bluetooth disparan su camara.
                     onRecord = {
                         if (viewModel.usesPhoneCapture) {
-                            videoPermissionLauncher.launch(capturePermissions(Manifest.permission.CAMERA))
+                            videoPermissionLauncher.launch(
+                                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+                            )
                         } else {
                             viewModel.toggleRecording()
                         }

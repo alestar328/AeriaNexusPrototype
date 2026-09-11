@@ -15,6 +15,7 @@ private const val TAG = "FalconUploadCfg"
  *
  *     /sdcard/Android/data/com.delta.aeria_nexus_prototype/files/upload.conf
  *     base_url=http://192.168.0.14:1080/files/
+ *     api_url=http://192.168.0.14:1080/api/
  *     token=stub-token
  *     chunk_bytes=1048576
  *
@@ -61,6 +62,16 @@ class UploadConfig(private val context: Context) {
     /** Siempre con barra final: la URL de creación es un directorio, no un recurso. */
     fun baseUrl(): String {
         val raw = conf()["base_url"]?.takeIf { it.isNotBlank() } ?: DEFAULT_BASE_URL
+        return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
+    }
+
+    /**
+     * Base de la API del backend: hoy solo los avisos del SOS (SosNotifier). Vacia
+     * mientras no se configure, y por el mismo motivo que [baseUrl]: no se avisa a
+     * un servidor que nadie ha confirmado.
+     */
+    fun apiUrl(): String {
+        val raw = conf()["api_url"].orEmpty()
         return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
     }
 

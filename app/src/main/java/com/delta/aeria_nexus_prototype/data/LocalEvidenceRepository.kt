@@ -47,6 +47,19 @@ class LocalEvidenceRepository(private val context: Context) {
 
     fun createVideoTarget(): MediaTarget? = createTarget("video", "mp4")
 
+    /**
+     * Destino para un fichero que llega de las gafas (ver GafasMediaRepository).
+     *
+     * Se separa del de la camara del telefono solo en el nombre, y a proposito: la
+     * procedencia de una evidencia es parte de la evidencia, y el nombre del .fev
+     * es lo unico que la lleva hasta que exista un campo propio en el manifest.
+     * Todo lo demas —carpeta privada, cifrado al cerrar, borrado del claro— es
+     * identico, que es justo lo que hace que traerse el video de las gafas no
+     * necesite una via de custodia aparte.
+     */
+    fun createGafasVideoTarget(extension: String = "mp4"): MediaTarget? =
+        createTarget("gafas", extension)
+
     private fun createAudioTarget(): MediaTarget? = createTarget("audio", "m4a")
 
     private fun createTarget(type: String, extension: String): MediaTarget? {
@@ -73,14 +86,59 @@ class LocalEvidenceRepository(private val context: Context) {
      * queda en el log: perder la evidencia seria peor que tenerla en claro dentro
      * de la carpeta privada de la app.
      */
-    suspend fun seal(target: MediaTarget): EvidenceCrypto.Sealed? =
+    suspend fun seal(target: MediaTarget, conservarClaro: Boolean = false): EvidenceCrypto.Sealed? =
         withContext(Dispatchers.IO) {
             val carpeta = evidenceDir() ?: run {
                 Log.w(TAG, "Sin carpeta privada para el .fev: la evidencia queda sin cifrar")
                 return@withContext null
             }
-            EvidenceCrypto.seal(target.file, File(carpeta, target.name + EvidenceCrypto.EXTENSION))
+            EvidenceCrypto.seal(
+                plain = target.file,
+                dest = File(carpeta, target.name + EvidenceCrypto.EXTENSION),
+                borrarClaro = EvidenceCrypto.DELETE_PLAINTEXT && !conservarClaro,
+            )
         }
+
+    /**
+     * Donde se escribe en claro el proxy de [original]: junto a el, en captures/, y
+     * con un sufijo propio para que nunca se confunda con una captura.
+     */
+    fun createProxyFile(original: File): File? {
+        val carpeta = capturesDir() ?: return null
+        return File(carpeta, original.name.removeSuffix(".mp4") + PROXY_SUFFIX)
+    }
+
+    /**
+     * Cifra un proxy y borra su claro. Va a proxies/ y no a evidence/ porque todo lo
+     * que hay en evidence/ lo lista la boveda y lo sube como evidencia: un proxy
+     * ahi apareceria duplicado. El proxy no es evidencia, es una copia para el
+     * backend que desaparece en cuanto se entrega.
+     */
+    suspend fun sealProxy(plain: File): EvidenceCrypto.Sealed? = withContext(Dispatchers.IO) {
+        val carpeta = privateDir(PROXIES_FOLDER) ?: return@withContext null
+        EvidenceCrypto.seal(plain, File(carpeta, plain.name + EvidenceCrypto.EXTENSION), borrarClaro = true)
+    }
+
+    /**
+     * Videos que ya estan cifrados pero siguen en claro en captures/: la app murio
+     * mientras se hacia su proxy. El claro solo sobrevive al cifrado por eso, asi
+     * que su .fev es la prueba de que falta el proxy y no la captura entera.
+     */
+    fun videosSinProxy(): List<File> {
+        val capturas = capturesDir() ?: return emptyList()
+        val evidencia = evidenceDir() ?: return emptyList()
+        val ficheros = capturas.listFiles { f ->
+            f.isFile && f.name.startsWith("video_") && !f.name.endsWith(PROXY_SUFFIX) &&
+                File(evidencia, f.name + EvidenceCrypto.EXTENSION).isFile
+        }
+        return ficheros?.toList().orEmpty()
+    }
+
+    /** Proxies en claro que se quedaron a medio escribir. No valen: se rehacen. */
+    fun proxiesSinTerminar(): List<File> {
+        val ficheros = capturesDir()?.listFiles { f -> f.name.endsWith(PROXY_SUFFIX) }
+        return ficheros?.toList().orEmpty()
+    }
 
     /**
      * Carpeta donde la camara y el grabador escriben la captura en claro. Es
@@ -206,6 +264,10 @@ class LocalEvidenceRepository(private val context: Context) {
         // fuera del alcance del explorador de archivos y de otras apps.
         private const val CAPTURES_FOLDER = "captures"
         private const val EVIDENCE_FOLDER = "evidence"
+
+        /** Proxies cifrados a la espera de subirse. La lee tambien EvidenceUploader. */
+        const val PROXIES_FOLDER = "proxies"
+        private const val PROXY_SUFFIX = "_proxy.mp4"
 
         // Sin sistema de login todavia: agente fijo para nombrar la evidencia.
         private const val AGENT_ID = "agent_007"

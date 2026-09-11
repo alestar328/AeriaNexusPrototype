@@ -24,3 +24,8 @@
 # nativo busca por nombre y la app crashea al crear el motor.
 -keep class io.agora.** { *; }
 -dontwarn io.agora.**
+# El AAR de las gafas (com.bleequp.bleequplibrary) ya viene ofuscado por su
+# fabricante, pero lee el JSON de las gafas con Gson POR REFLEXION sobre los
+# nombres de campo de sus modelos. Si R8 los vuelve a renombrar, el listado deja
+# de parsearse y el fallo solo aparece en release. Ver DEVLOG 2026-09-09.
+-keep class com.bleequp.bleequplibrary.** { *; }

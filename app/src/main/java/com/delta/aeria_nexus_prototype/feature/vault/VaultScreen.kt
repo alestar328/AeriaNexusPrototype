@@ -57,6 +57,8 @@ import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
 import com.delta.aeria_nexus_prototype.ui.theme.BordeSutil
+import com.delta.aeria_nexus_prototype.data.local.RawEvidenceEntity
+import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.RojoSuave
 import com.delta.aeria_nexus_prototype.ui.theme.Superficie
 import com.delta.aeria_nexus_prototype.ui.theme.TextoDeshabilitado
@@ -111,9 +113,23 @@ fun VaultScreen(
                     onConfirmar = { contrasena, _ -> viewModel.desbloquear(contrasena) },
                 )
 
-                else -> EvidenceList(uiState.evidencias)
+                else -> EvidenceList(
+                    evidencias = uiState.evidencias,
+                    pendientes = uiState.sinCategorizar,
+                    onCategorizar = viewModel::pedirCategorizacion,
+                )
             }
         }
+    }
+
+    uiState.categorizando?.let { fila ->
+        CategorizeDialog(
+            fila = fila,
+            incidentes = uiState.incidentes,
+            trabajando = uiState.trabajando,
+            onDismiss = viewModel::cancelarCategorizacion,
+            onConfirm = viewModel::categorizar,
+        )
     }
 }
 
@@ -262,8 +278,12 @@ private fun PasswordField(value: String, placeholder: String, onValueChange: (St
 }
 
 @Composable
-private fun EvidenceList(evidencias: List<VaultRepository.VaultItem>) {
-    if (evidencias.isEmpty()) {
+private fun EvidenceList(
+    evidencias: List<VaultRepository.VaultItem>,
+    pendientes: List<RawEvidenceEntity>,
+    onCategorizar: (RawEvidenceEntity) -> Unit,
+) {
+    if (evidencias.isEmpty() && pendientes.isEmpty()) {
         Text(
             text = "No evidence captured with this phone yet.",
             color = TextoSecundario,
@@ -271,10 +291,90 @@ private fun EvidenceList(evidencias: List<VaultRepository.VaultItem>) {
         )
         return
     }
+    // Lo importado va ARRIBA y en su propio apartado: es lo unico que le pide algo
+    // al agente. El resto de la boveda ya esta en su incidente y solo se consulta.
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (pendientes.isNotEmpty()) {
+            item { Apartado("Pending categorization") }
+            items(pendientes, key = { it.fileName }) { fila ->
+                RawEvidenceRow(fila = fila, onCategorizar = { onCategorizar(fila) })
+            }
+            item { Apartado("Vault") }
+        }
         items(evidencias, key = { it.name }) { evidencia -> EvidenceRow(evidencia) }
     }
 }
+
+@Composable
+private fun Apartado(titulo: String) {
+    Text(
+        text = titulo.uppercase(),
+        color = TextoTerciario,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 4.dp),
+    )
+}
+
+/**
+ * Pieza importada de un periferico que aun no pertenece a ningun incidente.
+ *
+ * Muestra la fecha de GRABACION, no la de descarga, y dice cuando el aparato no
+ * la dio en vez de rellenarla con la otra: es el dato que hace util a una prueba.
+ */
+@Composable
+private fun RawEvidenceRow(fila: RawEvidenceEntity, onCategorizar: () -> Unit) {
+    CardSurface {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Videocam,
+                contentDescription = null,
+                tint = AmarilloAviso,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = if (fila.recordedAtMillis > 0) {
+                        FORMATO_GRABACION.format(java.util.Date(fila.recordedAtMillis))
+                    } else {
+                        "No recording date"
+                    },
+                    color = TextoPrincipal,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "${fila.source.label}  ·  ${fila.originalName}",
+                    color = TextoTerciario,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                )
+            }
+            Text(
+                text = "CATEGORIZE",
+                modifier = Modifier
+                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(6.dp))
+                    .border(1.dp, BordeSutil, RoundedCornerShape(6.dp))
+                    .clickable(onClick = onCategorizar)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                color = AmarilloAviso,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+private val FORMATO_GRABACION = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.US)
 
 /** Fila de la lista; al tocarla se descifra y se muestra la evidencia. */
 @Composable

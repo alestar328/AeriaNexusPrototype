@@ -1,8 +1,13 @@
 package com.delta.aeria_nexus_prototype.data
 
 import com.delta.aeria_nexus_prototype.data.local.IncidentDao
+import com.delta.aeria_nexus_prototype.data.local.RawEvidenceEntity
 import com.delta.aeria_nexus_prototype.data.local.toDomain
+import com.delta.aeria_nexus_prototype.data.local.toEntity
 import com.delta.aeria_nexus_prototype.data.model.ActiveIncident
+import com.delta.aeria_nexus_prototype.data.model.EvidenceClass
+import com.delta.aeria_nexus_prototype.data.model.EvidenceRecord
+import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.data.model.IncidentStatus
 import com.delta.aeria_nexus_prototype.data.model.OfficerIncident
 import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
@@ -106,6 +111,121 @@ class IncidentRepository(private val incidentDao: IncidentDao) {
         }
         _activeIncident.value = null
     }
+
+    // ── Material importado de un periferico (gafas, bodycam) ─────────────────
+    // Entra DESPUES de que su grabacion termino, asi que no puede colgarse del
+    // incidente activo: el agente elige. Ver RawEvidenceRepository.
+
+    /**
+     * Crea un incidente nuevo a partir de una pieza importada y lo guarda ya
+     * cerrado, como borrador.
+     *
+     * **Se fecha en la grabacion, no en el momento de categorizar.** Un incidente
+     * que dice haber ocurrido cuando el agente lo archivo es un dato falso, y la
+     * fecha es justo lo que hace util una prueba. Solo cuando el aparato no dio
+     * fecha se cae a la de importacion, y entonces la linea de tiempo lo dice.
+     */
+    suspend fun crearIncidenteDeImportacion(
+        fila: RawEvidenceEntity,
+        clasificacion: EvidenceClass,
+        etiqueta: String,
+    ): String {
+        val id = generateIncidentId()
+        val conFechaReal = fila.recordedAtMillis > 0
+        val cuando = Instant.ofEpochMilli(if (conFechaReal) fila.recordedAtMillis else fila.importedAtMillis)
+            .atZone(ZoneId.systemDefault())
+        val evidencia = fila.aEvidenceRecord(clasificacion, etiqueta, cuando.format(TIME_FORMAT))
+        val incidente = OfficerIncident(
+            id = id,
+            type = "Imported Evidence",
+            typeCode = "IMPORT",
+            location = "Unknown",
+            date = cuando.format(DATE_FORMAT),
+            time = cuando.format(TIME_FORMAT),
+            officerName = officerProfile.name,
+            officerNum = officerProfile.officerNum,
+            status = IncidentStatus.DRAFT,
+            priority = Priority.MEDIUM,
+            evidenceCount = 1,
+            witnessCount = 0,
+            sync = SyncState.LOCAL_ONLY,
+            timeline = listOf(
+                TimelineEntry(
+                    id = UUID.randomUUID().toString(),
+                    time = cuando.format(TIME_FORMAT),
+                    event = if (conFechaReal) {
+                        "Evidence imported from ${fila.source.label}"
+                    } else {
+                        "Evidence imported from ${fila.source.label} (no recording date)"
+                    },
+                    type = TimelineEntryType.SYSTEM,
+                ),
+            ),
+            evidence = listOf(evidencia),
+        )
+        _officerIncidents.value = listOf(incidente) + _officerIncidents.value
+        incidentDao.save(incidente, System.currentTimeMillis())
+        onIncidentSaved?.invoke()
+        return id
+    }
+
+    /**
+     * Adjunta una pieza importada a un incidente que el agente ya tenia.
+     *
+     * Devuelve false si ese incidente no existe: mejor no categorizar que dejar
+     * una evidencia apuntando a un incidente fantasma.
+     */
+    suspend fun adjuntarEvidenciaImportada(
+        incidentId: String,
+        fila: RawEvidenceEntity,
+        clasificacion: EvidenceClass,
+        etiqueta: String,
+    ): Boolean {
+        val incidente = findOfficerIncident(incidentId) ?: return false
+        val cuando = Instant.ofEpochMilli(
+            if (fila.recordedAtMillis > 0) fila.recordedAtMillis else fila.importedAtMillis,
+        ).atZone(ZoneId.systemDefault())
+        val evidencia = fila.aEvidenceRecord(clasificacion, etiqueta, cuando.format(TIME_FORMAT))
+
+        incidentDao.insertEvidence(listOf(evidencia.toEntity(incidentId, incidente.evidence.size)))
+        incidentDao.incrementarEvidencia(incidentId)
+        // La lista vive en memoria; sin esto la pantalla de Incidents seguiria
+        // mostrando el contador viejo hasta reiniciar la app.
+        _officerIncidents.value = _officerIncidents.value.map { existente ->
+            if (existente.id != incidentId) {
+                existente
+            } else {
+                existente.copy(
+                    evidence = existente.evidence + evidencia,
+                    evidenceCount = existente.evidenceCount + 1,
+                )
+            }
+        }
+        onIncidentSaved?.invoke()
+        return true
+    }
+
+    /**
+     * El hash viaja tal cual desde el cifrado: es el de la cadena de custodia y no
+     * se recalcula al categorizar — categorizar no toca el fichero.
+     */
+    private fun RawEvidenceEntity.aEvidenceRecord(
+        clasificacion: EvidenceClass,
+        etiqueta: String,
+        hora: String,
+    ) = EvidenceRecord(
+        id = UUID.randomUUID().toString(),
+        type = EvidenceType.VIDEO,
+        label = etiqueta,
+        time = hora,
+        device = source.label,
+        classification = clasificacion,
+        encrypted = true,
+        sealed = true,
+        hash = evidenceHash(plainSha256),
+        sync = SyncState.LOCAL_ONLY,
+        mediaUri = fileName,
+    )
 
     /** Convierte el incidente en curso al formato de la lista, con la evidencia capturada. */
     private fun ActiveIncident.toOfficerIncident(): OfficerIncident {

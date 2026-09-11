@@ -31,6 +31,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
+    <!-- Descarga del video de las gafas: el telefono se une a SU punto de acceso
+         (WifiNetworkSpecifier) y habla con 192.168.43.1 atando los sockets a esa
+         red, sin tocar la galeria. Ver GafasMediaRepository. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
     <!-- Radio tactica siempre a la escucha: el PTT tiene que sonar con la app
          cerrada. specialUse en vez de mediaPlayback porque desde Android 15 un
          BOOT_COMPLETED no puede levantar mediaPlayback; ver RadioService. -->
@@ -39,6 +45,11 @@
     <!-- Sin este permiso el servicio corre igual pero su notificacion no se ve, y
          es la unica senal de que el telefono sigue en el canal. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Quitar la app del multitarea NO debe callar la radio. En Android de serie
+         basta el foreground service; con Doze y con los gestores de bateria de
+         Xiaomi/Huawei/Oppo hace falta ademas que el agente conceda la exencion.
+         No se distribuye por Play, asi que este permiso no necesita justificacion. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- usesCleartextTraffic: el servidor HTTP de la bodycam W1 (visor remoto
          y descarga de grabaciones) es http:// en la red WiFi local; sin esto
@@ -82,7 +93,8 @@
         <service
             android:name=".RadioService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Radio tactica push-to-talk entre agentes: el telefono permanece en el canal de voz para recibir transmisiones de otras unidades con la app cerrada" />

@@ -6,6 +6,526 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-11 — Peticion del manager: original 1080p/30 + proxy 720p/15 (solo analisis)
+
+Peticion: grabar dos videos a la vez, el original sin comprimir a 1080p/30 y un proxy
+a 720p/15 que se borra al subirlo. Hoy **ninguna de las dos apps puede hacerlo tal cual**.
+Sin codigo todavia; sin aparatos por adb, asi que nada medido.
+
+- **Telefono:** graba con la app de camara del sistema (`CaptureVideo` en
+  `ActiveIncidentScreen`). Ese intent no deja elegir resolucion ni fps y devuelve un
+  solo fichero. Hace falta grabador propio: Camera2 -> GL -> dos encoders, con un solo
+  microfono alimentando los dos muxers.
+- **Bodycam:** graba a **720p/30 y 4 Mbps**, no a 1080p. Su HAL solo garantiza dos
+  streams (preview + grabador, ver el comentario del monitor en `RecordingActivity`),
+  asi que un tercer stream para el proxy no cabe. Y lo mas serio: **`VideoStamper`
+  re-encoda el original para quemar el rotulo del oficial** y despues borra los
+  segmentos. La evidencia que se sella y se sube es una segunda generacion, justo lo
+  que la peticion prohibe. El rotulo fue requisito de producto (BC-1, 23-ago), asi que
+  eso lo tiene que decidir el manager.
+- **Propuesta para la bodycam:** original = remux sin recodificar
+  (`IncidentAssembler.remux`, que ya existe); proxy = la pasada del `VideoStamper`,
+  pero a 720p/15 y con bitrate bajo, con el rotulo solo ahi. No es simultaneo sino al
+  parar, igual que hoy, y no cuesta mas tiempo que el que ya se gasta.
+- **Gafas:** graban en el aparato (~12 Mbps medidos por el listado); un proxy solo
+  saldria transcodificando en el telefono tras la descarga.
+
+### Decidido con el usuario el mismo dia
+
+- **Para que es el proxy:** el backend lo pasara por un LLM para transcribir lo que
+  ocurre. Lo de los tokens es cosa del backend (ojo: en Gemini el coste por fotograma no
+  depende de la resolucion; se les dijo).
+- **Original a 1080p, copia a 720p.** En el telefono, con **CameraX**
+  (`QualitySelector` FHD): el intent de la camara del sistema no deja pedir resolucion ni
+  fps (solo calidad 0/1). CameraX solo admite una grabacion a la vez, asi que el proxy se
+  genera despues, transcodificando.
+- **Rotulo solo en el proxy.** El original no se recomprime. Lo que ata el video al
+  agente y al aparato tiene que ser una **firma del manifest** con la clave IAM de la
+  unidad mas la declaracion de `BindingAgente`, no un texto quemado. Queda pendiente y
+  aparte.
+- **SOS: lo graba Agora Cloud Recording (opcion D).** En la app, el SOS cierra la
+  grabacion de CameraX, le cede la camara a Agora y se reanuda al terminar. La bodycam ya
+  pierde la grabacion durante su SOS, asi que la nube cubre los dos aparatos.
+
+### Lo que Cloud Recording obliga a hacer (investigado)
+
+- **Lo arranca y lo para el backend, por REST** (acquire/start/stop, con Customer ID y
+  secret). **Esas credenciales no pueden ir en el APK.**
+- **Agora no avisa de que empieza un SOS:** sus avisos de canal (NCS) solo cubren
+  entrar y salir (101-112), no publicar video. Los telefonos estan siempre dentro, asi
+  que el aviso tiene que salir de las apps: telefono en `activateSos`/`cancelSos`,
+  bodycam en `LivestreamService.start`/`stop`.
+- **`maxIdleTime` solo corta con el canal VACIO.** Con telefonos siempre dentro nunca
+  se para solo: el backend tiene que parar a mano, y si la app muere sin avisar, por
+  latido con caducidad.
+- El uid del grabador no puede coincidir con ninguno del canal (los telefonos entran
+  con uid aleatorio) y todas las bodycam comparten el 9001: con dos a la vez no se
+  distinguirian.
+- Sin confirmar: si el modo individual da MP4 o solo HLS, y el cifrado en el
+  almacenamiento. El canal va sin token (sin App Certificate).
+
+### Hecho (tarde del mismo dia)
+
+- **`docs/BACKEND-PROXY-AND-SOS.md`** (en ingles, como `UPLOAD-PROTOCOL.md`): `kind=proxy`
+  con `proxy_of`, y los tres avisos del SOS (`sos/start|heartbeat|stop`, idempotentes
+  por `sos_id`, latido cada 10 s y corte a los 30 s sin latido). Rango de uids
+  90000-99999 reservado al grabador en la nube.
+- **Telefono:**
+  - `PhoneCameraOverlay` con CameraX (`LifecycleCameraController`, FHD con respaldo).
+  - El claro se conserva al cifrar (`seal(conservarClaro)`); `ProxyRepository` y
+    `ProxyEncoder` (Media3 Transformer) hacen el 720/15, lo cifran en `proxies/` y lo
+    borran al entregarse. El `.proxy.json` junto al `.fev` guarda el enlace para
+    reanudar; `reanudar()` rehace al arrancar los que quedaron a medias.
+  - `EvidenceUploader` entrega primero el proxy y luego el original.
+  - `SosNotifier` + `api_url` en `upload.conf`. Los telefonos entran al canal con uid
+    >= 100000.
+  - SOS desde la camara: cierra la grabacion, suelta la camara y lanza el SOS; al
+    cancelarlo, la camara se reabre y graba sola.
+- **Dependencias:** CameraX 1.6.2 y Media3 1.10.1. **Media3 1.11 no compila aqui**: viene
+  con Kotlin 2.2 y el proyecto esta en 2.0.21. APK debug +5,4 MB; el de release no se
+  midio porque `assembleRelease` sube la version.
+
+### Estado: VERIFICADO EN SAMSUNG Y W1, contra los stubs
+
+`tus_stub_server.py` en :1080, y un stub de SOS en :1081 que vive en el scratchpad de la
+sesion, no en el repo. El Samsung va por datos moviles: se llego al PC con `adb reverse
+tcp:1080 tcp:1080`.
+
+- Original 1920x1080 a 30,0 fps (17 Mbps); proxy 1280x720 a 15,0 fps, 3,8 veces menor.
+- `proxy_of` = sha256 del original descifrado. `.fev` para `vault:v1` + `srv`.
+- Reanudacion tras reinstalar: el proxy y el original llegaron verificados y con su
+  `incident_id`.
+- SOS: start, latidos y stop en el stub, uid 977330591; y la camara volvio a grabar sola.
+
+**El fallo que casi pasa:** con la vista previa a pantalla completa (`FILL`), CameraX
+recorto la GRABACION a 886x1920. El controlador aplica a todos los casos de uso la
+proporcion de la vista previa. Con `ScaleType.FIT_CENTER` sale el fotograma entero.
+
+**Sin confirmar:** la vista previa salio negra tanto en CameraX como en el livestream de
+Agora, sin errores de camara en el log. Todo apunta a que el Samsung tenia la camara
+tapada; hay que mirarlo con la camara destapada.
+
+### Proximo paso
+
+1. Backend: implementar la especificacion (sobre todo `kind=proxy` y Cloud Recording).
+2. Mirar la vista previa con la camara destapada.
+3. Nada de esto esta commiteado.
+
+---
+
+## 2026-09-09 (3) — El AP de las gafas se enciende: era el codigo de pais
+
+### El resultado, primero
+
+El fabricante entrego por fin un SDK (`D:\newFalconDocs\Falconlibrary-release\bleequplibrary-release.aar`,
+ya copiado a `app/libs/`). Con el, y con un arreglo que no estaba en ningun sitio, **el
+punto de acceso de las gafas se enciende desde Nexus**:
+
+    4/4 turnOnWifi clave='Aeria123' pais='ES' -> AP NO ENCENDIDO: Open WiFi failed
+    4/4 turnOnWifi clave='Aeria123' pais='CN' -> AP ENCENDIDO  SSID='BleeqUp-Ranger-901FC'
+    4/4 turnOnWifi clave='Aeria123' pais='US' -> AP ENCENDIDO  SSID='BleeqUp-Ranger-901FC'
+
+Confirmado fuera del SDK, con el escaner del propio telefono:
+
+    BSSID be:e0:33:66:1a:f8   5745 MHz   BleeqUp-Ranger-901FC   [WPA2-PSK-CCMP-128]
+
+**5745 MHz es el canal 149.** Ese canal no esta permitido en el dominio regulatorio
+europeo, y por eso el firmware se niega cuando el telefono dice `ES`: el SDK mete
+`Locale.getDefault().getCountry()` en la trama, en 3 bytes, y no lo expone por parametro.
+Un movil español nunca puede encender ese AP. **Esto es lo que llevaba semanas sin
+funcionar, y no era codigo nuestro.**
+
+### Lo que esto obliga a decidir, y no es tecnico
+
+El unico canal que las gafas ofrecen para el video esta fuera de la banda que se puede
+usar aqui. Encenderlo declarando un pais que no es el nuestro hace que funcione, pero es
+emitir en 5,8 GHz en Europa. **Eso lo decide el cliente, no el desarrollo**, y va junto a
+las otras cuatro decisiones del informe del 2026-09-07 (2). Mientras tanto queda a la
+vista: la sonda lo pide con `--es gafas_pais`, no escondido en una constante.
+
+### Los tres huecos PROTOCOLO, resueltos
+
+De leer el bytecode del AAR (`javap`, R8, mapa `8f1dc9a`):
+
+1. **Credenciales del AP** — `BleeqUpWifiManager.turnOnWifi(device, password, cb)`. La
+   clave **la elegimos nosotros** y se valida contra `^[A-Za-z0-9]{8}$` (8 exactos). El
+   SSID que devuelve es **el nombre BLE del aparato**: `BleeqUp-Ranger-901FC`. Seguridad
+   WPA2-PSK, o sea que el `setWpa2Passphrase` de `GafasMediaRepository` vale tal cual.
+2. **Listado** — `GET https://<ip>/list?fileType=<tipo>`, JSON a `MediaListResponse`
+   (`fileName, fileType, fileThumbName, fileSize, fileDuration, fileTime, fileResolution`).
+3. **Descarga** — `GET https://<ip>/<fileType>?fileName=<nombre>` con `Range: bytes=N-`
+   para reanudar. Borrado: `GET https://<ip>/delete?fileName=<nombre>`. El
+   `imu_log?fileName=` que se capturo el 07-sep no era un endpoint suelto: `imu_log` era
+   el `fileType`.
+
+**Es `https://`, no `http://`**, con certificado propio: el SDK monta un TrustManager que
+acepta todo. `GafasMediaRepository.abrir()` va por `http://` y hay que cambiarlo, con el
+TrustManager acotado a esa conexion como ya dice su comentario.
+
+### Dos cosas del SDK que cambian el plan
+
+- **`BleeqUpSDK.init(context, apiKey, cb)` no valida la clave.** Pone su bandera a cierto
+  y responde "Certification successful" sin tocar la red. **No hace falta licencia de
+  partner**; y la respuesta "funcionalidades internas: no" del 07-sep se queda corta: el
+  SDK trae `startRecord`, `stopRecord`, `takePhoto`, `get/setCameraSetting`,
+  `getStorageInfo`, `timeStampSync` y callbacks de boton y de energia.
+- **El SDK no toca WiFi.** Cero referencias a `android.net.wifi` o `ConnectivityManager`:
+  la `ip` se la pasa quien llama. Unirse al AP sigue siendo nuestro y la mecanica que ya
+  estaba escrita sirve. Ojo: su OkHttp usa la red por defecto, asi que usar SU
+  `getFileList`/`downloadFile` exigiria `bindProcessToNetwork`, que es justo lo que
+  `GafasMediaRepository` evita para no dejar sin red a Agora y al mapa. **Recomendacion:
+  el SDK solo para BLE; el HTTP lo seguimos haciendo nosotros.**
+
+### El obstaculo real, que no era el que parecia
+
+**Las gafas no se anuncian por BLE. Nunca.** Comprobado con escaneo propio en
+`SCAN_MODE_LOW_LATENCY` y con `setLegacy(false)` (anuncio extendido), con el audio
+Bluetooth conectado y desconectado: el telefono ve 10-14 aparatos y las gafas no salen.
+El `startScan` del SDK —y su `reconnect`, que tambien escanea por dentro— **no puede
+encontrarlas jamas**.
+
+Pero estan emparejadas, y un `connectGatt` dirigido conecta en 30 ms sin necesidad de
+anuncio. El volcado de servicios confirmo ademas que **el AAR es de este hardware**:
+
+    SERVICIO 9b005ffe-1dea-2d9c-b841-9fd52e4c8b3a
+        caract 941bfa82-4da9-f00d-01f6-ceb0af61daca  props=0x8   (write)
+        caract d52ad907-65d8-16eb-4f71-477bfe6586a8  props=0x10  (notify)
+
+(Los `66666666-`/`77777777-` que se anotaron el 07-sep tambien estan, pero son otro
+servicio; el del SDK es este.)
+
+Asi que a `BleeqUpDeviceManager` se le entrega el aparato hecho en vez de dejar que lo
+busque: se construye el `BleeqUpDevice` desde el emparejado y se mete en su registro
+interno. **Va por reflexion, y eso es deuda declarada**: el constructor y
+`initializeName` son `internal` de Kotlin, y el registro solo es accesible por un
+`access$getDevices$p` sintetico que genera R8. Si el fabricante recompila el AAR, esto se
+rompe de golpe — el `catch` lo dice en el log en vez de fallar en silencio. **La salida
+limpia es pedirles un `connect(mac)` que no pase por el escaneo**, y ahora esa peticion
+se puede hacer con el dato medido en la mano.
+
+### Hecho
+
+- `app/libs/bleequplibrary-release.aar` + OkHttp 4.12 y Gson 2.11 en el catalogo. Un
+  `.aar` **no declara sus dependencias**: sin ponerlas a mano compila y revienta en
+  ejecucion.
+- Regla `-keep` de R8 para `com.bleequp.bleequplibrary.**`: sus modelos se leen con Gson
+  por reflexion sobre los nombres de campo, y renombrarlos romperia el listado **solo en
+  release**.
+- `data/GafasApPrueba.kt` (nuevo) — la sonda, con cuatro modos por intent:
+
+      adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity --es gafas_ap Aeria123 --es gafas_pais CN
+      adb shell am start -n ... --es gafas_ap estado     (WiFi on/off, cliente, almacen, camara)
+      adb shell am start -n ... --es gafas_scan 1        (escaneo BLE crudo)
+      adb shell am start -n ... --es gafas_gatt 1        (volcado de servicios GATT)
+
+  Solo bajo `BuildConfig.DEBUG`, con la etiqueta `AeriaGafasAP`.
+
+### Estado: VERIFICADO DE PUNTA A PUNTA EN EL SAMSUNG (RZCY510MBBM)
+
+**El telefono se une al WiFi de las gafas y su servidor contesta.** La cadena entera, en
+una sola pasada de 17 segundos:
+
+    AP ENCENDIDO   SSID='BleeqUp-Ranger-901FC'  CLAVE='Aeria123'
+    UNIDO          servidor=192.168.43.1
+    list[video]    HTTP 200
+    list[image]    HTTP 200
+    list[all]      HTTP 200
+
+La `192.168.43.1` ya no es la IP que se capturo una vez: sale de leer la pasarela de la
+red por `LinkProperties`, con el telefono dentro.
+
+El listado real, que es lo que llevaba meses sin poder verse:
+
+    VIDEO_1751021937470.mp4   454.349.394 B   300.184 ms   1920x1080
+    VIDEO_1777158818373.mp4   997.267.893 B   659.423 ms
+    IMG_1751061898364.jpg       2.152.937 B                4656x3496
+
+**Los valores de `fileType`, que no estaban en el AAR**: `video`, `image`, `all`
+(mezclados) y `photo` (siempre vacio en este aparato). Sin el parametro contesta
+`HTTP 200` con `state:400, "Parameter fileType was not received"` — el estado va **en el
+cuerpo, no en el codigo HTTP**, asi que mirar solo el 200 daria un fallo por bueno.
+
+Y un campo que el modelo del SDK **no tiene**: `fileImuNames`, con los logs de
+acelerometro y giroscopio de cada video
+(`NCSAccelerometer_<ts>.log,NCSGyroscope_<ts>.log`). Si algun dia hacen falta para una
+prueba, ya se sabe que existen y como se llaman.
+
+El resto del canal de control responde igual de bien, todo en ~120 ms:
+
+    wifiSwitch ok=true encendido=false      wifiConn ok=true conectado=false
+    storage    ok=true whole=26540012 free=21590560
+    camara     ok=true 1920x1080
+
+**Lo que NO se ha probado**: descargar un fichero de verdad y sellarlo en la boveda.
+
+### Tres detalles que costaron tiempo y conviene no repetir
+
+- **El AP se apaga solo a los ~5 minutos.** Medido: encendido a las 22:06:15, todavia
+  emitiendo a las 22:11:55, desaparecido a las 22:12:02. Dos intentos de union fallaron
+  contra una red que ya no existia, y el sistema no dice eso: dice `onUnavailable` a los
+  15 s, igual que si la clave estuviera mal. **Encender y unirse tienen que ir
+  encadenados en la misma accion.**
+- **Hay que cerrar el GATT al terminar.** Sin `disconnect`, cada pasada deja un
+  `BluetoothGatt` abierto; Android los cachea, la siguiente conexion sale en 49 ms
+  reusando el enlace viejo y las escrituras empiezan a fallar con
+  `write characteristic error` — que parece un problema de las gafas y es nuestro.
+  Tres ejecuciones perdidas hasta verlo.
+- **`Locale.setDefault` es global al proceso.** La sonda lo cambia y se lo puede
+  permitir; la implementacion de verdad **no** puede dejar el idioma cambiado (cambiaria
+  la UI y los formatos de fecha de toda la app). Hay que ponerlo y restaurarlo alrededor
+  de la llamada, sabiendo que aun asi es una variable global compartida.
+- El USB del Samsung se cayo media docena de veces con el APK de 244 MB. Se paso adb a
+  WiFi (`adb tcpip 5555`) y dejo de dar guerra. Ojo: eso no valdra cuando el telefono se
+  una al AP de las gafas.
+
+### Para manana (2026-09-10)
+
+Por orden, y el primero no es de codigo:
+
+1. **Llevar la decision del canal 149 al cliente.** El unico camino que las gafas ofrecen
+   para el video emite en 5,8 GHz, fuera de lo que Europa permite; funciona declarando
+   otro pais. Todo lo demas de este subsistema depende de esa respuesta, asi que la
+   pregunta va antes que el codigo, no despues. Junto a las otras cuatro decisiones del
+   informe del 07-sep.
+2. **`GafasMediaRepository.listar()` de verdad.** El JSON ya esta delante y no hay nada
+   que adivinar: `data[]` con `fileName, fileType, fileSize, fileDuration, fileTime,
+   fileResolution` (y `fileImuNames`, que el modelo del SDK no tiene). Dos cuidados: el
+   estado va **en el cuerpo**, no en el codigo HTTP, y `abrir()` tiene que pasar a
+   `abrirSeguro()` porque el servidor es `https://`.
+3. **Descargar un video contra la boveda y sellarlo.** Aqui esta el trabajo de verdad:
+   los dos ficheros que hay pesan **454 MB y 997 MB**. Eso obliga a comprobar el espacio
+   libre antes de empezar, a que la reanudacion por `Range` sea funcional y no un
+   adorno, y a decidir que pasa si el AP se cae a mitad — media descarga no es evidencia.
+   Y al terminar tiene que aparecer en bruto en la boveda, listo para categorizar.
+4. **Sacar la sonda de `MainActivity`.** `GafasApPrueba` cumplio su papel; lo que valga
+   se muda a `GafasMediaRepository` y el resto se borra. Lo que **no** se puede quedar
+   como esta es el `Locale.setDefault` global.
+5. **Escribir al fabricante** con dos preguntas concretas, que ahora se pueden hacer con
+   datos medidos: un `connect(mac)` que no pase por el escaneo (las gafas no se anuncian
+   nunca, asi que su propio `startScan` no sirve), y por que el AP esta fijado a un canal
+   que Europa no permite.
+
+### Pendiente de comprobar, no de codigo
+
+La sesion de la tarde del 9 (categorizacion en bruto, `RawEvidenceRepository`,
+`CategorizeDialog`, BD a v2) **no parece estar en la tabla de horas**: las cuatro filas
+de desarrollo de ese dia salen de las marcas 08:41-12:21 y esa sesion es posterior.
+Confirmarlo antes de facturar.
+
+---
+
+## 2026-09-09 (2) — Categorizacion: el video de un periferico entra en bruto y lo coloca el agente
+
+### La decision del cliente
+
+Un periferico entrega su video **cuando su grabacion ya termino**, asi que no puede
+colgarse solo del incidente activo. El flujo acordado:
+
+1. El video baja y se cifra en la boveda.
+2. Queda **en bruto**: aparato de origen, nombre original y **fecha de grabacion**.
+3. El agente lo **categoriza**: clasificacion y **eleccion de incidente** — uno que ya
+   existe, o uno nuevo que se crea ahi mismo.
+4. Si no lo categoriza, se queda en bruto con su fecha. No se pierde y no se inventa a
+   que pertenece.
+
+**Por que elige el agente y no lo cruzamos por hora:** una conjetura dentro de una cadena
+de custodia es peor que un hueco. El hueco se ve; la conjetura no.
+
+### Hecho
+
+- **`data/local/RawEvidenceEntities.kt`** (nuevo) — tabla `raw_evidence` y su DAO.
+  `incidentId` nulo = sigue en bruto.
+- **BD a v2 con `Migration(1, 2)` de verdad**, no `fallbackToDestructiveMigration()`: en
+  los telefonos de prueba ya hay incidentes guardados y borrarlos para anadir una tabla
+  vacia seria destruir evidencia por comodidad.
+- **`data/RawEvidenceRepository.kt`** (nuevo) — registrar la importacion y categorizar.
+- **`IncidentRepository`** — `crearIncidenteDeImportacion()` y
+  `adjuntarEvidenciaImportada()`, mas `incrementarEvidencia` en el DAO (el contador se
+  calculo al guardar el incidente y ahora puede crecer despues).
+- **Boveda** — apartado `PENDING CATEGORIZATION` arriba del todo y
+  `feature/vault/CategorizeDialog.kt` con clasificacion, incidente y etiqueta.
+- **`GafasMediaRepository`** — tras sellar, registra en bruto en vez de terminar ahi.
+
+### Dos detalles que parecen menores y no lo son
+
+- **La fecha de grabacion se guarda aparte de la de descarga.** La boveda listaba por
+  `lastModified`, que es *cuando se descargo*; para una prueba esa diferencia importa. Si
+  el aparato no da la suya, la UI dice "No recording date" en vez de rellenarla con la
+  otra. Ese es el motivo de que la tabla exista y no baste con mirar el disco.
+- **El incidente creado se fecha en la GRABACION**, no en el momento de categorizar. Un
+  incidente que dice haber ocurrido cuando el agente lo archivo es un dato falso.
+
+### Pensado para tres aparatos, no para las gafas
+
+Las gafas pueden funcionar a la vez que la bodycam, y **las pruebas se haran con los tres
+trabajando**. Por eso el modelo es generico: `EvidenceSource` (FALCON_LENS / FALCON_CORE)
+dice de cual vino cada pieza, y la misma via sirve para la bodycam en cuanto exista su
+descarga. Nada asume que solo hay un periferico activo.
+
+### Estado: COMPILA Y PASA LAS PRUEBAS JVM, sin ver en dispositivo
+
+Como el protocolo de las gafas sigue sin resolverse, **hoy nada produce material en
+bruto**. Para poder ver el flujo hay un gancho **solo en DEBUG** que marca un `.fev` que
+ya esta en la boveda como recien importado:
+
+    adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity --es import_raw last
+
+Sin `--el recorded_at <millis>` la fila queda sin fecha de grabacion, que es justo el
+caso que conviene ver. Su hash va como `DEBUG-IMPORT-NO-HASH`, a la vista: esa fila no
+sale de un cifrado nuestro.
+
+### Proximo paso
+
+1. Verlo en el telefono con el gancho de DEBUG: crear incidente nuevo y adjuntar a uno
+   existente, y comprobar que el contador de evidencia del incidente sube.
+2. Decidir la subida: la evidencia categorizada **no se encola** hoy. Una captura del
+   telefono si (`uploader.enqueue`), pero ahi se tiene el `Sealed` en la mano; aqui
+   llegaria despues. Va con el backend, que sigue siendo un stub.
+3. Lo de siempre: sin los tres datos del protocolo, esto no se ejecuta con gafas reales.
+
+---
+
+## 2026-09-09 — Que el PTT suene, que se oiga con la app cerrada, y el armazon de las gafas
+
+### Hecho
+
+Tres cosas, en ese orden.
+
+**1. Tonos de walkie (`data/PttTones.kt`, nuevo).** El PTT no sonaba: ni al abrir, ni
+al cerrar, ni al fallar. Cinco tonos sintetizados en PCM con `AudioTrack` (nada de
+ToneGenerator: sus tonos son de telefonia y no permiten la subida y la bajada que hacen
+reconocible el par abrir/cerrar).
+
+| tono | forma | significado |
+|---|---|---|
+| `abrir()` | subida 880 -> 1320 Hz | tu microfono esta abierto |
+| `cerrar()` | bajada 1320 -> 880 Hz | tu microfono se ha cerrado |
+| `denegado()` | doble 300 Hz | NO se abrio: nadie te oye |
+| `entra()` | 1568 Hz suelto, mas bajo | OTRO ha abierto el canal |
+| `sale()` | 1046 Hz suelto, mas bajo | el otro ha soltado |
+
+La regla que los separa sin pensar: **dos notas son tuyas, una nota es de otro.** Si el
+que recibe oyese la misma subida que el que transmite, confundiria "estoy al aire" con
+"hay alguien al aire", que es el error mas caro de todo el subsistema.
+
+Cableado en `AgoraRepository`: el tono de abrir **antes** de publicar el microfono y el
+de cerrar **despues** de apagarlo, para que el pitido no viaje por el canal. Los de
+recepcion, en `ptt_on`, en `cerrarPttRemoto()` y en `marcarBodycamHablando()`.
+
+**2. Recibir con la app cerrada (`RadioService.kt` + `BootReceiver.kt`, nuevos).**
+Foreground service gemelo de `BodycamService`, con notificacion que **dice quien esta
+hablando** — es la unica cara de la radio sin pantalla, el equivalente de
+`PttAvisoOverlay`. Mas `POST_NOTIFICATIONS` en el manifest y su peticion en
+`MainActivity`, sin el cual esa notificacion no se ve.
+
+**3. Armazon del video de las gafas (`data/GafasMediaRepository.kt`, nuevo).** Mecanica
+entera de descarga a la boveda, con tres huecos marcados `PROTOCOLO` y **no**
+inventados. Ver la entrada del 2026-09-07 (2) para el porque.
+
+### Decisiones que conviene no volver a discutir
+
+- **`PttTones` vive duplicado** en las dos apps, como `EvidenceCrypto`/`EvidenceKeys`.
+  El agente que lleva bodycam y telefono oye las dos, asi que **cambiar una frecuencia
+  aqui obliga a cambiarla alli**. Lo unico que difiere a proposito es el
+  `AudioAttributes`: la bodycam usa `USAGE_ALARM` (sus volumenes vienen a cero de
+  fabrica), el telefono `USAGE_VOICE_COMMUNICATION_SIGNALLING`, para salir por donde
+  sale la voz y al volumen que el agente ya tiene puesto.
+- **Un tono no puede mentir.** Con el SOS emitiendo, `terminarPtt()` deja el microfono
+  abierto a proposito: ahi **no** suena el tono de cierre, porque la voz sigue saliendo.
+- **El tono de recepcion va en el FLANCO, no en el aviso.** `onRemoteAudioStateChanged`
+  repite "esta hablando" cada pocos segundos durante toda la transmision (DECODING <->
+  FROZEN con el PTT abierto) y el StateFlow se traga la repeticion porque el valor no
+  cambia; un tono por aviso seria un chasquido continuo encima de la voz. De ahi
+  `marcarBodycamHablando()`, unico sitio donde ya cambia `_bodycamHablando`.
+- **El servicio es `specialUse` y no `mediaPlayback`.** Por contenido seria
+  mediaPlayback, pero desde Android 15 un `BOOT_COMPLETED` no puede arrancar ese tipo
+  (ni `microphone`, `camera`, `dataSync`, `phoneCall`, `mediaProjection`): lanza
+  `ForegroundServiceStartNotAllowedException`. Al distribuirse fuera de Play, no hay
+  revision de `specialUse` que pasar.
+- **La radio solo corre con sesion abierta** (`ACTIVE` u `OFFLINE_GRANTED`). Un telefono
+  en el canal tactico en nombre de un agente que no ha metido su PIN es lo que prohibe
+  el workflow 34 cuando desata la bodycam al cerrar sesion.
+- **Las gafas: ningun endpoint inventado.** Un endpoint adivinado que "casi" funciona
+  cuesta mas que un hueco declarado — el siguiente no sabe si depura su codigo o una
+  suposicion ajena.
+
+### El limite que aparecio al hacerlo, y no es de Android
+
+Tras un reinicio **la radio no se levanta sola**, y no por las restricciones del
+sistema: `leerEstadoGuardado()` devuelve siempre `LOCKED`, o sea que la sesion no
+sobrevive al proceso, por diseno. El `BootReceiver` solo despierta el proceso (con eso
+corren `ensureStarted()` y `resumePending()`, que antes no pasaban hasta que alguien
+tocaba el icono) y la radio espera al PIN. **El limite es el modelo IAM propio, no
+Android.** El dia que se decida que la sesion sobreviva a un reinicio, arranca sola sin
+tocar codigo.
+
+Otro, del lado de las gafas: unirse a su AP con `WifiNetworkSpecifier` **exige app en
+primer plano y un dialogo del sistema**. Esto nunca podra ser una sincronizacion de
+fondo; es una accion del agente. Y como las gafas se desconectan de su WiFi mientras
+graban, la descarga solo puede ocurrir con la grabacion parada.
+
+### Estado: COMPILA, SIN VERIFICAR EN DISPOSITIVO
+
+`assembleDebug` limpio y las pruebas JVM en verde. **Nada de esto se ha oido ni visto en
+un telefono**: no habia ninguno accesible por adb en toda la sesion. Los cinco tonos, el
+servicio, la notificacion y el arranque en boot estan verificados solo por compilacion.
+
+### Probado en el Redmi el mismo dia: funciona, pero depende de ajustes del terminal
+
+Primer intento: con la app quitada de recientes, a B **no le llegaba ni el beep ni la
+voz**; en segundo plano si. Se endurecio lo endurecible —`stopWithTask="false"`,
+`onTaskRemoved` que no para el servicio, peticion de exencion de bateria una sola vez y
+atajo a la pantalla de autoarranque de MIUI en Xiaomi/Redmi/POCO— y **con esos ajustes
+concedidos a mano, funciona**. El fallo era del aparato, no del servicio: MIUI mata el
+proceso salvo autoarranque concedido, y **las apps instaladas desde Android Studio lo
+llevan apagado de fabrica**.
+
+**Lo que hay que sacar de aqui, y no es del codigo:** la radio depende de ajustes **por
+terminal** que alguien tiene que conceder en cada telefono. Eso pertenece al alta del
+terminal, no al APK; si no, habra agentes convencidos de estar a la escucha sin estarlo.
+
+### Lo que ningun ajuste arregla, y por que hara falta push
+
+Forzar detencion, reiniciar el telefono sin abrir la app, o cualquier muerte del proceso
+(la sesion vuelve a `LOCKED` y la radio no vuelve sola).
+
+**El limite ahi no esta en el servicio.** Hoy el PTT es de telefono a telefono por el canal
+de Agora: A anuncia `ptt_on` por el data stream y B tiene que estar YA dentro del canal.
+Con el proceso de B muerto no hay a quien anunciar, porque **no hay servidor en medio que
+sepa que B existe**. Mantener el proceso vivo contra MIUI es una pelea que no se gana; ni
+WhatsApp la pelea: cuando te llaman con la app cerrada, un **push FCM de alta prioridad**
+lo recibe Google Play Services —proceso del sistema, exento de Doze y del gestor de
+bateria del fabricante— y **ese push arranca el proceso**. Es el unico camino que el
+sistema garantiza para despertar una app muerta.
+
+Hoy no hay nada de eso en el proyecto: solo Agora RTC, sin Firebase, sin FCM, sin
+Signaling (RTM) y con el backend en stub. **Dos vias, aparcadas por el usuario para mas
+adelante:** Agora Signaling con push offline (hay que confirmar que esta en el plan
+contratado) o backend propio con registro de tokens FCM. `RadioService` no se tira: con
+push pasa a ser lo que el push arranca, en vez de lo que intenta sobrevivir.
+
+**Decidido ya:** con la sesion cerrada, una transmision entrante **se avisa sin abrir
+audio** (notificacion "Agente X esta transmitiendo"); se pierde ese mensaje y se acepta,
+por el mismo criterio del workflow 34 que desata la bodycam al cerrar sesion.
+
+**Y una consecuencia que habra que tragarse con push:** del push a estar en el canal hay
+segundos, asi que la primera palabra de A se pierde. Por eso WhatsApp suena en vez de
+conectar directo. En una radio real se pulsa, se espera el tono y se habla — el tono de
+apertura de hoy es justo lo que lo resuelve.
+
+### Proximo paso
+
+1. Probar en el Samsung: los cinco tonos (con `adb logcat -s NexusTone:W`), el servicio
+   con la app deslizada en recientes, y la notificacion diciendo quien habla.
+2. Medir el **consumo de bateria de un turno entero** en el canal. Es la condicion para
+   poder prometer el PTT con la app cerrada, y hasta tenerla no se promete.
+3. Comprobar que MIUI y compania no matan el servicio (exencion de optimizacion de
+   bateria, y lista blanca a mano en el Redmi).
+4. Pendiente por decision del usuario: hablar con la app cerrada (tipo `microphone`),
+   dejado comentado en `RadioService` y en el manifest.
+
+---
+
 ## 2026-09-08 — PTT en las dos direcciones: oir a la bodycam y hablar desde el telefono
 
 ### Lo que habia y lo que faltaba

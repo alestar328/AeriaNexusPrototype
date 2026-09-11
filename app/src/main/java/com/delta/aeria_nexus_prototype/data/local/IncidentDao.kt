@@ -40,4 +40,12 @@ interface IncidentDao {
      */
     @Query("UPDATE evidence_records SET sync = :state WHERE id = :evidenceId")
     suspend fun updateEvidenceSync(evidenceId: String, state: SyncState): Int
+
+    /**
+     * Suma uno al contador de evidencia de un incidente ya guardado. Hace falta
+     * porque una evidencia importada de un periferico se adjunta DESPUES de
+     * cerrarlo, y el contador se calculo al guardarlo.
+     */
+    @Query("UPDATE incidents SET evidenceCount = evidenceCount + 1 WHERE id = :incidentId")
+    suspend fun incrementarEvidencia(incidentId: String): Int
 }

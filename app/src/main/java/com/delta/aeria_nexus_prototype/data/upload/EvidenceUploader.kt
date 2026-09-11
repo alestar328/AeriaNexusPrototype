@@ -3,6 +3,7 @@ package com.delta.aeria_nexus_prototype.data.upload
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.local.IncidentDao
 import com.delta.aeria_nexus_prototype.data.model.SyncState
@@ -16,6 +17,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "FalconUpload"
 
@@ -58,6 +60,51 @@ class EvidenceUploader(
     private val uploader = ChunkedUploader(config, sessions)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // Proxies subiendo ahora mismo. Al arrancar coinciden la reanudacion y los
+    // proxies que se rehacen, y un mismo fichero no puede ir en dos subidas a la vez.
+    private val proxiesEnVuelo = ConcurrentHashMap.newKeySet<String>()
+
+    /** Proxy de un video, ya cifrado, con lo que lo enlaza a su original (ver ProxyRepository). */
+    data class ProxySellado(
+        val sealed: EvidenceCrypto.Sealed,
+        /** `sha256_plain` del ORIGINAL: es lo que une las dos piezas en el backend. */
+        val proxyOf: String,
+        val ladoCorto: Int,
+        val fps: Int,
+    )
+
+    /**
+     * Entrega un video del telefono: primero su proxy, si lo hay, y despues el original.
+     * El proxy va antes porque es lo que el backend procesa y pesa varias veces menos:
+     * con mala cobertura llega en segundos, y el original puede tardar.
+     */
+    fun enqueueVideo(
+        original: EvidenceCrypto.Sealed,
+        proxy: ProxySellado?,
+        evidenceId: String?,
+        incidentId: String?,
+        label: String?,
+    ) {
+        // Los datos del proxy se guardan aunque la subida este apagada: son lo unico que
+        // permitira enlazarlo con su original el dia que se configure.
+        proxy?.let { guardarDatosDeProxy(it, evidenceId, incidentId) }
+        if (!config.enabled()) {
+            Log.d(TAG, "subida no configurada — ${original.file.name} se queda en el teléfono")
+            return
+        }
+        scope.launch {
+            proxy?.let { deliverProxy(it.sealed.file, it.sealed.cipherSha256) }
+            deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label)
+        }
+    }
+
+    /** Proxy suelto, sin original detras: el que se rehace al arrancar la app. */
+    fun enqueueProxy(proxy: ProxySellado) {
+        guardarDatosDeProxy(proxy, evidenceId = null, incidentId = null)
+        if (!config.enabled()) return
+        scope.launch { deliverProxy(proxy.sealed.file, proxy.sealed.cipherSha256) }
+    }
+
     /**
      * Encola la entrega de una captura recién cifrada. Vuelve inmediatamente: la subida
      * sigue en el scope de aplicación.
@@ -82,6 +129,12 @@ class EvidenceUploader(
     fun resumePending() {
         if (!config.enabled()) return
         scope.launch {
+            // Los proxies primero, por lo mismo que en enqueueVideo.
+            proxiesDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
+                ?.forEach { fev ->
+                    val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
+                    deliverProxy(fev, sha)
+                }
             val pendientes = evidenceDir()?.listFiles { f ->
                 f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) && !isDelivered(f)
             }?.sortedBy { it.lastModified() }.orEmpty()
@@ -109,19 +162,8 @@ class EvidenceUploader(
 
         evidenceId?.let { setSync(it, SyncState.SYNCING) }
 
-        val metadata = buildMap {
+        val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId) + buildMap {
             put("kind", "evidence")
-            put("filename", fev.name)
-            put("sha256_cipher", cipherSha256)
-            put("encrypted", "true")
-            put("crypto_format", "FEVD1")
-            put("source", "phone")
-            put("device_model", Build.MODEL)
-            put("officer_code", AGENT_ID)
-            put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
-            plainSha256?.let { put("sha256_plain", it) }
-            incidentId?.let { put("incident_id", it) }
-            evidenceId?.let { put("evidence_id", it) }
             label?.let { put("label", it) }
         }
 
@@ -143,6 +185,97 @@ class EvidenceUploader(
             }
         }
         reconcile()
+    }
+
+    /**
+     * Sube un proxy y, en cuanto el servidor no contradice su hash, lo borra: el proxy
+     * no es evidencia, es una copia para el backend, y a partir de ahi la unica copia
+     * es la suya. El recibo se queda como constancia de la entrega.
+     *
+     * No toca Room: el proxy comparte evidence_id con su original, y marcar esa fila
+     * como entregada por el proxy diria que ha llegado el video cuando no es asi.
+     */
+    private suspend fun deliverProxy(fev: File, cipherSha256: String) = withContext(Dispatchers.IO) {
+        if (!proxiesEnVuelo.add(fev.name)) return@withContext
+        try {
+            if (isDelivered(fev)) {
+                borrarProxy(fev)
+                return@withContext
+            }
+            val datos = runCatching { JSONObject(datosDeProxy(fev).readText()) }.getOrNull()
+            if (datos == null) {
+                Log.w(TAG, "${fev.name}: sin datos de su original, no se puede enlazar — se deja")
+                return@withContext
+            }
+            val metadata = metadataComun(
+                fev = fev,
+                cipherSha256 = cipherSha256,
+                plainSha256 = datos.optString("sha256_plain").ifBlank { null },
+                evidenceId = datos.optString("evidence_id").ifBlank { null },
+                incidentId = datos.optString("incident_id").ifBlank { null },
+            ) + mapOf(
+                "kind" to "proxy",
+                "proxy_of" to datos.optString("proxy_of"),
+                "proxy_short_side" to datos.optInt("proxy_short_side").toString(),
+                "proxy_fps" to datos.optInt("proxy_fps").toString(),
+            )
+
+            val outcome = uploader.upload(fev, cipherSha256, metadata)
+            writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
+            when {
+                outcome.delivered && outcome.verified == false ->
+                    Log.e(TAG, "${fev.name}: el servidor NO confirma el hash del proxy — se conserva")
+                outcome.delivered -> borrarProxy(fev)
+                else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
+            }
+        } finally {
+            proxiesEnVuelo.remove(fev.name)
+        }
+    }
+
+    private fun borrarProxy(fev: File) {
+        if (fev.exists() && !fev.delete()) Log.w(TAG, "no se pudo borrar el proxy entregado ${fev.name}")
+        datosDeProxy(fev).delete()
+    }
+
+    /**
+     * Lo que enlaza un proxy con su original, junto al .fev. Hace falta en disco y no
+     * solo en memoria porque si la app muere antes de subirlo, al arrancar solo queda
+     * el fichero, y sin esto nadie sabria de que video es copia.
+     */
+    private fun guardarDatosDeProxy(proxy: ProxySellado, evidenceId: String?, incidentId: String?) {
+        val datos = JSONObject()
+            .put("proxy_of", proxy.proxyOf)
+            .put("proxy_short_side", proxy.ladoCorto)
+            .put("proxy_fps", proxy.fps)
+            .put("sha256_plain", proxy.sealed.plainSha256)
+        evidenceId?.let { datos.put("evidence_id", it) }
+        incidentId?.let { datos.put("incident_id", it) }
+        runCatching { datosDeProxy(proxy.sealed.file).writeText(datos.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudieron guardar los datos del proxy: ${it.message}") }
+    }
+
+    private fun datosDeProxy(fev: File) = File(fev.parentFile, fev.name + PROXY_DATA_SUFFIX)
+
+    /** Metadata que llevan igual la evidencia y el proxy (UPLOAD-PROTOCOL.md §5). */
+    private fun metadataComun(
+        fev: File,
+        cipherSha256: String,
+        plainSha256: String?,
+        evidenceId: String?,
+        incidentId: String?,
+    ): Map<String, String> = buildMap {
+        put("filename", fev.name)
+        put("sha256_cipher", cipherSha256)
+        put("encrypted", "true")
+        put("crypto_format", "FEVD1")
+        put("source", "phone")
+        put("device_model", Build.MODEL)
+        put("officer_code", AGENT_ID)
+        put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
+        plainSha256?.let { put("sha256_plain", it) }
+        incidentId?.let { put("incident_id", it) }
+        evidenceId?.let { put("evidence_id", it) }
     }
 
     /**
@@ -225,8 +358,14 @@ class EvidenceUploader(
         return File(base, EVIDENCE_FOLDER).takeIf { it.isDirectory }
     }
 
+    private fun proxiesDir(): File? {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, LocalEvidenceRepository.PROXIES_FOLDER).takeIf { it.isDirectory }
+    }
+
     private companion object {
         const val RECEIPT_SUFFIX = ".upload.json"
+        const val PROXY_DATA_SUFFIX = ".proxy.json"
         const val EVIDENCE_FOLDER = "evidence"
 
         /** TODO: sale de la sesión autenticada cuando exista login real (AUTH-001). */

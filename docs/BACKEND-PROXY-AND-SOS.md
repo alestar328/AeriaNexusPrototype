@@ -1,0 +1,187 @@
+# Backend spec — video proxy and SOS cloud recording
+
+Status: draft for backend review · 2026-09-11 · Aeria Nexus (phone) + BodyCamServer (W1 unit)
+
+Two changes that need work on the backend side:
+
+1. **Video proxy.** Every video now has two files: the untouched original and a
+   lightweight proxy meant for LLM processing (transcription of what happens).
+2. **SOS recording.** During an SOS the device camera is handed to the Agora
+   livestream, so the device cannot record locally. The backend records the SOS
+   with **Agora Cloud Recording**, triggered by the devices.
+
+Transport, metadata and hashing conventions are the ones in `UPLOAD-PROTOCOL.md`
+(BodyCamServer repo). This document only adds to it.
+
+---
+
+## 1. Video proxy
+
+### 1.1 What the devices produce
+
+| | Original | Proxy |
+|---|---|---|
+| Resolution | 1080p when the camera supports it: phone 1920×1080, W1 bodycam 1920×1088 (its sensor's size; not cropped) | Short side 720, same aspect ratio, never upscaled (phone 1280×720, W1 1264×720) |
+| Frame rate | Phone 30 fps. The W1 delivers ~24–25 fps at any resolution (measured; it did at 720p too) | 15 fps (measured 14.9–15.0) |
+| Video bitrate | Phone ~17 Mbps (CameraX default), W1 8 Mbps | ≤1.5 Mbps H.264 |
+| Audio | AAC, as recorded | AAC, copied from the original as is |
+| Officer label burned into the frames | **No** (bodycam used to; it re-encoded the original) | Bodycam only |
+| Encrypted | `.fev` (FEVD1), same recipients as today | `.fev` (FEVD1), same recipients |
+| Kept on the device | Yes (vault) | **No** — deleted once delivered |
+
+The original is **never re-encoded**. That is the whole point: the file whose
+`sha256_plain` enters the chain of custody is what the camera wrote. The proxy is
+a derivative; it is not evidence on its own.
+
+The proxy is generated right after recording stops (seconds to a couple of
+minutes depending on the length). It is not written at the same time as the
+original: neither the phone camera stack (CameraX: one recording at a time) nor
+the W1 camera (two streams: preview + recorder) can do that.
+
+### 1.2 Upload
+
+Same tus flow, one new value for `kind` and three new metadata keys:
+
+| Key | Example | Notes |
+|---|---|---|
+| `kind` | `proxy` | New. `evidence` and `manifest` unchanged |
+| `proxy_of` | 64 hex | `sha256_plain` of the **original**. This is the link between the two files |
+| `proxy_short_side` | `720` | Actual value, lower if the original was smaller |
+| `proxy_fps` | `15` | |
+
+All the other keys (`filename`, `sha256_cipher`, `sha256_plain`, `encrypted`,
+`crypto_format`, `incident_id`, `evidence_id`, `officer_code`, `device_*`,
+`uploaded_at`) are sent exactly as for `kind=evidence`. `sha256_plain` of a proxy
+is the hash of the proxy itself.
+
+**Order:** proxy first, then the original. The original can arrive minutes or hours
+later, or be in flight at the same time. Your pipeline has to accept a proxy whose
+original has not arrived yet, and link them by `proxy_of`.
+
+**Deletion on the device:** the device deletes its proxy as soon as the upload is
+delivered and the verification endpoint does **not** answer `verified: false`.
+After that, the backend holds the only copy of the proxy. The original is not
+affected by this.
+
+A server that does not know `kind=proxy` would store it as one more piece of
+evidence. Please reject or route it explicitly instead.
+
+### 1.3 Encryption
+
+The proxy is sealed with the same recipients as the original (`srv:<kid>` among
+them), so you open it with the same key and code as any `.fev`. There is no
+unencrypted variant.
+
+---
+
+## 2. SOS cloud recording
+
+### 2.1 Why the devices have to tell you
+
+- Agora Cloud Recording is started and stopped through its REST API with the
+  project's **Customer ID/secret**. Those credentials cannot live in an APK, so
+  the backend drives it.
+- **Agora does not notify when a user starts publishing video.** Its channel
+  webhooks (NCS 101–112) only cover join/leave and role changes, and the phones
+  are always joined to `falcon_group_channel` as hosts. There is no Agora-side
+  event that means "SOS started".
+- **`maxIdleTime` only fires when the channel has no users.** With phones always
+  in the channel a recording would never stop on its own.
+
+So the devices call three endpoints, and the backend owns everything Agora-side.
+
+### 2.2 Endpoints
+
+Base URL: `api_url` in the device config (`upload.conf`, same file as `base_url`).
+Auth: `Authorization: Bearer <token>`, the same token as the uploads (stub today).
+JSON bodies, UTF-8.
+
+**`POST {api_url}sos/start`**
+
+```json
+{
+  "sos_id": "3f7c1e0a-8a52-4d2b-9d7e-2c0f6b8e1a44",
+  "source": "phone",
+  "channel": "falcon_group_channel",
+  "uid": 1839201774,
+  "officer_code": "36975",
+  "device_id": "<android id>",
+  "device_model": "SM-A566B",
+  "started_at": "2026-09-11T17:31:04Z",
+  "latitude": 40.4168,
+  "longitude": -3.7038
+}
+```
+
+- `sos_id` — generated by the device, one per SOS. **Every call is idempotent on
+  it**: a repeated `start` must not start a second recording.
+- `source` — `phone` or `bodycam`.
+- `uid` — the Agora uid publishing the SOS video and audio. Record exactly this
+  uid (individual mode, `subscribeVideoUids`/`subscribeAudioUids = [uid]`).
+- `latitude`/`longitude` — omitted when unknown, never `0.0`.
+
+Response `200 {"recording": "started" | "already_started"}`. Any non-2xx is
+retried by the device a few times with backoff. **An error here never blocks the
+SOS**: the livestream goes out regardless.
+
+**`POST {api_url}sos/heartbeat`** — every **10 s** while the SOS lasts.
+
+```json
+{ "sos_id": "…", "at": "2026-09-11T17:31:14Z" }
+```
+
+If no heartbeat arrives for **30 s**, stop the recording. This covers a device
+that dies, loses coverage or gets killed mid-SOS without sending `stop`.
+
+**`POST {api_url}sos/stop`**
+
+```json
+{ "sos_id": "…", "stopped_at": "2026-09-11T17:33:40Z", "reason": "cancelled" }
+```
+
+`reason`: `cancelled` (agent ended it) or `superseded` (a new SOS replaced it).
+Stopping an unknown or already-stopped `sos_id` answers `200`.
+
+### 2.3 What the backend does with Agora
+
+1. On `start`: `acquire` + `start` in **individual mode**, subscribed only to
+   `uid` (audio + video). Keep `sos_id → resourceId/sid`.
+2. On `stop` or heartbeat timeout: `stop`.
+3. Listen to the Cloud Recording webhook: event **31** (all files uploaded to your
+   storage) is the moment to hash the files and attach them to the SOS/incident.
+4. **Recorder uid:** it must not collide with any device. Devices now use:
+   - phones: random in `[100000, 2^31-1]`;
+   - bodycams: `9001`;
+   - **reserved for services: `90000–99999`**. Use one from that range.
+
+### 2.4 Chain of custody
+
+Cloud Recording writes to your third-party storage (S3 or similar), outside our
+`.fev` encryption. Please:
+
+- compute SHA-256 of every file on event 31 and store it with the `sos_id`;
+- turn on server-side encryption in the storage bucket;
+- keep the `start`/`heartbeat`/`stop` log for each `sos_id`: it is the record of
+  what the device asked for and when.
+
+### 2.5 Known limits on our side
+
+- **All bodycams share uid 9001.** Two units in SOS at the same time collide in
+  Agora itself, before recording. Unique uids per unit are pending on our side.
+- **The channel runs without token** (no App Certificate). Anyone with the App ID
+  can join. Not a blocker for recording, but it should be closed before production.
+- The bodycam also stops its local recording while it streams an SOS (the camera
+  is exclusive), so cloud recording covers both device types the same way.
+
+---
+
+## 3. Questions for the backend
+
+1. Confirm `kind=proxy` and `proxy_of`, or tell us how you want the pair linked.
+2. The real `api_url` and whether the SOS endpoints can live next to the upload
+   service.
+3. Output format you want from Cloud Recording (individual mode gives HLS
+   segments; confirm whether you need MP4 and how you will get it).
+4. Storage vendor and bucket for the recordings.
+5. Whether the original should upload **only on Wi-Fi** (proxy on any network).
+   Today the original uploads right after the proxy, on any network.

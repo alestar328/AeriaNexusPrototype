@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.UUID
 import kotlin.random.Random
 
 /**
@@ -51,6 +52,7 @@ import kotlin.random.Random
 class AgoraRepository(
     private val context: Context,
     private val locationRepository: LocationRepository,
+    private val sosNotifier: SosNotifier,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -70,6 +72,14 @@ class AgoraRepository(
     private var sosStartedAtMillis = 0L
     private var sosOfficer = ""
     private var sosHeartbeatJob: Job? = null
+
+    // Identidad del SOS en curso ante el backend, que lo graba en la nube: un id por
+    // emergencia hace idempotentes sus tres avisos (ver SosNotifier).
+    private var sosId = ""
+    private var ultimoLatidoBackendMillis = 0L
+
+    // Uid con el que este telefono entro al canal. El backend graba el SOS por uid.
+    private var miUid = 0
 
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
@@ -330,8 +340,11 @@ class AgoraRepository(
                 publishMicrophoneTrack = false
                 publishCameraTrack = false
             }
-            // Cada telefono entra con un uid aleatorio, como en Falcon One.
-            rtcEngine.joinChannel(null, CHANNEL_ID, Random.nextInt(1, Int.MAX_VALUE), options)
+            // Cada telefono entra con un uid aleatorio, como en Falcon One, pero por
+            // encima del rango reservado a servicios (bodycam 9001, grabador en la
+            // nube 90000-99999): coincidir con el grabador romperia la grabacion.
+            miUid = Random.nextInt(PRIMER_UID_TELEFONO, Int.MAX_VALUE)
+            rtcEngine.joinChannel(null, CHANNEL_ID, miUid, options)
         } catch (e: Exception) {
             Log.w(TAG, "No se pudo iniciar la red tactica", e)
             engine = null
@@ -361,6 +374,9 @@ class AgoraRepository(
         _sosActive.value = true
         startCameraPublish()
         sendSosSignal()
+        sosId = UUID.randomUUID().toString()
+        ultimoLatidoBackendMillis = System.currentTimeMillis()
+        sosNotifier.inicio(sosId, CHANNEL_ID, miUid, officer, lastLatitude, lastLongitude)
         startSosHeartbeat()
     }
 
@@ -376,6 +392,7 @@ class AgoraRepository(
         sosHeartbeatJob = null
         _sosActive.value = false
         sendSosCancel()
+        sosNotifier.fin(sosId, "cancelled")
         stopCameraPublish()
     }
 
@@ -672,9 +689,24 @@ class AgoraRepository(
         sosHeartbeatJob = scope.launch {
             while (isActive) {
                 delay(HEARTBEAT_INTERVAL_MILLIS)
-                if (_sosActive.value) sendSosSignal()
+                if (_sosActive.value) {
+                    sendSosSignal()
+                    latidoAlBackend()
+                }
             }
         }
+    }
+
+    /**
+     * El backend corta la grabacion si deja de oir latidos, pero le basta uno cada
+     * 10 s: el del canal va cada 3 s, y mandarlo tambien por HTTP gastaria datos y
+     * bateria justo durante la emergencia.
+     */
+    private fun latidoAlBackend() {
+        val ahora = System.currentTimeMillis()
+        if (ahora - ultimoLatidoBackendMillis < BACKEND_HEARTBEAT_MILLIS) return
+        ultimoLatidoBackendMillis = ahora
+        sosNotifier.latido(sosId)
     }
 
     private fun sendCurrentLocation() {
@@ -803,6 +835,11 @@ class AgoraRepository(
 
         private const val LOCATION_SEND_INTERVAL_MILLIS = 1_000L
         private const val HEARTBEAT_INTERVAL_MILLIS = 3_000L
+        private const val BACKEND_HEARTBEAT_MILLIS = 10_000L
+
+        // Por debajo quedan los uids de servicios: 9001 la bodycam y 90000-99999 el
+        // grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
+        private const val PRIMER_UID_TELEFONO = 100_000
     }
 }
 

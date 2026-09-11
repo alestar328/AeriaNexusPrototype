@@ -187,6 +187,21 @@ dependencies {
         exclude(group = "io.agora.rtc", module = "full-video-av1-codec-enc")
         exclude(group = "io.agora.rtc", module = "full-video-av1-codec-dec")
     }
+    // SDK oficial de las gafas BleeqUp (app/libs). Sin el, encender su punto de
+    // acceso es imposible: la orden viaja por un GATT propietario. Un .aar no
+    // trae metadatos de dependencias, asi que OkHttp y Gson —que usa por
+    // dentro— hay que declararlos aqui a mano o falla en ejecucion.
+    implementation(files("libs/bleequplibrary-release.aar"))
+    implementation(libs.okhttp)
+    implementation(libs.gson)
+    // Video del telefono: original a 1080p con CameraX y copia de 720p con
+    // Media3 Transformer, ambas de Jetpack. Ver docs/BACKEND-PROXY-AND-SOS.md.
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.video)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.effect)
     // Base de datos local: los incidents creados en campo sobreviven al cierre de la app.
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)

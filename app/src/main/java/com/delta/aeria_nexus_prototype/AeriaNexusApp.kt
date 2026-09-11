@@ -29,6 +29,9 @@ class AeriaNexusApp : Application() {
         // hace BootReceiver.
         AppContainer.evidenceUploader.resumePending()
         AppContainer.evidenceUploader.reconcile()
+        // Lo mismo para la copia ligera de los videos: si el proceso murio mientras se
+        // hacia, el original sigue en claro esperandola y hay que terminarla.
+        AppContainer.proxyRepository.reanudar()
         vigilarSesionParaLaRadio()
     }
 

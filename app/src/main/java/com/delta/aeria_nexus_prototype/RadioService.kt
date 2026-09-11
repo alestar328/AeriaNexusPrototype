@@ -147,6 +147,22 @@ class RadioService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
+    /**
+     * El agente ha quitado la app del multitarea. La radio NO se para: es
+     * justamente el caso para el que existe este servicio, y en Android de serie
+     * el sistema lo respeta (`stopWithTask=false`).
+     *
+     * Si tras esto deja de sonar el PTT, el proceso lo ha matado el gestor de
+     * bateria del fabricante —MIUI lo hace salvo autoarranque concedido y
+     * bateria "sin restricciones"—, no el codigo. Este log es lo que distingue un
+     * caso del otro: si aparece y luego no aparece "Radio tactica parada", el
+     * servicio siguio vivo.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.d(TAG, "App quitada del multitarea: la radio sigue en marcha")
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {

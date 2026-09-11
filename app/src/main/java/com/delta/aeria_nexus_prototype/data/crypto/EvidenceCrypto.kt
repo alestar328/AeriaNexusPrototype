@@ -98,10 +98,15 @@ object EvidenceCrypto {
      *
      * Ante cualquier fallo borra el destino a medias: un .fev truncado es peor que
      * no tenerlo, porque parece evidencia.
+     *
+     * [borrarClaro] en false deja el original en su sitio aunque la politica sea
+     * borrarlo: el video lo necesita un rato mas para sacar de el su copia ligera
+     * (ver ProxyRepository), que es quien lo borra despues.
      */
     fun seal(
         plain: File,
         dest: File = File(plain.parentFile, plain.name + EXTENSION),
+        borrarClaro: Boolean = DELETE_PLAINTEXT,
     ): Sealed? {
         if (!plain.isFile) {
             Log.e(TAG, "no existe el fichero a cifrar: ${plain.name}")
@@ -149,7 +154,7 @@ object EvidenceCrypto {
                     "${sealed.elapsedMillis} ms, para ${sealed.recipients})"
             )
 
-            if (DELETE_PLAINTEXT && !plain.delete()) {
+            if (borrarClaro && !plain.delete()) {
                 Log.w(TAG, "no se pudo borrar el claro ${plain.name}")
             }
             sealed

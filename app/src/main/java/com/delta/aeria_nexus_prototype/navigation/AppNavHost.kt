@@ -211,7 +211,13 @@ fun AppNavHost() {
 
         composable(Routes.VAULT) {
             VaultScreen(
-                viewModel = viewModel { VaultViewModel(AppContainer.vaultRepository) },
+                viewModel = viewModel {
+                    VaultViewModel(
+                        vault = AppContainer.vaultRepository,
+                        enBruto = AppContainer.rawEvidenceRepository,
+                        incidentes = AppContainer.incidentRepository,
+                    )
+                },
                 onBack = { navController.popBackStack() },
                 onTabSelected = onTabSelected,
             )
@@ -237,6 +243,8 @@ fun AppNavHost() {
                         AppContainer.bodycamRepository,
                         AppContainer.localEvidenceRepository,
                         AppContainer.evidenceUploader,
+                        AppContainer.proxyRepository,
+                        AppContainer.agoraRepository,
                     )
                 },
                 onBackToOperations = { navController.popBackStack() },
@@ -244,6 +252,9 @@ fun AppNavHost() {
                     navController.navigate(Routes.INCIDENTS) {
                         popUpTo(Routes.OPERATIONS)
                     }
+                },
+                onOpenSosLivestream = {
+                    navController.navigate(Routes.livestream(LivestreamViewModel.OWN_CAMERA_UID))
                 },
                 onTabSelected = onTabSelected,
             )

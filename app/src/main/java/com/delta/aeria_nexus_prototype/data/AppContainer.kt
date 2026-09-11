@@ -11,6 +11,7 @@ import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import com.delta.aeria_nexus_prototype.data.upload.UploadSessions
+import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
 
 /**
  * Contenedor de dependencias manual del proyecto. Se inicializa una sola vez
@@ -29,6 +30,10 @@ object AppContainer {
         private set
     lateinit var gafasRepository: GafasRepository
         private set
+    lateinit var gafasMediaRepository: GafasMediaRepository
+        private set
+    lateinit var rawEvidenceRepository: RawEvidenceRepository
+        private set
     lateinit var localEvidenceRepository: LocalEvidenceRepository
         private set
     lateinit var vaultRepository: VaultRepository
@@ -45,6 +50,8 @@ object AppContainer {
         private set
     lateinit var evidenceUploader: EvidenceUploader
         private set
+    lateinit var proxyRepository: ProxyRepository
+        private set
 
     fun init(context: Context) {
         val appContext = context.applicationContext
@@ -55,14 +62,31 @@ object AppContainer {
         // Una sola instancia de Room: build() no es singleton, y abrir dos sobre el
         // mismo fichero significa dos pools de conexiones y dos rastreadores de
         // invalidacion peleandose por el mismo WAL.
-        val dao = IncidentDatabase.build(appContext).incidentDao()
+        val db = IncidentDatabase.build(appContext)
+        val dao = db.incidentDao()
+        // Un solo upload.conf para la subida y para los avisos del SOS al backend.
+        val uploadConfig = UploadConfig(appContext)
         incidentRepository = IncidentRepository(dao)
+        // Material que entra de un periferico y todavia no es de ningun incidente.
+        rawEvidenceRepository = RawEvidenceRepository(db.rawEvidenceDao(), incidentRepository)
         locationRepository = LocationRepository(appContext)
         batteryRepository = BatteryRepository(appContext)
-        agoraRepository = AgoraRepository(appContext, locationRepository)
+        agoraRepository = AgoraRepository(
+            context = appContext,
+            locationRepository = locationRepository,
+            sosNotifier = SosNotifier(appContext, uploadConfig),
+        )
         bodycamRepository = BodycamRepository(appContext)
         gafasRepository = GafasRepository(appContext)
         localEvidenceRepository = LocalEvidenceRepository(appContext)
+        // Armazon: la mecanica de descarga esta entera pero el protocolo de las
+        // gafas sigue sin averiguarse, asi que hoy no lo llama nadie. Construirlo
+        // aqui no abre red ni consume nada.
+        gafasMediaRepository = GafasMediaRepository(
+            context = appContext,
+            evidencia = localEvidenceRepository,
+            enBruto = rawEvidenceRepository,
+        )
         vaultRepository = VaultRepository(appContext)
         // Decide si la app llega siquiera a la pantalla de operaciones, asi que
         // tiene que estar lista antes de que se componga nada (ver TrustGate).
@@ -80,9 +104,14 @@ object AppContainer {
         )
         evidenceUploader = EvidenceUploader(
             context = appContext,
-            config = UploadConfig(appContext),
+            config = uploadConfig,
             sessions = UploadSessions(appContext),
             dao = dao,
+        )
+        proxyRepository = ProxyRepository(
+            evidencia = localEvidenceRepository,
+            encoder = ProxyEncoder(appContext),
+            uploader = evidenceUploader,
         )
         incidentRepository.onIncidentSaved = { evidenceUploader.reconcile() }
         // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin

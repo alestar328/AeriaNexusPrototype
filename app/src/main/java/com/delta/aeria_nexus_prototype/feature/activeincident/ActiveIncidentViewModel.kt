@@ -3,9 +3,11 @@ package com.delta.aeria_nexus_prototype.feature.activeincident
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
+import com.delta.aeria_nexus_prototype.data.ProxyRepository
 import com.delta.aeria_nexus_prototype.data.model.ActiveIncident
 import com.delta.aeria_nexus_prototype.data.model.EvidenceClass
 import com.delta.aeria_nexus_prototype.data.model.EvidenceRecord
@@ -15,6 +17,7 @@ import com.delta.aeria_nexus_prototype.data.model.TimelineEntry
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntryType
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,6 +42,14 @@ data class ActiveIncidentUiState(
     // implicar cifrar una nota de audio en curso, y salir antes cancelaria ese
     // trabajo y dejaria la nota sin enlazar al incidente.
     val incidentEnded: Boolean = false,
+    // Camara del telefono abierta: el fichero donde graba CameraX. Null = cerrada.
+    val phoneVideoFile: File? = null,
+    // Al abrirse, grabar sin esperar al boton: es la vuelta del SOS que corto una grabacion.
+    val phoneCameraAutoStart: Boolean = false,
+    // El ViewModel pide parar la grabacion a la pantalla, que es donde vive CameraX.
+    val stopPhoneRecordingRequested: Boolean = false,
+    // Abrir el livestream propio del SOS lanzado desde la camara.
+    val openSosLivestream: Boolean = false,
 )
 
 /**
@@ -50,6 +61,8 @@ class ActiveIncidentViewModel(
     private val bodycamRepository: BodycamRepository,
     private val localEvidence: LocalEvidenceRepository,
     private val uploader: EvidenceUploader,
+    private val proxies: ProxyRepository,
+    private val agora: AgoraRepository,
 ) : ViewModel() {
 
     /**
@@ -68,6 +81,13 @@ class ActiveIncidentViewModel(
     // Destino de la captura en curso con la camara del telefono.
     private var pendingCapture: LocalEvidenceRepository.MediaTarget? = null
 
+    // SOS pedido desde la camara del telefono. Sale cuando la pantalla suelta la
+    // camara: el livestream la necesita y mientras tanto la tiene CameraX.
+    private var sosAlSoltarCamara = false
+
+    // El SOS corto una grabacion: al terminar el SOS se vuelve a grabar sola.
+    private var reanudarTrasSos = false
+
     val activeIncident: StateFlow<ActiveIncident?> = repositorio.activeIncident
 
     private val _uiState = MutableStateFlow(ActiveIncidentUiState())
@@ -79,6 +99,15 @@ class ActiveIncidentViewModel(
             while (true) {
                 delay(1_000)
                 advanceTimers()
+            }
+        }
+        // Vuelta del SOS que corto una grabacion: la camara se abre y graba sola. En
+        // plena emergencia nadie se acuerda de volver a pulsar RECORD.
+        viewModelScope.launch {
+            agora.sosActive.collect { activo ->
+                if (activo || !reanudarTrasSos) return@collect
+                reanudarTrasSos = false
+                openPhoneCamera(autoStart = true)
             }
         }
     }
@@ -144,10 +173,10 @@ class ActiveIncidentViewModel(
     }
 
     // ── Captura con el telefono (sin bodycam) ────────────────────────────────
-    // La app de camara del sistema escribe en la carpeta privada de la app; aqui
-    // solo se prepara el destino y, al volver, se cifra y se registra la
-    // evidencia. La captura en claro no sobrevive al cifrado, asi que lo que se
-    // guarda en mediaUri es el nombre del .fev dentro de la boveda.
+    // La foto la hace la app de camara del sistema y el video CameraX, dentro de la
+    // app; las dos escriben en la carpeta privada. Aqui se prepara el destino y, al
+    // cerrar la captura, se cifra y se registra la evidencia. Lo que se guarda en
+    // mediaUri es el nombre del .fev dentro de la boveda.
 
     /** Prepara el destino de una foto con el telefono y devuelve su Uri. */
     fun preparePhonePhoto(): Uri? {
@@ -177,46 +206,105 @@ class ActiveIncidentViewModel(
         }
     }
 
-    /** Prepara el destino de un video con el telefono y devuelve su Uri. */
-    fun preparePhoneVideo(): Uri? {
-        val destino = localEvidence.createVideoTarget()
+    /**
+     * Abre la camara del telefono (CameraX, a 1080p) con su destino ya preparado. La
+     * app de camara del sistema no servia para video: su intent no deja pedir
+     * resolucion ni fps.
+     */
+    fun openPhoneCamera(autoStart: Boolean = false) {
+        val destino = localEvidence.createVideoTarget() ?: return
         pendingCapture = destino
-        return destino?.uri
+        _uiState.update { it.copy(phoneVideoFile = destino.file, phoneCameraAutoStart = autoStart) }
     }
 
-    /** Resultado del video con el telefono; con exito lo registra como evidencia. */
-    fun onPhoneVideoResult(success: Boolean) {
+    /** Cerrar la camara sin haber grabado: el destino se queda vacio y se descarta. */
+    fun closePhoneCamera() {
+        pendingCapture?.let(localEvidence::discard)
+        pendingCapture = null
+        _uiState.update { it.copy(phoneVideoFile = null, phoneCameraAutoStart = false) }
+    }
+
+    fun onPhoneRecordingStarted() {
+        repositorio.updateActiveIncident { it.copy(isRecording = true) }
+        _uiState.update { it.copy(phoneCameraAutoStart = false) }
+        addTimelineEntry("Recording started — phone camera", TimelineEntryType.RECORDING_START)
+    }
+
+    /**
+     * CameraX cerro el fichero: por STOP, por un SOS o porque la pantalla se fue. En
+     * los tres casos lo grabado es evidencia y sigue el mismo camino.
+     */
+    fun onPhoneRecordingFinalized(hayVideo: Boolean) {
+        repositorio.updateActiveIncident { it.copy(isRecording = false) }
+        _uiState.update {
+            it.copy(phoneVideoFile = null, stopPhoneRecordingRequested = false, recordingSeconds = 0)
+        }
         val destino = pendingCapture
         pendingCapture = null
         if (destino == null) return
-        if (!success) {
+        if (!hayVideo) {
             localEvidence.discard(destino)
             return
         }
-        // Igual que en la foto, se cifra al cerrar. El video es el caso pesado
-        // (una grabacion larga tarda segundos), por eso nunca puede correr en el
-        // hilo principal. La duracion se lee antes de cifrar: despues el fichero
-        // original ya no existe.
-        viewModelScope.launch {
-            val duracion = localEvidence.mediaDuration(destino)
-            val sellada = localEvidence.seal(destino)
-            addTimelineEntry(
-                "Video recorded — ${duracion ?: "saved"} (phone camera)",
-                TimelineEntryType.RECORDING_END,
-            )
-            val video = EvidenceRecord(
-                id = UUID.randomUUID().toString(),
-                type = EvidenceType.VIDEO,
-                label = "Video recording — ${activeDevices()}",
-                time = IncidentRepository.nowTime(),
-                duration = duracion,
-                device = activeDevices(),
-                hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
-                sync = SyncState.LOCAL_ONLY,
-                mediaUri = sellada?.file?.name,
-            )
-            _uiState.update { it.copy(pendingEvidence = video) }
-            entregar(sellada, video.id, video.label)
+        viewModelScope.launch { registrarVideoDelTelefono(destino) }
+    }
+
+    /**
+     * SOS desde la camara del telefono. El livestream necesita la camara y la tiene
+     * CameraX: primero se cierra lo que se estuviera grabando, que queda como evidencia
+     * normal, y el SOS sale en cuanto la pantalla suelta la camara. Lo que dure el SOS
+     * lo graba el backend en la nube (docs/BACKEND-PROXY-AND-SOS.md §2).
+     */
+    fun sosFromPhoneCamera() {
+        sosAlSoltarCamara = true
+        if (activeIncident.value?.isRecording == true) {
+            reanudarTrasSos = true
+            _uiState.update { it.copy(stopPhoneRecordingRequested = true) }
+        } else {
+            closePhoneCamera()
+        }
+    }
+
+    /** La pantalla ya solto la camara: si habia un SOS esperando, sale ahora. */
+    fun onPhoneCameraReleased() {
+        if (!sosAlSoltarCamara) return
+        sosAlSoltarCamara = false
+        addTimelineEntry("SOS raised — phone camera handed to the livestream", TimelineEntryType.SYSTEM)
+        agora.activateSos(repositorio.officerProfile.officerNum)
+        _uiState.update { it.copy(openSosLivestream = true) }
+    }
+
+    fun onSosLivestreamOpened() {
+        _uiState.update { it.copy(openSosLivestream = false) }
+    }
+
+    /**
+     * Cifra el video, abre la hoja de clasificacion y encarga su proxy. Al cifrar se
+     * conserva el claro porque de el sale el proxy; ProxyRepository lo borra al
+     * terminar y entrega los dos, primero el proxy y luego el original. La duracion
+     * se lee antes, mientras el fichero sigue siendo un MP4 legible.
+     */
+    private suspend fun registrarVideoDelTelefono(destino: LocalEvidenceRepository.MediaTarget) {
+        val duracion = localEvidence.mediaDuration(destino)
+        val sellada = localEvidence.seal(destino, conservarClaro = true)
+        addTimelineEntry(
+            "Video recorded — ${duracion ?: "saved"} (phone camera)",
+            TimelineEntryType.RECORDING_END,
+        )
+        val video = EvidenceRecord(
+            id = UUID.randomUUID().toString(),
+            type = EvidenceType.VIDEO,
+            label = "Video recording — ${activeDevices()}",
+            time = IncidentRepository.nowTime(),
+            duration = duracion,
+            device = activeDevices(),
+            hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
+            sync = SyncState.LOCAL_ONLY,
+            mediaUri = sellada?.file?.name,
+        )
+        _uiState.update { it.copy(pendingEvidence = video) }
+        if (sellada != null) {
+            proxies.procesar(destino, sellada, video.id, activeIncident.value?.id, video.label)
         }
     }
 
