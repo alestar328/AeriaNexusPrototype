@@ -154,8 +154,9 @@ private fun StatusBar(isRecording: Boolean) {
             )
         }
         Spacer(Modifier.width(12.dp))
-        // Falcon Lens (gafas BleeqUp): SOLO indicador. Las gafas se conectan
-        // solas al telefono; desde la app no se controla nada de ellas.
+        // Falcon Lens (gafas BleeqUp): indicador del enlace que trae el sistema.
+        // Las gafas se conectan solas al telefono; el mando a distancia (grabar,
+        // foto) va por otro enlace y vive en la pantalla FALCON LENS.
         // El set de Material de Compose no trae gafas: el icono es el vector
         // eyeglasses_2 de Material Symbols importado en drawable.
         DeviceIndicator(

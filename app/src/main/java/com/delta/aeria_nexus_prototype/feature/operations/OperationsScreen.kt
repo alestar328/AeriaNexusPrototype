@@ -48,12 +48,15 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -81,6 +84,7 @@ fun OperationsScreen(
     onOpenActiveIncident: (String) -> Unit,
     onOpenSosLivestream: () -> Unit,
     onOpenBodycamControl: () -> Unit,
+    onOpenLensControl: () -> Unit,
     onTabSelected: (MainTab) -> Unit,
 ) {
     val activeIncident by viewModel.activeIncident.collectAsStateWithLifecycle()
@@ -164,7 +168,24 @@ fun OperationsScreen(
                         onClick = { activeIncident?.let { onOpenActiveIncident(it.id) } },
                         modifier = Modifier.weight(1f),
                     )
-                    BodycamControlButton(compacto = compacto, onClick = onOpenBodycamControl)
+                    // Los dos aparatos del agente, uno al lado del otro: ambos
+                    // llevan a su mando a distancia y ninguno es mas importante.
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DeviceControlButton(
+                            icon = Icons.Filled.Videocam,
+                            label = "BODYCAM",
+                            compacto = compacto,
+                            onClick = onOpenBodycamControl,
+                            modifier = Modifier.weight(1f),
+                        )
+                        DeviceControlButton(
+                            icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
+                            label = "FALCON LENS",
+                            compacto = compacto,
+                            onClick = onOpenLensControl,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         // El PTT ya no es decorativo: manda la voz de este
                         // telefono al canal de Agora, igual que el boton F2 de
@@ -344,12 +365,17 @@ private fun ContinueIncidentButton(
     }
 }
 
-/** Acceso al controlador remoto de la bodycam (livestream, foto, grabacion). */
+/** Acceso al mando a distancia de un aparato del agente: bodycam o gafas. */
 @Composable
-private fun BodycamControlButton(compacto: Boolean, onClick: () -> Unit) {
+private fun DeviceControlButton(
+    icon: ImageVector,
+    label: String,
+    compacto: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             // heightIn y no height: si el usuario agranda la fuente del
             // sistema, el boton crece en lugar de recortar el texto.
             .heightIn(min = if (compacto) 52.dp else 64.dp)
@@ -361,18 +387,18 @@ private fun BodycamControlButton(compacto: Boolean, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            Icons.Filled.Videocam,
+            icon,
             contentDescription = null,
             tint = AzulClaro,
-            modifier = Modifier.size(28.dp),
+            modifier = Modifier.size(22.dp),
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(8.dp))
         Text(
-            text = "BODYCAM CONTROL",
+            text = label,
             color = AzulClaro,
-            fontSize = 14.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Black,
-            letterSpacing = 2.sp,
+            letterSpacing = 1.sp,
         )
     }
 }

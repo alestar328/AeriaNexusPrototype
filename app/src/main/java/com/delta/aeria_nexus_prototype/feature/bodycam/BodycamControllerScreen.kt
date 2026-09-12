@@ -52,6 +52,7 @@ import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
+import com.delta.aeria_nexus_prototype.ui.components.DeviceActionButton
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -381,50 +382,6 @@ private fun SecondaryPanelButton(
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.5.sp,
-        )
-    }
-}
-
-/** Boton de foto o grabacion: acciones locales de la bodycam, sin SOS. */
-@Composable
-private fun DeviceActionButton(
-    label: String,
-    sublabel: String,
-    icon: ImageVector,
-    accentColor: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier
-            .heightIn(min = 88.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Superficie)
-            .border(1.dp, accentColor.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .padding(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = accentColor,
-            modifier = Modifier.size(28.dp),
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = label,
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 1.sp,
-        )
-        Text(
-            text = sublabel,
-            color = TextoTerciario,
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center,
         )
     }
 }

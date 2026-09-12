@@ -6,6 +6,71 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-12 — Mando a distancia de las gafas: grabar y parar desde Nexus
+
+### Que se ha hecho
+
+El SDK del fabricante ya traia `startRecord`, `stopRecord` y `takePhoto` (se vio leyendo
+el AAR el 09-sep), pero no los llamaba nadie: lo unico que la app hacia con las gafas era
+mirar si estaban enlazadas. Ahora hay mando de verdad.
+
+- **`data/GafasSdkPuente.kt`** (nuevo): el arranque del SDK y el apano por reflexion que
+  le entrega el aparato emparejado sin escanear, en UN solo sitio. Antes vivia dentro de
+  `GafasApPrueba`; ahora lo comparten la sonda y el canal de mando, asi que el dia que el
+  fabricante recompile el AAR solo hay un fichero que arreglar.
+- **`data/GafasCommandRepository.kt`** (nuevo): abre y cierra el GATT propietario, y manda
+  `startRecord` / `stopRecord` / `takePhoto`. Al quedar LISTO pregunta resolucion
+  (`getCameraSetting`) y espacio libre (`getStorageInfo`). Registra tambien el
+  `CameraListener` del SDK, que avisa de los ficheros que se van cerrando.
+- **`feature/gafas/`** (nuevo): `GafasControlViewModel` + `GafasControlScreen`, al estilo
+  del controlador de la bodycam. Se conecta sola al entrar y **suelta el GATT en
+  `onCleared`**: sin eso Android cachea el enlace y las escrituras siguientes fallan con
+  `write characteristic error` (costo tres ejecuciones averiguarlo en septiembre).
+- **Operations**: la fila de BODYCAM CONTROL pasa a ser dos botones, BODYCAM y FALCON
+  LENS. El composable del boton estaba duplicandose, asi que ahora es uno solo
+  (`DeviceControlButton`), y `DeviceActionButton` se ha subido a `ui/components/CommonUi.kt`
+  porque ya lo usan dos pantallas.
+
+### Lo que este canal NO puede decir, y sale escrito en pantalla
+
+**El SDK no tiene ninguna orden para preguntar si las gafas estan grabando.** Solo hay
+arrancar y parar. Asi que el `grabando` de la app es *la ultima orden que dimos*, no un
+hecho: si el agente usa el boton fisico de las gafas, el telefono no se entera y el
+indicador miente. La pantalla lo dice con todas las letras en vez de aparentar certeza.
+
+Queda una via para cerrar ese agujero cuando haya gafas delante: el SDK trae
+`registerButtonCallback` (boton izquierdo/derecho, con `single`/`double`/`long`) y
+`registerCameraCallback`. Si `onVideoInfo` llega al cerrar el fichero, sirve para corregir
+el estado; hoy solo se registra y se enseña el nombre, porque **no se sabe si llega al
+empezar o al terminar** y no se va a adivinar.
+
+### Dos limites que no son nuestros
+
+- **Grabar y descargar se excluyen**: las gafas apagan su punto de acceso WiFi mientras
+  graban, para ahorrar bateria. El video no se puede traer hasta que la grabacion pare.
+- El mando va por BLE, asi que **no depende del lio del canal 149**: esa decision (emitir
+  en 5,8 GHz en Europa) solo bloquea la descarga del video, no el control.
+
+R8 no es un riesgo aqui: `-keep class com.bleequp.bleequplibrary.** { *; }` ya estaba por
+el Gson del AAR y cubre tambien los nombres internos que usa la reflexion.
+
+### Estado: COMPILA, SIN PROBAR CONTRA LAS GAFAS
+
+`assembleDebug` limpio, sin warnings nuevos. **No se ha ejecutado contra el hardware**: no
+habia ningun aparato por adb en esta sesion. `startRecord` y `stopRecord` no se han visto
+funcionar nunca; su existencia salio de leer el bytecode del AAR, no de una ejecucion.
+
+### Proximo paso
+
+1. Probar con las gafas puestas: conectar, GRABAR, PARAR, FOTO, y mirar en que momento
+   llega `onVideoInfo` (`adb logcat -s GafasCommand AeriaGafasPuente`).
+2. Si el orden de los avisos lo permite, corregir `grabando` con el `CameraListener` y
+   enganchar los botones fisicos con `registerButtonCallback`.
+3. Sigue pendiente pedirle al fabricante un `connect(mac)` que no pase por el escaneo,
+   para quitar la reflexion.
+
+---
+
 ## 2026-09-11 — Peticion del manager: original 1080p/30 + proxy 720p/15 (solo analisis)
 
 Peticion: grabar dos videos a la vez, el original sin comprimir a 1080p/30 y un proxy

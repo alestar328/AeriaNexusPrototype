@@ -32,6 +32,8 @@ object AppContainer {
         private set
     lateinit var gafasMediaRepository: GafasMediaRepository
         private set
+    lateinit var gafasCommandRepository: GafasCommandRepository
+        private set
     lateinit var rawEvidenceRepository: RawEvidenceRepository
         private set
     lateinit var localEvidenceRepository: LocalEvidenceRepository
@@ -78,6 +80,9 @@ object AppContainer {
         )
         bodycamRepository = BodycamRepository(appContext)
         gafasRepository = GafasRepository(appContext)
+        // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
+        // desde la pantalla de control y se cierra al salir de ella.
+        gafasCommandRepository = GafasCommandRepository(appContext)
         localEvidenceRepository = LocalEvidenceRepository(appContext)
         // Armazon: la mecanica de descarga esta entera pero el protocolo de las
         // gafas sigue sin averiguarse, asi que hoy no lo llama nadie. Construirlo

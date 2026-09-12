@@ -27,12 +27,14 @@ enum class GafasState { DISCONNECTED, CONNECTING, CONNECTED }
 /**
  * Presencia de las gafas de realidad aumentada BleeqUp Ranger.
  *
- * A diferencia de la bodycam, la app no manda nada a las gafas: se emparejan y
- * se conectan desde los ajustes del sistema, y aqui solo se OBSERVA el enlace
- * para pintarlo en la barra de estado. Por eso no hay socket, ni servicio en
- * primer plano, ni reintentos: no hay enlace propio que mantener vivo, y montar
- * uno para saber algo que el sistema ya sabe seria gastar radio y bateria a
- * cambio de nada.
+ * Aqui solo se OBSERVA el enlace para pintarlo en la barra de estado: las gafas
+ * se emparejan y se conectan desde los ajustes del sistema. Por eso no hay
+ * socket, ni servicio en primer plano, ni reintentos: no hay enlace propio que
+ * mantener vivo, y montar uno para saber algo que el sistema ya sabe seria gastar
+ * radio y bateria a cambio de nada.
+ *
+ * Las ordenes (grabar, foto) NO van por aqui: viajan por un GATT propietario que
+ * abre [GafasCommandRepository] mientras se esta en la pantalla de mando.
  *
  * Las gafas se presentan al telefono como dispositivo de audio (HFP y A2DP)
  * ademas de BLE, asi que el sistema avisa de sus conexiones como de las de

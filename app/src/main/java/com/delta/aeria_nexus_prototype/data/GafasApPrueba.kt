@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import com.bleequp.bleequplibrary.BleeqUpDevice
 import com.bleequp.bleequplibrary.BleeqUpDeviceManager
-import com.bleequp.bleequplibrary.BleeqUpSDK
 import com.bleequp.bleequplibrary.BleeqUpWifiManager
 import com.delta.aeria_nexus_prototype.BuildConfig
 import kotlinx.coroutines.Dispatchers
@@ -27,9 +26,8 @@ private const val TAG = "AeriaGafasAP"
  *    a cierto y responde "Certification successful" sin tocar la red. No hace
  *    falta licencia de partner para que funcione, pero todo lo demas del SDK
  *    devuelve "Authentication error" si no se llama antes.
- * 2. Escanea BLE. El SDK filtra el solo por nombre (tiene que contener `BleeqUp`
- *    o `nsve`); aqui ademas se descarta lo que no sea [BuildConfig.GAFAS_MAC], si
- *    esta configurada, para no conectarse a las gafas de otro.
+ * 2. Le entrega al SDK el aparato ya emparejado, sin escanear (ver
+ *    [GafasSdkPuente]): estas gafas no se anuncian por BLE nunca.
  * 3. Conecta su GATT propio (servicio `9B005FFE-…`) y espera a `onReady`, que es
  *    cuando el SDK ya tiene MTU y notificaciones. **`turnOnWifi` exige READY**:
  *    con el aparato solo emparejado por audio responde "the device is not ready".
@@ -78,18 +76,12 @@ object GafasApPrueba {
         }
         enMarcha = true
 
-        val macEsperada = BuildConfig.GAFAS_MAC.uppercase()
         Log.i(TAG, "1/4 init del SDK (la clave no se valida: la pone a cierto sin mirarla)")
-        BleeqUpSDK.init(context.applicationContext, "aeria-nexus") { codigo, mensaje ->
-            Log.i(TAG, "    init -> codigo=$codigo mensaje=$mensaje")
-        }
+        GafasSdkPuente.iniciarSdk(context)
 
-        // Las gafas NO se anuncian por BLE: comprobado con escaneo propio en
-        // LOW_LATENCY y con legacy=false, con el audio conectado y sin el. El
-        // escaneo del SDK no puede encontrarlas nunca. Pero estan emparejadas y
-        // una conexion GATT dirigida funciona en 30 ms, asi que el aparato se le
-        // entrega hecho en vez de dejar que lo busque.
-        val aparato = registrarAparatoEmparejado(context, macEsperada)
+        // Las gafas NO se anuncian por BLE, asi que el aparato se le entrega hecho
+        // en vez de dejar que el SDK lo busque. Ver GafasSdkPuente.
+        val aparato = GafasSdkPuente.aparatoEmparejado(context)
         if (aparato == null) {
             enMarcha = false
             return
@@ -120,63 +112,12 @@ object GafasApPrueba {
             }
         })
 
-        Log.i(TAG, "2/4 conectando GATT con ${aparato.name} ($macEsperada), sin escanear")
+        Log.i(TAG, "2/4 conectando GATT con ${aparato.name} (${aparato.address}), sin escanear")
         BleeqUpDeviceManager.connect(aparato, ESPERA_MS) { ok ->
             // Aqui solo se sabe si el GATT se abrio. La orden se manda en
             // onReady, no aqui: CONNECTED todavia no acepta comandos.
             Log.i(TAG, "    connect -> $ok")
             if (!ok) enMarcha = false
-        }
-    }
-
-    /**
-     * Construye el [BleeqUpDevice] del aparato ya emparejado y lo mete en el
-     * registro interno del SDK, que normalmente solo llena el escaneo.
-     *
-     * Va por reflexion y no por gusto: las dos piezas que hacen falta son
-     * `internal` de Kotlin (`initializeName`, con el sufijo del modulo) y un
-     * accesor sintetico que genera R8 (`access$getDevices$p`). Ninguna se puede
-     * nombrar desde Kotlin, y el SDK no ofrece otra puerta.
-     *
-     * **Es fragil a proposito y lo dice el log**: si el fabricante recompila el
-     * AAR, estos dos nombres pueden cambiar y esto deja de funcionar de golpe. La
-     * salida limpia es pedirles un `connect(mac)` que no pase por el escaneo; la
-     * pregunta ya se puede hacer con el dato en la mano.
-     */
-    private fun registrarAparatoEmparejado(context: Context, mac: String): BleeqUpDevice? {
-        if (mac.isEmpty()) {
-            Log.e(TAG, "GAFAS_MAC vacia en local.properties")
-            return null
-        }
-        val bt = context.getSystemService(android.bluetooth.BluetoothManager::class.java)
-        val remoto = runCatching { bt.adapter.getRemoteDevice(mac) }.getOrNull()
-        if (remoto == null) {
-            Log.e(TAG, "No hay aparato con MAC $mac")
-            return null
-        }
-        return try {
-            // El constructor tambien es internal; en el .class es publico.
-            val aparato = BleeqUpDevice::class.java.getDeclaredConstructor(
-                android.bluetooth.BluetoothDevice::class.java,
-                android.bluetooth.BluetoothGatt::class.java,
-                Int::class.javaPrimitiveType,
-                String::class.java,
-            ).apply { isAccessible = true }.newInstance(remoto, null, 0, "")
-            BleeqUpDevice::class.java
-                .getMethod("initializeName\$bleequplibrary_release", Context::class.java)
-                .invoke(aparato, context)
-            val accesor = BleeqUpDeviceManager::class.java
-                .getDeclaredMethod("access\$getDevices\$p")
-                .apply { isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            val registro = accesor.invoke(null) as MutableMap<String, BleeqUpDevice>
-            registro[aparato.address] = aparato
-            Log.i(TAG, "    registrado '${aparato.name}' bond=${aparato.bondState} sin escanear")
-            aparato
-        } catch (e: Exception) {
-            // Si esto salta, el AAR cambio de nombres internos. No se disimula.
-            Log.e(TAG, "El puente por reflexion con el SDK ya no vale: ${e.message}", e)
-            null
         }
     }
 

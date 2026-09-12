@@ -23,6 +23,8 @@ import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderViewMode
 import com.delta.aeria_nexus_prototype.feature.bodycam.ViewfinderMode
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportScreen
 import com.delta.aeria_nexus_prototype.feature.draftreport.DraftReportViewModel
+import com.delta.aeria_nexus_prototype.feature.gafas.GafasControlScreen
+import com.delta.aeria_nexus_prototype.feature.gafas.GafasControlViewModel
 import com.delta.aeria_nexus_prototype.feature.incidentdetail.IncidentDetailScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListViewModel
@@ -68,6 +70,8 @@ object Routes {
     const val BODYCAM_VIEWFINDER = "bodycam/viewfinder"
     // Monitor de la grabacion en curso de la bodycam (misma pantalla, modo REC).
     const val BODYCAM_REC_MONITOR = "bodycam/recording"
+    // Mando a distancia de las gafas BleeqUp (grabacion y foto por BLE).
+    const val GAFAS = "gafas"
 
     fun livestream(uid: Int) = "livestream/$uid"
     fun mapFocusedAt(latitude: Double, longitude: Double) = "map?focusLat=$latitude&focusLng=$longitude"
@@ -125,6 +129,7 @@ fun AppNavHost() {
                     navController.navigate(Routes.livestream(LivestreamViewModel.OWN_CAMERA_UID))
                 },
                 onOpenBodycamControl = { navController.navigate(Routes.BODYCAM) },
+                onOpenLensControl = { navController.navigate(Routes.GAFAS) },
                 onTabSelected = onTabSelected,
             )
         }
@@ -137,6 +142,19 @@ fun AppNavHost() {
                 },
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
                 onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },
+                onBack = { navController.popBackStack() },
+                onTabSelected = onTabSelected,
+            )
+        }
+
+        composable(Routes.GAFAS) {
+            GafasControlScreen(
+                viewModel = viewModel {
+                    GafasControlViewModel(
+                        AppContainer.gafasCommandRepository,
+                        AppContainer.gafasRepository,
+                    )
+                },
                 onBack = { navController.popBackStack() },
                 onTabSelected = onTabSelected,
             )
