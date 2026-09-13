@@ -182,7 +182,7 @@ private fun StatusBar(
         // eyeglasses_2 de Material Symbols importado en drawable.
         DeviceIndicator(
             icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
-            description = "Falcon Lens (gafas)",
+            description = "FalconOne glasses",
             tint = gafasStateColor(gafasState),
             onClick = onOpenLens,
         )

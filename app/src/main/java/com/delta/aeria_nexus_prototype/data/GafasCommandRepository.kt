@@ -162,12 +162,12 @@ class GafasCommandRepository(private val context: Context) {
                     // Este nombre es el bueno. El que devuelve stopRecord NO EXISTE
                     // en la tarjeta: comprobado contra el listado por WiFi, 3 de 3.
                     _videosCerrados.tryEmit(info)
-                    _mensajes.tryEmit("Video on the glasses: $info")
+                    _mensajes.tryEmit("Video on the FalconOne: $info")
                 }
 
                 override fun onPhotoInfo(info: String) {
                     Log.i(TAG, "aviso de foto: $info")
-                    _mensajes.tryEmit("Photo on the glasses: $info")
+                    _mensajes.tryEmit("Photo on the FalconOne: $info")
                 }
             },
         )
@@ -201,9 +201,9 @@ class GafasCommandRepository(private val context: Context) {
                     _grabando.value = grabandoAhora
                     _mensajes.tryEmit(
                         if (grabandoAhora) {
-                            "Recording started from the glasses"
+                            "Recording started from the FalconOne"
                         } else {
-                            "Recording stopped from the glasses"
+                            "Recording stopped from the FalconOne"
                         },
                     )
                 }
@@ -299,7 +299,7 @@ class GafasCommandRepository(private val context: Context) {
             // Aqui solo se sabe si el GATT se abrio; las ordenes esperan a READY.
             if (!abierto) {
                 _estado.value = GafasControlState.ERROR
-                _mensajes.tryEmit("The glasses are not responding")
+                _mensajes.tryEmit("The FalconOne is not responding")
             }
         }
     }
@@ -350,14 +350,14 @@ class GafasCommandRepository(private val context: Context) {
             Log.i(TAG, "startRecord -> ok=$ok $mensaje")
             if (!yaRespondio.compareAndSet(false, true)) return@startRecord
             if (ok) _grabando.value = true
-            _mensajes.tryEmit(if (ok) "Recording on the glasses" else "Did not start: $mensaje")
+            _mensajes.tryEmit(if (ok) "Recording on the FalconOne" else "Did not start: $mensaje")
             alTerminar?.invoke(ok)
         }
         alcance.launch {
             delay(ESPERA_DE_ORDEN_MILLIS)
             if (!yaRespondio.compareAndSet(false, true)) return@launch
             Log.e(TAG, "startRecord no contesto en $ESPERA_DE_ORDEN_MILLIS ms: se da por fallido")
-            _mensajes.tryEmit("The glasses did not answer")
+            _mensajes.tryEmit("The FalconOne did not answer")
             // El canal esta en mal estado aunque diga LISTO: soltarlo hace que el
             // bucle lo rehaga, en vez de dejarlo roto hasta la siguiente grabacion.
             desconectar()
@@ -423,7 +423,7 @@ class GafasCommandRepository(private val context: Context) {
     private fun listasParaOrdenes(): BleeqUpDevice? {
         val device = aparato
         if (device == null || _estado.value != GafasControlState.LISTO) {
-            _mensajes.tryEmit("The glasses are not connected")
+            _mensajes.tryEmit("The FalconOne is not connected")
             return null
         }
         return device

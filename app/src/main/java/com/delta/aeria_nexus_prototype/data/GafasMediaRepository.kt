@@ -326,19 +326,19 @@ class GafasMediaRepository(
      */
     suspend fun descargar(archivo: ArchivoEnGafas): ResultadoDescarga =
         withContext(Dispatchers.IO) {
-            if (red == null) return@withContext ResultadoDescarga.Fallo("No connection to the glasses")
+            if (red == null) return@withContext ResultadoDescarga.Fallo("No connection to the FalconOne")
             val destino = evidencia.createGafasVideoTarget(extension(archivo.nombre))
                 ?: return@withContext ResultadoDescarga.Fallo("No private folder to download into")
 
             val ip = pasarela
-                ?: return@withContext ResultadoDescarga.Fallo("The glasses access point gave no route")
+                ?: return@withContext ResultadoDescarga.Fallo("The FalconOne access point gave no route")
             val conexion = abrirSeguro(URL(archivo.rutaDeDescarga(ip)))
                 ?: return@withContext ResultadoDescarga.Fallo("Could not open ${archivo.nombre}")
             try {
                 val codigo = conexion.responseCode
                 if (codigo !in 200..299) {
                     evidencia.discard(destino)
-                    return@withContext ResultadoDescarga.Fallo("The glasses answered $codigo")
+                    return@withContext ResultadoDescarga.Fallo("The FalconOne answered $codigo")
                 }
                 conexion.inputStream.use { entrada ->
                     destino.file.outputStream().use { salida -> entrada.copyTo(salida, COPIA) }

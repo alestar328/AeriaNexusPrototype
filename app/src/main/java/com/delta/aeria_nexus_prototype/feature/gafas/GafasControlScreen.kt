@@ -141,7 +141,7 @@ private fun GafasControlContent(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 DeviceActionButton(
                     label = "PHOTO",
-                    sublabel = "Saved on the glasses",
+                    sublabel = "Saved on the FalconOne",
                     icon = Icons.Filled.CameraAlt,
                     accentColor = AzulClaro,
                     onClick = onHacerFoto,
@@ -201,7 +201,7 @@ private fun TarjetaDePendientes(
             if (pendientes > 0 && descarga !is EstadoDescarga.Trayendo) {
                 DeviceActionButton(
                     label = "RETRIEVE TO PHONE",
-                    sublabel = "Turns on the glasses Wi-Fi",
+                    sublabel = "Turns on the FalconOne Wi-Fi",
                     icon = Icons.Filled.CloudDownload,
                     accentColor = if (puedeTraer) AzulPrimario else TextoTerciario,
                     onClick = { if (puedeTraer) onTraerVideos() },
@@ -215,13 +215,13 @@ private fun TarjetaDePendientes(
 private fun textoDeDescarga(descarga: EstadoDescarga, puedeTraer: Boolean): String = when (descarga) {
     is EstadoDescarga.Parada ->
         if (puedeTraer) {
-            "They are on the glasses card. Encrypted on arrival in the vault."
+            "They are on the FalconOne card. Encrypted on arrival in the vault."
         } else {
             "Please wait: cannot retrieve while recording."
         }
 
-    is EstadoDescarga.EncendiendoWifi -> "Turning on the glasses Wi-Fi..."
-    is EstadoDescarga.Uniendose -> "Joining the glasses Wi-Fi..."
+    is EstadoDescarga.EncendiendoWifi -> "Turning on the FalconOne Wi-Fi..."
+    is EstadoDescarga.Uniendose -> "Joining the FalconOne Wi-Fi..."
     is EstadoDescarga.Trayendo ->
         "Retrieving ${descarga.hecho + 1} of ${descarga.total}: ${descarga.nombre}"
 
@@ -254,16 +254,11 @@ private fun Cabecera(onBack: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column {
             Text(
-                text = "FALCON LENS",
+                text = "FALCON ONE",
                 color = Color.White,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 2.sp,
-            )
-            Text(
-                text = "BleeqUp Ranger glasses — remote control",
-                color = TextoTerciario,
-                fontSize = 12.sp,
             )
         }
     }
@@ -280,7 +275,7 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
         GafasControlState.LISTO -> VerdeOk to "CONTROL READY"
         GafasControlState.CONECTANDO -> AmarilloAviso to "CONNECTING…"
         GafasControlState.ERROR -> RojoCritico to "NO CONTROL"
-        GafasControlState.DESCONECTADO -> TextoTerciario to "DESCONECTADO"
+        GafasControlState.DESCONECTADO -> TextoTerciario to "DISCONNECTED"
     }
 
     CardSurface(modifier = Modifier.fillMaxWidth()) {
@@ -302,7 +297,7 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
                 Spacer(Modifier.weight(1f))
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
-                    contentDescription = "Glasses Bluetooth link",
+                    contentDescription = "FalconOne Bluetooth link",
                     tint = if (uiState.enlace == GafasState.CONNECTED) VerdeOk else TextoTerciario,
                     modifier = Modifier.size(18.dp),
                 )
@@ -356,12 +351,12 @@ private fun PanelSinMando(uiState: GafasControlUiState, onReintentar: () -> Unit
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = when {
-                conectando -> "Opening the control channel with the glasses…"
+                conectando -> "Opening the control channel with the FalconOne…"
                 uiState.enlace != GafasState.CONNECTED ->
-                    "The glasses are not linked to the phone. Put them on, turn them on " +
-                        "and wait for them to connect on their own."
+                    "The FalconOne glasses are not linked to the phone. Put them on, turn " +
+                        "them on and wait for them to connect on their own."
                 uiState.control == GafasControlState.ERROR ->
-                    "The glasses are linked but not answering commands. " +
+                    "The FalconOne glasses are linked but not answering commands. " +
                         "Turn them off and on again before retrying."
                 else -> "Connect to record and take photos from this phone."
             },
@@ -382,7 +377,7 @@ private fun PanelSinMando(uiState: GafasControlUiState, onReintentar: () -> Unit
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = if (conectando) "CONNECTING…" else "CONNECT GLASSES",
+                text = if (conectando) "CONNECTING…" else "CONNECT FALCONONE",
                 color = Color.White,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.Black,

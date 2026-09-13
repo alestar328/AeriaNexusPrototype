@@ -40,17 +40,17 @@ class AvisoDeGafas(private val context: Context) {
         // evidencia sin recoger.
         crearCanal(
             id = CANAL,
-            nombre = "Glasses video",
+            nombre = "FalconOne video",
             importancia = NotificationManager.IMPORTANCE_HIGH,
         )
 
         val texto = if (cuantos == 1) {
-            "1 video on the glasses still to retrieve. Downloads over their Wi-Fi."
+            "1 video on the FalconOne still to retrieve. Downloads over its Wi-Fi."
         } else {
-            "$cuantos videos on the glasses still to retrieve. Download over their Wi-Fi."
+            "$cuantos videos on the FalconOne still to retrieve. Download over its Wi-Fi."
         }
         val aviso = Notification.Builder(context, CANAL)
-            .setContentTitle("Glasses video pending")
+            .setContentTitle("FalconOne video pending")
             .setContentText(texto)
             .setStyle(Notification.BigTextStyle().bigText(texto))
             .setSmallIcon(R.drawable.ic_launcher_foreground)
@@ -84,14 +84,14 @@ class AvisoDeGafas(private val context: Context) {
         // grabando. Desde Android O eso lo manda el CANAL, no la notificacion.
         crearCanal(
             id = CANAL_SIN_GAFAS,
-            nombre = "SOS without glasses",
+            nombre = "SOS without FalconOne",
             importancia = NotificationManager.IMPORTANCE_HIGH,
             vibra = true,
         )
-        val texto = "The SOS is running but the glasses are NOT recording. " +
-            "Check that they are switched on and linked."
+        val texto = "The SOS is running but the FalconOne is NOT recording. " +
+            "Check that it is switched on and linked."
         val aviso = Notification.Builder(context, CANAL_SIN_GAFAS)
-            .setContentTitle("SOS without glasses")
+            .setContentTitle("SOS without FalconOne")
             .setContentText(texto)
             .setStyle(Notification.BigTextStyle().bigText(texto))
             .setSmallIcon(R.drawable.ic_launcher_foreground)

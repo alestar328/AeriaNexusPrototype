@@ -4,6 +4,7 @@ import android.util.Log
 import com.bleequp.bleequplibrary.BleeqUpWifiManager
 import com.delta.aeria_nexus_prototype.BuildConfig
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -81,7 +82,7 @@ class DescargaDeGafas(
             // [paisParaElPuntoDeAcceso]. Decirlo evita que alguien pierda una
             // tarde revisando el Bluetooth.
             _estado.value = EstadoDescarga.Fallo(
-                "The glasses did not turn on their Wi-Fi. Their only channel (149, 5.8 GHz) is " +
+                "The FalconOne did not turn on its Wi-Fi. Its only channel (149, 5.8 GHz) is " +
                     "not allowed with the phone country set to ${java.util.Locale.getDefault().country}.",
             )
             return
@@ -90,10 +91,19 @@ class DescargaDeGafas(
         try {
             _estado.value = EstadoDescarga.Uniendose
             if (!media.conectar(credenciales.ssid, credenciales.clave)) {
-                _estado.value = EstadoDescarga.Fallo("The phone could not join the glasses Wi-Fi")
+                _estado.value = EstadoDescarga.Fallo("The phone could not join the FalconOne Wi-Fi")
                 return
             }
-            traer(queFaltan)
+            // Ultimo cinturon: si el AP se va sin cerrar el socket, la lectura se
+            // queda bloqueada y ni siquiera salta el timeout de la conexion. Sin
+            // esto la pantalla se quedaba en "Retrieving" para siempre.
+            val termino = withTimeoutOrNull(TOPE_DE_LA_TANDA_MILLIS) { traer(queFaltan) }
+            if (termino == null) {
+                Log.e(TAG, "la tanda supero el tope de $TOPE_DE_LA_TANDA_MILLIS ms")
+                _estado.value = EstadoDescarga.Fallo(
+                    "The download timed out. Check the FalconOne and try again.",
+                )
+            }
         } finally {
             // Soltar la red no es opcional: la peticion retiene el WiFi del
             // telefono en un AP sin internet mientras viva.
@@ -105,7 +115,7 @@ class DescargaDeGafas(
     private suspend fun traer(queFaltan: List<String>) {
         val enLasGafas = media.listar()
         if (enLasGafas.isEmpty()) {
-            _estado.value = EstadoDescarga.Fallo("The glasses returned no files")
+            _estado.value = EstadoDescarga.Fallo("The FalconOne returned no files")
             return
         }
         // Solo lo pendiente: en la tarjeta hay decenas de ficheros viejos que no
@@ -124,6 +134,16 @@ class DescargaDeGafas(
         var fallados = 0
         aTraer.forEachIndexed { indice, archivo ->
             _estado.value = EstadoDescarga.Trayendo(archivo.nombre, indice, aTraer.size)
+            // Si el AP se cae a media tanda no tiene sentido seguir pidiendo
+            // ficheros: cada uno esperaria su propio timeout y la pantalla se
+            // quedaria en "Retrieving" durante minutos.
+            if (!media.conectado) {
+                Log.e(TAG, "se perdio el WiFi de las gafas a media descarga")
+                _estado.value = EstadoDescarga.Fallo(
+                    "Lost the FalconOne Wi-Fi. $traidos retrieved, ${aTraer.size - traidos} pending.",
+                )
+                return
+            }
             when (val resultado = media.descargar(archivo)) {
                 is ResultadoDescarga.Cifrada -> {
                     // Se quita SOLO cuando ya esta cifrado en la boveda: si se
@@ -230,4 +250,13 @@ private fun GafasCommandRepository.apagarPuntoDeAcceso() {
 
 /** Lo que tarda el aparato en levantar su punto de acceso. */
 private const val ESPERA_DEL_AP_MILLIS = 20_000L
+
+/**
+ * Tope de una tanda entera de descarga.
+ *
+ * Generoso a proposito: un video de 5 minutos son ~450 MB por WiFi de las gafas.
+ * No esta para acelerar nada, sino para que la pantalla no se quede en "Retrieving"
+ * indefinidamente el dia que el punto de acceso se caiga sin cerrar el socket.
+ */
+private const val TOPE_DE_LA_TANDA_MILLIS = 10 * 60 * 1000L
 private const val PASO_MILLIS = 250L
