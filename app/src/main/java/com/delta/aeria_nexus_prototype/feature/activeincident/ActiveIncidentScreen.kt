@@ -63,7 +63,6 @@ import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel.Companion.formatSeconds
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.components.TextBadge
 import com.delta.aeria_nexus_prototype.ui.components.VideoEvidenceCard
@@ -93,7 +92,6 @@ fun ActiveIncidentScreen(
     onBackToOperations: () -> Unit,
     onIncidentEnded: () -> Unit,
     onOpenSosLivestream: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val incidente by viewModel.activeIncident.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -158,109 +156,102 @@ fun ActiveIncidentScreen(
         return
     }
 
-    AppScaffold(
-        currentTab = null,
-        onTabSelected = onTabSelected,
-        isRecording = incidente?.isRecording == true,
-        showNav = false,
-    ) { innerPadding ->
-        val actual = incidente
-        if (actual == null) {
-            // Tras cerrar el incidente tambien se queda a null, y ahi el aviso
-            // seria un parpadeo justo antes de que la navegacion se lleve la
-            // pantalla: solo se muestra si de verdad no habia nada que atender.
-            if (!uiState.incidentEnded) {
-                NoActiveIncidentMessage(
-                    modifier = Modifier.padding(innerPadding),
-                    onBack = onBackToOperations,
-                )
-            }
-            return@AppScaffold
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState()),
-        ) {
-            ActiveHeader(
-                incident = actual,
-                incidentSeconds = uiState.incidentSeconds,
+    val actual = incidente
+    if (actual == null) {
+        // Tras cerrar el incidente tambien se queda a null, y ahi el aviso
+        // seria un parpadeo justo antes de que la navegacion se lleve la
+        // pantalla: solo se muestra si de verdad no habia nada que atender.
+        if (!uiState.incidentEnded) {
+            NoActiveIncidentMessage(
+                modifier = Modifier,
                 onBack = onBackToOperations,
             )
+        }
+        return
+    }
 
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                val ultimoVideo = actual.evidence.lastOrNull { it.type == EvidenceType.VIDEO }
-                if (actual.isRecording || ultimoVideo != null) {
-                    VideoEvidenceCard(
-                        isRecording = actual.isRecording,
-                        isSealed = actual.reportSubmitted && ultimoVideo != null,
-                        sealedLabel = "SEALED",
-                        footerText = if (actual.isRecording) {
-                            "Encrypted capture in progress"
-                        } else {
-                            ultimoVideo?.hash ?: "Encrypted"
-                        },
-                        devices = (ultimoVideo?.device ?: "FC + FL + AN").split(" + "),
-                        durationText = if (actual.isRecording) {
-                            formatSeconds(uiState.recordingSeconds)
-                        } else {
-                            ultimoVideo?.duration
-                        },
-                    )
-                }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        ActiveHeader(
+            incident = actual,
+            incidentSeconds = uiState.incidentSeconds,
+            onBack = onBackToOperations,
+        )
 
-                CountersCard(evidenceCount = actual.evidenceCount, witnessCount = actual.witnessCount)
-
-                ActionGrid(
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            val ultimoVideo = actual.evidence.lastOrNull { it.type == EvidenceType.VIDEO }
+            if (actual.isRecording || ultimoVideo != null) {
+                VideoEvidenceCard(
                     isRecording = actual.isRecording,
-                    recordingSeconds = uiState.recordingSeconds,
-                    isAudioRecording = uiState.isAudioRecording,
-                    audioSeconds = uiState.audioSeconds,
-                    // Sin bodycam, video y foto se capturan con el telefono;
-                    // con bodycam, los comandos Bluetooth disparan su camara.
-                    onRecord = {
-                        if (viewModel.usesPhoneCapture) {
-                            videoPermissionLauncher.launch(
-                                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
-                            )
-                        } else {
-                            viewModel.toggleRecording()
-                        }
+                    isSealed = actual.reportSubmitted && ultimoVideo != null,
+                    sealedLabel = "SEALED",
+                    footerText = if (actual.isRecording) {
+                        "Encrypted capture in progress"
+                    } else {
+                        ultimoVideo?.hash ?: "Encrypted"
                     },
-                    onPhoto = {
-                        if (viewModel.usesPhoneCapture) {
-                            photoPermissionLauncher.launch(capturePermissions(Manifest.permission.CAMERA))
-                        } else {
-                            viewModel.capturePhoto()
-                        }
+                    devices = (ultimoVideo?.device ?: "FC + FL + AN").split(" + "),
+                    durationText = if (actual.isRecording) {
+                        formatSeconds(uiState.recordingSeconds)
+                    } else {
+                        ultimoVideo?.duration
                     },
-                    onAudio = {
-                        if (uiState.isAudioRecording) {
-                            viewModel.toggleAudioNote()
-                        } else {
-                            audioPermissionLauncher.launch(capturePermissions(Manifest.permission.RECORD_AUDIO))
-                        }
-                    },
-                    onWitness = viewModel::generateWitnessQr,
                 )
-
-                if (actual.evidence.isNotEmpty()) {
-                    EvidenceListCard(actual.evidence)
-                }
-
-                if (actual.timeline.isNotEmpty()) {
-                    TimelineListCard(actual)
-                }
-
-                EndIncidentButton(onClick = viewModel::endIncident)
             }
+
+            CountersCard(evidenceCount = actual.evidenceCount, witnessCount = actual.witnessCount)
+
+            ActionGrid(
+                isRecording = actual.isRecording,
+                recordingSeconds = uiState.recordingSeconds,
+                isAudioRecording = uiState.isAudioRecording,
+                audioSeconds = uiState.audioSeconds,
+                // Sin bodycam, video y foto se capturan con el telefono;
+                // con bodycam, los comandos Bluetooth disparan su camara.
+                onRecord = {
+                    if (viewModel.usesPhoneCapture) {
+                        videoPermissionLauncher.launch(
+                            arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+                        )
+                    } else {
+                        viewModel.toggleRecording()
+                    }
+                },
+                onPhoto = {
+                    if (viewModel.usesPhoneCapture) {
+                        photoPermissionLauncher.launch(capturePermissions(Manifest.permission.CAMERA))
+                    } else {
+                        viewModel.capturePhoto()
+                    }
+                },
+                onAudio = {
+                    if (uiState.isAudioRecording) {
+                        viewModel.toggleAudioNote()
+                    } else {
+                        audioPermissionLauncher.launch(capturePermissions(Manifest.permission.RECORD_AUDIO))
+                    }
+                },
+                onWitness = viewModel::generateWitnessQr,
+            )
+
+            if (actual.evidence.isNotEmpty()) {
+                EvidenceListCard(actual.evidence)
+            }
+
+            if (actual.timeline.isNotEmpty()) {
+                TimelineListCard(actual)
+            }
+
+            EndIncidentButton(onClick = viewModel::endIncident)
         }
     }
+
 
     if (uiState.pendingEvidence != null) {
         ClassifySheet(

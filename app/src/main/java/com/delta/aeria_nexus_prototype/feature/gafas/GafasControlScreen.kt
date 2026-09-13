@@ -50,7 +50,6 @@ import com.delta.aeria_nexus_prototype.data.GafasState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.DeviceActionButton
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulOscuroPanel
@@ -72,7 +71,6 @@ import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 fun GafasControlScreen(
     viewModel: GafasControlViewModel,
     onBack: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -91,23 +89,17 @@ fun GafasControlScreen(
         }
     }
 
-    AppScaffold(
-        currentTab = null,
-        onTabSelected = onTabSelected,
-        isRecording = uiState.grabando,
-        showNav = false,
-    ) { innerPadding ->
-        GafasControlContent(
-            uiState = uiState,
-            onBack = onBack,
-            onReintentar = viewModel::conectar,
-            onDesconectar = viewModel::desconectar,
-            onAlternarGrabacion = viewModel::alternarGrabacion,
-            onHacerFoto = viewModel::hacerFoto,
-            onTraerVideos = viewModel::traerVideos,
-            modifier = Modifier.padding(innerPadding),
-        )
-    }
+    GafasControlContent(
+        uiState = uiState,
+        onBack = onBack,
+        onReintentar = viewModel::conectar,
+        onDesconectar = viewModel::desconectar,
+        onAlternarGrabacion = viewModel::alternarGrabacion,
+        onHacerFoto = viewModel::hacerFoto,
+        onTraerVideos = viewModel::traerVideos,
+        modifier = Modifier,
+    )
+
 }
 
 @Composable
@@ -148,19 +140,19 @@ private fun GafasControlContent(
         if (uiState.control == GafasControlState.LISTO) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 DeviceActionButton(
-                    label = "FOTO",
-                    sublabel = "Se guarda en las gafas",
+                    label = "PHOTO",
+                    sublabel = "Saved on the glasses",
                     icon = Icons.Filled.CameraAlt,
                     accentColor = AzulClaro,
                     onClick = onHacerFoto,
                     modifier = Modifier.weight(1f),
                 )
                 DeviceActionButton(
-                    label = if (uiState.grabando) "PARAR" else "GRABAR",
+                    label = if (uiState.grabando) "STOP" else "RECORD",
                     sublabel = if (uiState.grabando) {
-                        "Sin descargas mientras graba"
+                        "No downloads while recording"
                     } else {
-                        "Local, sin aviso a nadie"
+                        "Local only, no alert"
                     },
                     icon = Icons.Filled.Videocam,
                     accentColor = if (uiState.grabando) RojoCritico else VerdeOk,
@@ -196,7 +188,7 @@ private fun TarjetaDePendientes(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = if (pendientes == 1) "1 VIDEO SIN TRAER" else "$pendientes VIDEOS SIN TRAER",
+                text = if (pendientes == 1) "1 VIDEO TO RETRIEVE" else "$pendientes VIDEOS TO RETRIEVE",
                 color = AmarilloAviso,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
@@ -208,8 +200,8 @@ private fun TarjetaDePendientes(
             )
             if (pendientes > 0 && descarga !is EstadoDescarga.Trayendo) {
                 DeviceActionButton(
-                    label = "TRAER AL TELEFONO",
-                    sublabel = "Enciende el WiFi de las gafas",
+                    label = "RETRIEVE TO PHONE",
+                    sublabel = "Turns on the glasses Wi-Fi",
                     icon = Icons.Filled.CloudDownload,
                     accentColor = if (puedeTraer) AzulPrimario else TextoTerciario,
                     onClick = { if (puedeTraer) onTraerVideos() },
@@ -223,20 +215,20 @@ private fun TarjetaDePendientes(
 private fun textoDeDescarga(descarga: EstadoDescarga, puedeTraer: Boolean): String = when (descarga) {
     is EstadoDescarga.Parada ->
         if (puedeTraer) {
-            "Estan en la tarjeta de las gafas, cifrados al llegar a la boveda."
+            "They are on the glasses card. Encrypted on arrival in the vault."
         } else {
-            "Hay que esperar: no se puede traer mientras se graba."
+            "Please wait: cannot retrieve while recording."
         }
 
-    is EstadoDescarga.EncendiendoWifi -> "Encendiendo el WiFi de las gafas..."
-    is EstadoDescarga.Uniendose -> "Uniendo el telefono al WiFi de las gafas..."
+    is EstadoDescarga.EncendiendoWifi -> "Turning on the glasses Wi-Fi..."
+    is EstadoDescarga.Uniendose -> "Joining the glasses Wi-Fi..."
     is EstadoDescarga.Trayendo ->
-        "Trayendo ${descarga.hecho + 1} de ${descarga.total}: ${descarga.nombre}"
+        "Retrieving ${descarga.hecho + 1} of ${descarga.total}: ${descarga.nombre}"
 
     is EstadoDescarga.Terminada -> if (descarga.fallados == 0) {
-        "Listo: ${descarga.traidos} en la boveda, sin categorizar."
+        "Done: ${descarga.traidos} in the vault, uncategorized."
     } else {
-        "${descarga.traidos} en la boveda y ${descarga.fallados} sin traer. Vuelve a intentarlo."
+        "${descarga.traidos} in the vault, ${descarga.fallados} not retrieved. Try again."
     }
 
     is EstadoDescarga.Fallo -> descarga.motivo
@@ -269,7 +261,7 @@ private fun Cabecera(onBack: () -> Unit) {
                 letterSpacing = 2.sp,
             )
             Text(
-                text = "Gafas BleeqUp Ranger — mando a distancia",
+                text = "BleeqUp Ranger glasses — remote control",
                 color = TextoTerciario,
                 fontSize = 12.sp,
             )
@@ -285,9 +277,9 @@ private fun Cabecera(onBack: () -> Unit) {
 @Composable
 private fun TarjetaDeEstado(uiState: GafasControlUiState) {
     val (colorMando, textoMando) = when (uiState.control) {
-        GafasControlState.LISTO -> VerdeOk to "MANDO LISTO"
-        GafasControlState.CONECTANDO -> AmarilloAviso to "CONECTANDO…"
-        GafasControlState.ERROR -> RojoCritico to "SIN MANDO"
+        GafasControlState.LISTO -> VerdeOk to "CONTROL READY"
+        GafasControlState.CONECTANDO -> AmarilloAviso to "CONNECTING…"
+        GafasControlState.ERROR -> RojoCritico to "NO CONTROL"
         GafasControlState.DESCONECTADO -> TextoTerciario to "DESCONECTADO"
     }
 
@@ -310,7 +302,7 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
                 Spacer(Modifier.weight(1f))
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
-                    contentDescription = "Enlace Bluetooth de las gafas",
+                    contentDescription = "Glasses Bluetooth link",
                     tint = if (uiState.enlace == GafasState.CONNECTED) VerdeOk else TextoTerciario,
                     modifier = Modifier.size(18.dp),
                 )
@@ -320,7 +312,7 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
                 Text(
                     text = listOfNotNull(
                         uiState.resolucion?.let { "Video $it" },
-                        uiState.espacioLibre?.let { "$it libres" },
+                        uiState.espacioLibre?.let { "$it free" },
                     ).joinToString("  ·  "),
                     color = TextoSecundario,
                     fontSize = 13.sp,
@@ -332,8 +324,8 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
                 // ultima orden dada, y el boton fisico de las gafas la puede
                 // haber cambiado sin que la app se entere. Se dice, no se oculta.
                 Text(
-                    text = "Grabando desde esta app. Si se usa el boton de las gafas, " +
-                        "el telefono no se entera.",
+                    text = "Recording. The phone also tracks the glasses' own " +
+                        "button, so this stays in sync.",
                     color = AmarilloAviso,
                     fontSize = 12.sp,
                 )
@@ -364,14 +356,14 @@ private fun PanelSinMando(uiState: GafasControlUiState, onReintentar: () -> Unit
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = when {
-                conectando -> "Abriendo el canal de mando con las gafas…"
+                conectando -> "Opening the control channel with the glasses…"
                 uiState.enlace != GafasState.CONNECTED ->
-                    "Las gafas no estan enlazadas con el telefono. Ponselas, enciendelas " +
-                        "y espera a que se conecten solas."
+                    "The glasses are not linked to the phone. Put them on, turn them on " +
+                        "and wait for them to connect on their own."
                 uiState.control == GafasControlState.ERROR ->
-                    "Las gafas estan enlazadas pero no responden a las ordenes. " +
-                        "Apagalas y vuelve a encenderlas antes de reintentar."
-                else -> "Conecta para grabar y hacer fotos desde este telefono."
+                    "The glasses are linked but not answering commands. " +
+                        "Turn them off and on again before retrying."
+                else -> "Connect to record and take photos from this phone."
             },
             color = TextoSecundario,
             fontSize = 14.sp,
@@ -390,7 +382,7 @@ private fun PanelSinMando(uiState: GafasControlUiState, onReintentar: () -> Unit
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = if (conectando) "CONECTANDO…" else "CONECTAR GAFAS",
+                text = if (conectando) "CONNECTING…" else "CONNECT GLASSES",
                 color = Color.White,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.Black,
@@ -411,7 +403,7 @@ private fun BotonDesconectar(onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "SOLTAR EL MANDO",
+            text = "RELEASE CONTROL",
             color = TextoSecundario,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,

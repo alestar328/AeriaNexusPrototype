@@ -200,7 +200,7 @@ private fun StopRecordingButton(onClick: () -> Unit) {
     ) {
         Icon(
             Icons.Filled.Stop,
-            contentDescription = "Detener grabacion",
+            contentDescription = "Stop recording",
             tint = Color.White,
             modifier = Modifier.size(34.dp),
         )
@@ -221,7 +221,7 @@ private fun CaptureButton(onClick: () -> Unit) {
     ) {
         Icon(
             Icons.Filled.CameraAlt,
-            contentDescription = "Capturar foto",
+            contentDescription = "Take photo",
             tint = Color.White,
             modifier = Modifier.size(34.dp),
         )

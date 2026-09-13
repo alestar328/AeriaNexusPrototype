@@ -53,7 +53,6 @@ import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.EvidenceMediaPreview
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
 import com.delta.aeria_nexus_prototype.ui.theme.BordeSutil
@@ -76,51 +75,48 @@ import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 fun VaultScreen(
     viewModel: VaultViewModel,
     onBack: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    AppScaffold(currentTab = null, onTabSelected = onTabSelected, showNav = false) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            VaultHeader(
-                desbloqueada = uiState.desbloqueada,
-                onBack = onBack,
-                onBloquear = viewModel::bloquear,
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        VaultHeader(
+            desbloqueada = uiState.desbloqueada,
+            onBack = onBack,
+            onBloquear = viewModel::bloquear,
+        )
+        when {
+            !uiState.configurada -> PasswordForm(
+                descripcion = "Create the password that will protect the evidence " +
+                    "captured with this phone. It is never stored: if you forget it, " +
+                    "the evidence can only be recovered from Nexus.",
+                accion = "CREATE VAULT",
+                conConfirmacion = true,
+                trabajando = uiState.trabajando,
+                mensajeError = uiState.mensajeError,
+                onConfirmar = viewModel::crearBoveda,
             )
-            when {
-                !uiState.configurada -> PasswordForm(
-                    descripcion = "Create the password that will protect the evidence " +
-                        "captured with this phone. It is never stored: if you forget it, " +
-                        "the evidence can only be recovered from Nexus.",
-                    accion = "CREATE VAULT",
-                    conConfirmacion = true,
-                    trabajando = uiState.trabajando,
-                    mensajeError = uiState.mensajeError,
-                    onConfirmar = viewModel::crearBoveda,
-                )
 
-                !uiState.desbloqueada -> PasswordForm(
-                    descripcion = "Enter your vault password to review the evidence stored on this device.",
-                    accion = "UNLOCK",
-                    conConfirmacion = false,
-                    trabajando = uiState.trabajando,
-                    mensajeError = uiState.mensajeError,
-                    onConfirmar = { contrasena, _ -> viewModel.desbloquear(contrasena) },
-                )
+            !uiState.desbloqueada -> PasswordForm(
+                descripcion = "Enter your vault password to review the evidence stored on this device.",
+                accion = "UNLOCK",
+                conConfirmacion = false,
+                trabajando = uiState.trabajando,
+                mensajeError = uiState.mensajeError,
+                onConfirmar = { contrasena, _ -> viewModel.desbloquear(contrasena) },
+            )
 
-                else -> EvidenceList(
-                    evidencias = uiState.evidencias,
-                    pendientes = uiState.sinCategorizar,
-                    onCategorizar = viewModel::pedirCategorizacion,
-                )
-            }
+            else -> EvidenceList(
+                evidencias = uiState.evidencias,
+                pendientes = uiState.sinCategorizar,
+                onCategorizar = viewModel::pedirCategorizacion,
+            )
         }
     }
+
 
     uiState.categorizando?.let { fila ->
         CategorizeDialog(

@@ -32,6 +32,7 @@ import kotlinx.coroutines.withContext
  * solo se lee y nunca se toca: es la evidencia, y su hash es el de la cadena de
  * custodia. El audio pasa tal cual.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ProxyEncoder(private val context: Context) {
 
     /** Lo que se declara al subir la copia: su tamano real y su frecuencia. */

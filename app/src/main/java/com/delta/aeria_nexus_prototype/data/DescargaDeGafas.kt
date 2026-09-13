@@ -70,7 +70,7 @@ class DescargaDeGafas(
         }
         if (bodycam.isRecording.value || bodycam.isStreaming.value) {
             // Las gafas apagan su WiFi mientras graban: no habria a que unirse.
-            _estado.value = EstadoDescarga.Fallo("No se puede mientras la bodycam graba")
+            _estado.value = EstadoDescarga.Fallo("Not possible while the bodycam is recording")
             return
         }
 
@@ -81,8 +81,8 @@ class DescargaDeGafas(
             // [paisParaElPuntoDeAcceso]. Decirlo evita que alguien pierda una
             // tarde revisando el Bluetooth.
             _estado.value = EstadoDescarga.Fallo(
-                "Las gafas no encendieron su WiFi. Su unico canal (149, 5,8 GHz) no esta " +
-                    "permitido con el pais del telefono en ${java.util.Locale.getDefault().country}.",
+                "The glasses did not turn on their Wi-Fi. Their only channel (149, 5.8 GHz) is " +
+                    "not allowed with the phone country set to ${java.util.Locale.getDefault().country}.",
             )
             return
         }
@@ -90,7 +90,7 @@ class DescargaDeGafas(
         try {
             _estado.value = EstadoDescarga.Uniendose
             if (!media.conectar(credenciales.ssid, credenciales.clave)) {
-                _estado.value = EstadoDescarga.Fallo("El telefono no pudo unirse al WiFi de las gafas")
+                _estado.value = EstadoDescarga.Fallo("The phone could not join the glasses Wi-Fi")
                 return
             }
             traer(queFaltan)
@@ -105,7 +105,7 @@ class DescargaDeGafas(
     private suspend fun traer(queFaltan: List<String>) {
         val enLasGafas = media.listar()
         if (enLasGafas.isEmpty()) {
-            _estado.value = EstadoDescarga.Fallo("Las gafas no devolvieron ningun fichero")
+            _estado.value = EstadoDescarga.Fallo("The glasses returned no files")
             return
         }
         // Solo lo pendiente: en la tarjeta hay decenas de ficheros viejos que no

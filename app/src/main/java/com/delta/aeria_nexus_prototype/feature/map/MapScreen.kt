@@ -62,7 +62,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
 import com.delta.aeria_nexus_prototype.ui.theme.DoradoAgente
 import com.delta.aeria_nexus_prototype.ui.theme.GrisSinSenal
@@ -107,7 +106,6 @@ private const val MAP_PITCH = 60.0
 @Composable
 fun MapScreen(
     viewModel: MapViewModel,
-    onTabSelected: (MainTab) -> Unit,
     onOpenLivestream: (Int) -> Unit,
     focusLatitude: Double? = null,
     focusLongitude: Double? = null,
@@ -159,149 +157,147 @@ fun MapScreen(
         }
     }
 
-    AppScaffold(currentTab = MainTab.MAP, onTabSelected = onTabSelected) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
+    Box(
+        modifier = Modifier
+            .fillMaxSize(),
+    ) {
+        MapboxMap(
+            modifier = Modifier.fillMaxSize(),
+            mapViewportState = viewportState,
+            style = { MapStyle(style = MAP_STYLE_URI) },
+            // Los adornos (logo, attribution, escala, brujula) son slots de
+            // Compose, no plugins del MapView: se ocultan con slots vacios.
+            logo = {},
+            attribution = {},
+            scaleBar = {},
+            compass = {},
         ) {
-            MapboxMap(
-                modifier = Modifier.fillMaxSize(),
-                mapViewportState = viewportState,
-                style = { MapStyle(style = MAP_STYLE_URI) },
-                // Los adornos (logo, attribution, escala, brujula) son slots de
-                // Compose, no plugins del MapView: se ocultan con slots vacios.
-                logo = {},
-                attribution = {},
-                scaleBar = {},
-                compass = {},
-            ) {
-                MapEffect(Unit) { mapView ->
-                    // Puck de posicion propia con pulso, igual que en Flutter.
-                    mapView.location.updateSettings {
-                        enabled = true
-                        pulsingEnabled = true
-                    }
+            MapEffect(Unit) { mapView ->
+                // Puck de posicion propia con pulso, igual que en Flutter.
+                mapView.location.updateSettings {
+                    enabled = true
+                    pulsingEnabled = true
                 }
+            }
 
-                // Marcadores de los demas agentes de la red tactica (fase 2).
-                // allowOverlapWithPuck es obligatorio en todas las anotaciones:
-                // sin el, Mapbox OCULTA la anotacion cuando se solapa con el
-                // puck de la posicion propia (un companero a pocos metros
-                // desapareceria del mapa hasta hacer zoom).
-                uiState.remoteAgents.forEach { agente ->
-                    key(agente.uid) {
-                        ViewAnnotation(
-                            options = viewAnnotationOptions {
-                                geometry(Point.fromLngLat(agente.longitude, agente.latitude))
-                                allowOverlap(true)
-                                allowOverlapWithPuck(true)
-                                annotationAnchor { anchor(ViewAnnotationAnchor.CENTER) }
-                            },
-                        ) {
-                            RemoteAgentMarkerView(agente)
-                        }
-                    }
-                }
-
-                // SOS vigentes: tooltip rojo sobre la posicion de cada agente
-                // en emergencia. Persiste aunque el popup se haya descartado y
-                // tocarlo abre el livestream del emisor.
-                uiState.activeSos.forEach { sos ->
-                    key("sos-${sos.uid}") {
-                        ViewAnnotation(
-                            options = viewAnnotationOptions {
-                                geometry(Point.fromLngLat(sos.longitude, sos.latitude))
-                                allowOverlap(true)
-                                allowOverlapWithPuck(true)
-                                annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
-                            },
-                        ) {
-                            SosTooltip(
-                                sos = sos,
-                                onOpenLivestream = { onOpenLivestream(sos.uid) },
-                            )
-                        }
-                    }
-                }
-
-                // Avisos de SOS con senal cortada: tooltip fijo sobre la ultima
-                // posicion del emisor. Solo aparece en las demas unidades, nunca
-                // en el telefono que emitio la alarma (Agora no le devuelve sus
-                // propios mensajes).
-                uiState.signalCuts.forEach { corte ->
-                    key("signal-cut-${corte.uid}") {
-                        ViewAnnotation(
-                            options = viewAnnotationOptions {
-                                geometry(Point.fromLngLat(corte.longitude, corte.latitude))
-                                allowOverlap(true)
-                                allowOverlapWithPuck(true)
-                                annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
-                            },
-                        ) {
-                            SignalCutTooltip(
-                                corte = corte,
-                                onDismiss = { viewModel.dismissSignalCut(corte.uid) },
-                            )
-                        }
+            // Marcadores de los demas agentes de la red tactica (fase 2).
+            // allowOverlapWithPuck es obligatorio en todas las anotaciones:
+            // sin el, Mapbox OCULTA la anotacion cuando se solapa con el
+            // puck de la posicion propia (un companero a pocos metros
+            // desapareceria del mapa hasta hacer zoom).
+            uiState.remoteAgents.forEach { agente ->
+                key(agente.uid) {
+                    ViewAnnotation(
+                        options = viewAnnotationOptions {
+                            geometry(Point.fromLngLat(agente.longitude, agente.latitude))
+                            allowOverlap(true)
+                            allowOverlapWithPuck(true)
+                            annotationAnchor { anchor(ViewAnnotationAnchor.CENTER) }
+                        },
+                    ) {
+                        RemoteAgentMarkerView(agente)
                     }
                 }
             }
 
-            if (!hasLocationPermission) {
-                PermissionRequestCard(
-                    modifier = Modifier.align(Alignment.Center),
-                    onRequest = {
-                        permissionLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.ACCESS_FINE_LOCATION,
-                                Manifest.permission.ACCESS_COARSE_LOCATION,
-                            ),
-                        )
-                    },
-                )
-            }
-
-            // Banners de SOS activos: fijos en pantalla, visibles sin importar
-            // donde este la camara. Tocar el banner vuela a la posicion del
-            // emisor; VIEW LIVE abre su livestream directo.
-            if (uiState.activeSos.isNotEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    uiState.activeSos.forEach { sos ->
-                        SosBanner(
+            // SOS vigentes: tooltip rojo sobre la posicion de cada agente
+            // en emergencia. Persiste aunque el popup se haya descartado y
+            // tocarlo abre el livestream del emisor.
+            uiState.activeSos.forEach { sos ->
+                key("sos-${sos.uid}") {
+                    ViewAnnotation(
+                        options = viewAnnotationOptions {
+                            geometry(Point.fromLngLat(sos.longitude, sos.latitude))
+                            allowOverlap(true)
+                            allowOverlapWithPuck(true)
+                            annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
+                        },
+                    ) {
+                        SosTooltip(
                             sos = sos,
-                            onLocate = {
-                                flyToPosition(viewportState, sos.longitude, sos.latitude)
-                            },
                             onOpenLivestream = { onOpenLivestream(sos.uid) },
                         )
                     }
                 }
             }
 
-            RecenterButton(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 140.dp),
-                enabled = uiState.gpsReady,
-                onClick = {
-                    flyToPosition(viewportState, uiState.longitude, uiState.latitude)
+            // Avisos de SOS con senal cortada: tooltip fijo sobre la ultima
+            // posicion del emisor. Solo aparece en las demas unidades, nunca
+            // en el telefono que emitio la alarma (Agora no le devuelve sus
+            // propios mensajes).
+            uiState.signalCuts.forEach { corte ->
+                key("signal-cut-${corte.uid}") {
+                    ViewAnnotation(
+                        options = viewAnnotationOptions {
+                            geometry(Point.fromLngLat(corte.longitude, corte.latitude))
+                            allowOverlap(true)
+                            allowOverlapWithPuck(true)
+                            annotationAnchor { anchor(ViewAnnotationAnchor.BOTTOM) }
+                        },
+                    ) {
+                        SignalCutTooltip(
+                            corte = corte,
+                            onDismiss = { viewModel.dismissSignalCut(corte.uid) },
+                        )
+                    }
+                }
+            }
+        }
+
+        if (!hasLocationPermission) {
+            PermissionRequestCard(
+                modifier = Modifier.align(Alignment.Center),
+                onRequest = {
+                    permissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
+                        ),
+                    )
                 },
             )
-
-            StatusPanel(
-                uiState = uiState,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-            )
         }
+
+        // Banners de SOS activos: fijos en pantalla, visibles sin importar
+        // donde este la camara. Tocar el banner vuela a la posicion del
+        // emisor; VIEW LIVE abre su livestream directo.
+        if (uiState.activeSos.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                uiState.activeSos.forEach { sos ->
+                    SosBanner(
+                        sos = sos,
+                        onLocate = {
+                            flyToPosition(viewportState, sos.longitude, sos.latitude)
+                        },
+                        onOpenLivestream = { onOpenLivestream(sos.uid) },
+                    )
+                }
+            }
+        }
+
+        RecenterButton(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = 140.dp),
+            enabled = uiState.gpsReady,
+            onClick = {
+                flyToPosition(viewportState, uiState.longitude, uiState.latitude)
+            },
+        )
+
+        StatusPanel(
+            uiState = uiState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+        )
     }
+
 }
 
 /** Anima la camara hasta una posicion, con la misma curva que Flutter. */
@@ -503,7 +499,7 @@ private fun SosTooltip(sos: SosMarker, onOpenLivestream: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Filled.Warning,
-                    contentDescription = "SOS activo, tocar para ver el livestream",
+                    contentDescription = "SOS active, tap to view the livestream",
                     tint = RojoCritico,
                     modifier = Modifier.size(14.dp),
                 )
@@ -572,7 +568,7 @@ private fun SignalCutTooltip(corte: SignalCutMarker, onDismiss: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Filled.Warning,
-                        contentDescription = "SOS con senal cortada",
+                        contentDescription = "SOS with signal cut",
                         tint = RojoSuave,
                         modifier = Modifier.size(14.dp),
                     )
@@ -602,7 +598,7 @@ private fun SignalCutTooltip(corte: SignalCutMarker, onDismiss: () -> Unit) {
             ) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "Cerrar aviso de corte",
+                    contentDescription = "Dismiss signal-cut alert",
                     tint = TextoSecundario,
                     modifier = Modifier.size(16.dp),
                 )

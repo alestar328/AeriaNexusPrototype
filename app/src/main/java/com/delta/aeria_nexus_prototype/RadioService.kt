@@ -71,7 +71,7 @@ class RadioService : Service() {
         super.onCreate()
         val canal = NotificationChannel(
             CHANNEL_ID,
-            "Radio tactica",
+            "Tactical radio",
             NotificationManager.IMPORTANCE_LOW,
         )
         getSystemService(NotificationManager::class.java).createNotificationChannel(canal)
@@ -120,11 +120,11 @@ class RadioService : Service() {
     private fun textoDeEstado(bodycamHablando: Boolean, remotos: Map<Int, String>): String {
         val oficial = remotos.values.firstOrNull { it.isNotBlank() }
         return when {
-            oficial != null -> "Agente $oficial esta hablando"
-            remotos.isNotEmpty() -> "Un companero esta hablando"
+            oficial != null -> "Officer $oficial is speaking"
+            remotos.isNotEmpty() -> "A unit is speaking"
             // La bodycam va la ultima: su uid es fijo y compartido, asi que no se
             // puede decir cual habla. Ver el pendiente de _oficialHablando.
-            bodycamHablando -> "Una bodycam esta hablando"
+            bodycamHablando -> "A bodycam is speaking"
             else -> TEXTO_EN_REPOSO
         }
     }
@@ -174,7 +174,7 @@ class RadioService : Service() {
     companion object {
         private const val CHANNEL_ID = "radio_tactica"
         private const val NOTIFICATION_ID = 11
-        private const val TEXTO_EN_REPOSO = "A la escucha del canal"
+        private const val TEXTO_EN_REPOSO = "Listening on the channel"
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, RadioService::class.java))

@@ -26,6 +26,11 @@ val gafasMac: String = localProperties.getProperty("GAFAS_MAC") ?: ""
 // no lo permite: con un movil en ES responde "Open WiFi failed". El despliegue es
 // en Filipinas, asi que aqui va PH. Vacio = se usa el pais real del terminal.
 val paisPerifericos: String = localProperties.getProperty("PAIS_PERIFERICOS") ?: ""
+// Deja el selector de estado de confianza tambien en release, para poder saltarse
+// la verificacion durante las pruebas del manager. NO es un ajuste de conveniencia:
+// una release con esto en true no exige alta ni PIN y NO puede llegar a campo.
+val simuladorEnRelease: Boolean =
+    (localProperties.getProperty("SIMULADOR_CONFIANZA_EN_RELEASE") ?: "false").toBoolean()
 
 // La version vive en version.properties (raiz del repo, versionado en git) en
 // vez de escribirse aqui, para que la tarea git addincrementarVersion de mas abajo
@@ -55,6 +60,7 @@ android {
         buildConfigField("String", "BODYCAM_MAC", "\"$bodycamMac\"")
         buildConfigField("String", "GAFAS_MAC", "\"$gafasMac\"")
         buildConfigField("String", "PAIS_PERIFERICOS", "\"$paisPerifericos\"")
+        buildConfigField("boolean", "SIMULADOR_CONFIANZA", "true")
     }
 
     // Firma de release. La ruta y las contrasenas viven en local.properties, que
@@ -90,6 +96,11 @@ android {
             versionNameSuffix = "-debug-" + SimpleDateFormat("yyyyMMdd-HHmm").format(Date())
         }
         release {
+            // En release el selector solo existe si se pide EXPLICITAMENTE en
+            // local.properties. Asi una release normal sigue exigiendo alta y PIN,
+            // y la de pruebas se distingue por configuracion, no por un comentario
+            // que alguien olvide descomentar (ver FLAG_SECURE, comentado desde julio).
+            buildConfigField("boolean", "SIMULADOR_CONFIANZA", simuladorEnRelease.toString())
             signingConfig = signingConfigs.findByName("release")
             // Minify y shrinkResources reducen el peso del APK y eliminan
             // los iconos de material-icons-extended que no se usan.

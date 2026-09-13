@@ -57,7 +57,6 @@ import com.delta.aeria_nexus_prototype.data.model.TimelineEntryType
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.EvidenceMediaPreview
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.components.StatusBadge
 import com.delta.aeria_nexus_prototype.ui.components.SyncBadge
@@ -84,82 +83,79 @@ fun IncidentDetailScreen(
     incident: OfficerIncident?,
     onBack: () -> Unit,
     onGenerateReport: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
-    AppScaffold(currentTab = null, onTabSelected = onTabSelected, showNav = false) { innerPadding ->
-        if (incident == null) {
-            NotFoundMessage(modifier = Modifier.padding(innerPadding), onBack = onBack)
-            return@AppScaffold
-        }
+    if (incident == null) {
+        NotFoundMessage(modifier = Modifier, onBack = onBack)
+        return
+    }
 
-        // Contenido de tamano fijo y corto: el scroll simple es suficiente.
+    // Contenido de tamano fijo y corto: el scroll simple es suficiente.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        DetailHeader(incident = incident, onBack = onBack)
+
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState()),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            DetailHeader(incident = incident, onBack = onBack)
-
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                val video = incident.evidence.find { it.type == EvidenceType.VIDEO }
-                if (video != null) {
-                    VideoEvidenceCard(
-                        isRecording = false,
-                        isSealed = incident.status == IncidentStatus.SUBMITTED ||
-                            incident.status == IncidentStatus.COMPLETED,
-                        footerText = video.hash,
-                        devices = (video.device ?: "AN").split(" + "),
-                        durationText = video.duration,
-                    )
-                }
-
-                InfoCard(incident)
-
-                if (incident.narrative != null) {
-                    CardSurface {
-                        Column(Modifier.padding(16.dp)) {
-                            SectionLabel("Officer Narrative")
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = incident.narrative,
-                                color = TextoPrincipal,
-                                fontSize = 14.sp,
-                                lineHeight = 22.sp,
-                            )
-                        }
-                    }
-                }
-
-                Column {
-                    SectionLabel("Evidence (${incident.evidenceCount})", Modifier.padding(bottom = 8.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        incident.evidence.forEach { evidencia -> EvidenceCard(evidencia) }
-                    }
-                }
-
-                val testigos = incident.evidence.filter { it.type == EvidenceType.WITNESS_UPLOAD }
-                if (testigos.isNotEmpty()) {
-                    Column {
-                        SectionLabel("Witness Submissions (${testigos.size})", Modifier.padding(bottom = 8.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            testigos.forEach { testigo -> WitnessCard(testigo) }
-                        }
-                    }
-                }
-
-                Column {
-                    SectionLabel("Incident Timeline", Modifier.padding(bottom = 8.dp))
-                    TimelineCard(incident.timeline)
-                }
-
-                ActionButton(status = incident.status, onGenerateReport = onGenerateReport)
+            val video = incident.evidence.find { it.type == EvidenceType.VIDEO }
+            if (video != null) {
+                VideoEvidenceCard(
+                    isRecording = false,
+                    isSealed = incident.status == IncidentStatus.SUBMITTED ||
+                        incident.status == IncidentStatus.COMPLETED,
+                    footerText = video.hash,
+                    devices = (video.device ?: "AN").split(" + "),
+                    durationText = video.duration,
+                )
             }
+
+            InfoCard(incident)
+
+            if (incident.narrative != null) {
+                CardSurface {
+                    Column(Modifier.padding(16.dp)) {
+                        SectionLabel("Officer Narrative")
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = incident.narrative,
+                            color = TextoPrincipal,
+                            fontSize = 14.sp,
+                            lineHeight = 22.sp,
+                        )
+                    }
+                }
+            }
+
+            Column {
+                SectionLabel("Evidence (${incident.evidenceCount})", Modifier.padding(bottom = 8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    incident.evidence.forEach { evidencia -> EvidenceCard(evidencia) }
+                }
+            }
+
+            val testigos = incident.evidence.filter { it.type == EvidenceType.WITNESS_UPLOAD }
+            if (testigos.isNotEmpty()) {
+                Column {
+                    SectionLabel("Witness Submissions (${testigos.size})", Modifier.padding(bottom = 8.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        testigos.forEach { testigo -> WitnessCard(testigo) }
+                    }
+                }
+            }
+
+            Column {
+                SectionLabel("Incident Timeline", Modifier.padding(bottom = 8.dp))
+                TimelineCard(incident.timeline)
+            }
+
+            ActionButton(status = incident.status, onGenerateReport = onGenerateReport)
         }
     }
+
 }
 
 @Composable

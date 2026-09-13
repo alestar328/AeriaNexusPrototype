@@ -1,6 +1,7 @@
 package com.delta.aeria_nexus_prototype.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Description
@@ -68,6 +70,12 @@ enum class MainTab(val label: String, val icon: ImageVector) {
 /**
  * Estructura comun de pantalla: barra de estado superior (reloj, conexion,
  * dispositivos, indicador de grabacion) y navegacion inferior opcional.
+ *
+ * Los iconos de la bodycam y las gafas **son ademas el acceso a sus mandos**: los
+ * botones que habia en Operations se quitaron y su sitio es la barra, que esta en
+ * todas las pantallas. Van como opcionales y no obligatorios porque hay pantallas
+ * que no tienen navegacion a la que llamar (las de dentro de un incidente, o los
+ * propios mandos): ahi el icono sigue siendo solo indicador, como antes.
  */
 @Composable
 fun AppScaffold(
@@ -75,11 +83,19 @@ fun AppScaffold(
     onTabSelected: (MainTab) -> Unit,
     isRecording: Boolean = false,
     showNav: Boolean = true,
+    onOpenBodycam: (() -> Unit)? = null,
+    onOpenLens: (() -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
     Scaffold(
         containerColor = FondoBase,
-        topBar = { StatusBar(isRecording = isRecording) },
+        topBar = {
+            StatusBar(
+                isRecording = isRecording,
+                onOpenBodycam = onOpenBodycam,
+                onOpenLens = onOpenLens,
+            )
+        },
         bottomBar = {
             if (showNav) {
                 BottomNavBar(currentTab = currentTab, onTabSelected = onTabSelected)
@@ -90,7 +106,11 @@ fun AppScaffold(
 }
 
 @Composable
-private fun StatusBar(isRecording: Boolean) {
+private fun StatusBar(
+    isRecording: Boolean,
+    onOpenBodycam: (() -> Unit)?,
+    onOpenLens: (() -> Unit)?,
+) {
     // Reloj en vivo. El bucle se cancela solo al salir de composicion.
     var horaActual by remember { mutableStateOf(LocalTime.now()) }
     LaunchedEffect(Unit) {
@@ -132,12 +152,13 @@ private fun StatusBar(isRecording: Boolean) {
         Spacer(Modifier.width(12.dp))
         IndicatorDot(color = VerdeOk, label = "ONLINE")
         Spacer(Modifier.weight(1f))
-        // Falcon Camera (bodycam): SOLO indicador del estado del enlace; la
-        // conexion se maneja desde la pantalla BODYCAM CONTROL.
+        // Falcon Camera (bodycam): indicador del enlace y, donde se pueda navegar,
+        // tambien la entrada a su mando a distancia.
         DeviceIndicator(
             icon = Icons.Filled.Videocam,
             description = "Falcon Camera (bodycam)",
             tint = bodycamStateColor(bodycamState, enlaceBodycam),
+            onClick = onOpenBodycam,
         )
         // El estado nunca va solo en color: un enlace conectado y otro conectado
         // pero sin acreditar se verian igual, y la diferencia importa mas que la
@@ -163,6 +184,7 @@ private fun StatusBar(isRecording: Boolean) {
             icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
             description = "Falcon Lens (gafas)",
             tint = gafasStateColor(gafasState),
+            onClick = onOpenLens,
         )
         if (isRecording) {
             Spacer(Modifier.width(12.dp))
@@ -223,12 +245,24 @@ private fun DeviceIndicator(
     icon: ImageVector,
     description: String,
     tint: Color,
+    onClick: (() -> Unit)?,
 ) {
+    // Sin onClick es solo indicador y no debe parecer pulsable. Con el, el area
+    // tactil se agranda por fuera del icono: 20.dp es la mitad del minimo que se
+    // puede acertar con un guante, y esta barra se usa en la calle.
+    val zonaTactil = if (onClick != null) {
+        Modifier
+            .clip(CircleShape)
+            .clickable(onClick = onClick)
+            .padding(6.dp)
+    } else {
+        Modifier
+    }
     Icon(
         icon,
         contentDescription = description,
         tint = tint,
-        modifier = Modifier.size(20.dp),
+        modifier = zonaTactil.then(Modifier.size(20.dp)),
     )
 }
 

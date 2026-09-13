@@ -36,7 +36,7 @@ class BodycamService : Service() {
         super.onCreate()
         val canal = NotificationChannel(
             CHANNEL_ID,
-            "Enlace con la bodycam",
+            "Bodycam link",
             NotificationManager.IMPORTANCE_LOW,
         )
         getSystemService(NotificationManager::class.java).createNotificationChannel(canal)
@@ -46,7 +46,7 @@ class BodycamService : Service() {
         // onStartCommand y el sistema mata la app por no haberlo llamado.
         val notificacion = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Aeria Nexus")
-            .setContentText("Enlace con la bodycam activo")
+            .setContentText("Bodycam link active")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()

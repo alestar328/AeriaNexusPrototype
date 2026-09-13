@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -76,44 +77,65 @@ private fun LockContent(
 ) {
     val bloqueado = uiState.lockoutSeconds > 0
 
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(FondoBase)
             .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(horizontal = 24.dp)
-            .padding(top = 20.dp, bottom = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .navigationBarsPadding(),
     ) {
-        // Teclado y puntos van fuera del scroll y la identidad dentro: en un movil
-        // corto lo que tiene que ceder es la ficha, nunca las teclas. Sin esto el
-        // contenido cabe justo en un 19,5:9 y se corta en un 16:9.
+        // La ficha del oficial es lo primero que mira quien desbloquea, y tenerla
+        // que arrastrar para leerla entera no vale. Por debajo de este alto la
+        // pantalla se aprieta —margenes, huecos y tipografia de la ficha— en vez
+        // de dejar que se corte. El scroll sigue debajo como ultimo recurso, para
+        // un terminal mas bajo que todos los de la flota.
+        val apretado = maxHeight < ALTO_HOLGADO
+        val hueco = if (apretado) 10.dp else 20.dp
+
         Column(
             modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
+                .fillMaxSize()
+                .padding(horizontal = 24.dp)
+                .padding(top = if (apretado) 8.dp else 20.dp, bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
         ) {
-            Cabecera(sessionExpired = uiState.sessionExpired)
-            uiState.emisorDelRetoPendiente?.let { AvisoDeReto(it) }
-            Spacer(Modifier.height(20.dp))
-            uiState.identity?.let { TarjetaIdentidad(it) }
+            // Teclado y puntos van fuera del scroll y la identidad dentro: si aun
+            // apretando no cupiera, lo que cede es la ficha y nunca las teclas.
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Cabecera(sessionExpired = uiState.sessionExpired, apretado = apretado)
+                uiState.emisorDelRetoPendiente?.let { AvisoDeReto(it) }
+                Spacer(Modifier.height(hueco))
+                uiState.identity?.let { TarjetaIdentidad(identity = it, apretado = apretado) }
+            }
+
+            Spacer(Modifier.height(hueco))
+            PinDots(longitud = uiState.pin.length, enFallo = uiState.mensajeError != null)
+            Spacer(Modifier.height(if (apretado) 8.dp else 16.dp))
+            Aviso(uiState = uiState, bloqueado = bloqueado)
+
+            Spacer(Modifier.height(if (apretado) 8.dp else 16.dp))
+            TecladoPin(habilitado = !bloqueado, onDigito = onDigito, onBorrar = onBorrar)
         }
-
-        Spacer(Modifier.height(20.dp))
-        PinDots(longitud = uiState.pin.length, enFallo = uiState.mensajeError != null)
-        Spacer(Modifier.height(16.dp))
-        Aviso(uiState = uiState, bloqueado = bloqueado)
-
-        Spacer(Modifier.height(16.dp))
-        TecladoPin(habilitado = !bloqueado, onDigito = onDigito, onBorrar = onBorrar)
     }
 }
 
+/**
+ * Por debajo de este alto util la pantalla de PIN se aprieta.
+ *
+ * Medido en el Samsung A56 (19,5:9): con el reparto holgado la ficha del oficial
+ * se cortaba por la ultima fila y obligaba a arrastrarla. Es el alto que queda
+ * dentro de las barras del sistema, no el de la pantalla fisica.
+ */
+private val ALTO_HOLGADO = 760.dp
+
 @Composable
-private fun Cabecera(sessionExpired: Boolean) {
+private fun Cabecera(sessionExpired: Boolean, apretado: Boolean) {
     Text(
         text = "AERIA NEXUS",
         color = TextoTerciario,
@@ -121,7 +143,7 @@ private fun Cabecera(sessionExpired: Boolean) {
         fontFamily = FontFamily.Monospace,
         letterSpacing = 4.sp,
     )
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(if (apretado) 6.dp else 12.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(
             Icons.Filled.Lock,
@@ -135,12 +157,12 @@ private fun Cabecera(sessionExpired: Boolean) {
             // jornada: no es lo mismo empezar el turno que perderlo a mitad.
             text = if (sessionExpired) "SESSION EXPIRED" else "LOCKED",
             color = Color.White,
-            fontSize = 22.sp,
+            fontSize = if (apretado) 19.sp else 22.sp,
             fontWeight = FontWeight.Black,
             letterSpacing = 1.sp,
         )
     }
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(if (apretado) 4.dp else 8.dp))
     Text(
         text = if (sessionExpired) {
             "Your duty session ended. Enter your PIN to continue."
@@ -183,13 +205,13 @@ private fun AvisoDeReto(emisor: String) {
  * ademas son los identificadores que hay que dictar por radio si algo falla.
  */
 @Composable
-private fun TarjetaIdentidad(identity: ProvisionedIdentity) {
+private fun TarjetaIdentidad(identity: ProvisionedIdentity, apretado: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Superficie, RoundedCornerShape(16.dp))
             .border(BorderStroke(1.dp, BordeSutil), RoundedCornerShape(16.dp))
-            .padding(16.dp)
+            .padding(if (apretado) 12.dp else 16.dp)
             .semantics(mergeDescendants = true) {},
     ) {
         Text(
@@ -199,24 +221,24 @@ private fun TarjetaIdentidad(identity: ProvisionedIdentity) {
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.5.sp,
         )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(if (apretado) 3.dp else 6.dp))
         Text(
             text = identity.userId,
             color = TextoPrincipal,
-            fontSize = 16.sp,
+            fontSize = if (apretado) 15.sp else 16.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.height(12.dp))
-        FilaDato("TENANT", identity.tenant)
-        FilaDato("DEVICE", identity.deviceId)
-        FilaDato("INSTANCE", identity.appInstanceId)
-        FilaDato("RELEASE", identity.release)
+        Spacer(Modifier.height(if (apretado) 8.dp else 12.dp))
+        FilaDato("TENANT", identity.tenant, apretado)
+        FilaDato("DEVICE", identity.deviceId, apretado)
+        FilaDato("INSTANCE", identity.appInstanceId, apretado)
+        FilaDato("RELEASE", identity.release, apretado)
     }
 }
 
 @Composable
-private fun FilaDato(etiqueta: String, valor: String) {
-    Row(modifier = Modifier.padding(top = 4.dp)) {
+private fun FilaDato(etiqueta: String, valor: String, apretado: Boolean) {
+    Row(modifier = Modifier.padding(top = if (apretado) 2.dp else 4.dp)) {
         Text(
             text = etiqueta,
             color = TextoTerciario,

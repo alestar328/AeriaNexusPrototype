@@ -53,7 +53,6 @@ import com.delta.aeria_nexus_prototype.data.model.ReportIncident
 import com.delta.aeria_nexus_prototype.data.model.Suspect
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.components.SourceBadge
 import com.delta.aeria_nexus_prototype.ui.components.confidenceColor
@@ -75,7 +74,6 @@ fun DraftReportScreen(
     viewModel: DraftReportViewModel,
     onBack: () -> Unit,
     onApproved: (String) -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val incident = uiState.incident
@@ -87,76 +85,75 @@ fun DraftReportScreen(
         }
     }
 
-    AppScaffold(currentTab = null, onTabSelected = onTabSelected, showNav = false) { innerPadding ->
-        if (incident == null) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(innerPadding),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Text("Incident not found.", color = TextoSecundario, fontSize = 14.sp)
-            }
-            return@AppScaffold
+    if (incident == null) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text("Incident not found.", color = TextoSecundario, fontSize = 14.sp)
         }
+        return
+    }
 
-        Column(Modifier.fillMaxSize().padding(innerPadding)) {
-            ReportHeader(
-                incident = incident,
-                isEditing = uiState.isEditing,
-                isRegenerating = uiState.isRegenerating,
-                isApproving = uiState.isApproving,
-                onBack = onBack,
-                onToggleEdit = viewModel::toggleEditing,
-                onRegenerate = viewModel::regenerate,
-                onApprove = viewModel::approve,
-            )
-            ConfidenceLegend(incident.narrative)
-            HorizontalDivider(color = BordeSutil)
+    Column(Modifier.fillMaxSize()) {
+        ReportHeader(
+            incident = incident,
+            isEditing = uiState.isEditing,
+            isRegenerating = uiState.isRegenerating,
+            isApproving = uiState.isApproving,
+            onBack = onBack,
+            onToggleEdit = viewModel::toggleEditing,
+            onRegenerate = viewModel::regenerate,
+            onApprove = viewModel::approve,
+        )
+        ConfidenceLegend(incident.narrative)
+        HorizontalDivider(color = BordeSutil)
 
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                ReportInfoHeader(incident)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            ReportInfoHeader(incident)
 
-                Column {
-                    SectionLabel("Incident Narrative", Modifier.padding(bottom = 4.dp))
-                    Text(
-                        text = "Tap a paragraph to see linked evidence",
-                        color = TextoTerciario,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(bottom = 12.dp),
-                    )
-                    if (uiState.isRegenerating) {
-                        RegeneratingPlaceholder()
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            incident.narrative.forEach { segmento ->
-                                NarrativeParagraph(
-                                    segment = segmento,
-                                    text = uiState.editedTexts[segmento.id] ?: segmento.text,
-                                    isSelected = segmento.id == uiState.selectedSegmentId,
-                                    isEditing = uiState.isEditing,
-                                    onClick = { viewModel.toggleSegment(segmento.id) },
-                                    onTextChange = { viewModel.onSegmentTextChange(segmento.id, it) },
-                                )
-                            }
+            Column {
+                SectionLabel("Incident Narrative", Modifier.padding(bottom = 4.dp))
+                Text(
+                    text = "Tap a paragraph to see linked evidence",
+                    color = TextoTerciario,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                if (uiState.isRegenerating) {
+                    RegeneratingPlaceholder()
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        incident.narrative.forEach { segmento ->
+                            NarrativeParagraph(
+                                segment = segmento,
+                                text = uiState.editedTexts[segmento.id] ?: segmento.text,
+                                isSelected = segmento.id == uiState.selectedSegmentId,
+                                isEditing = uiState.isEditing,
+                                onClick = { viewModel.toggleSegment(segmento.id) },
+                                onTextChange = { viewModel.onSegmentTextChange(segmento.id, it) },
+                            )
                         }
                     }
                 }
+            }
 
-                if (incident.suspects.isNotEmpty()) {
-                    Column {
-                        SectionLabel("Persons Involved", Modifier.padding(bottom = 8.dp))
-                        incident.suspects.forEach { sospechoso -> SuspectCard(sospechoso) }
-                    }
+            if (incident.suspects.isNotEmpty()) {
+                Column {
+                    SectionLabel("Persons Involved", Modifier.padding(bottom = 8.dp))
+                    incident.suspects.forEach { sospechoso -> SuspectCard(sospechoso) }
                 }
             }
         }
     }
+
 
     // Hoja inferior con la evidencia del parrafo seleccionado.
     val seleccionado = incident?.narrative?.find { it.id == uiState.selectedSegmentId }

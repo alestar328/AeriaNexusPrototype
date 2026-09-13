@@ -44,6 +44,10 @@ import com.delta.aeria_nexus_prototype.feature.sos.SosAlertViewModel
 import com.delta.aeria_nexus_prototype.feature.submitted.SubmissionSuccessScreen
 import com.delta.aeria_nexus_prototype.feature.vault.VaultScreen
 import com.delta.aeria_nexus_prototype.feature.vault.VaultViewModel
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.getValue
+import androidx.navigation.compose.currentBackStackEntryAsState
+import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.FondoBase
 
@@ -101,6 +105,24 @@ fun AppNavHost() {
         }
     }
 
+    // La ruta actual decide el cromo: que pestana va marcada y si hay barra
+    // inferior. Se deduce aqui en vez de que cada pantalla lo declare, que es lo
+    // que hacia que la barra superior fuera distinta segun donde estuvieras.
+    val entradaActual by navController.currentBackStackEntryAsState()
+    val pestanaActual = pestanaDeLaRuta(entradaActual?.destination?.route)
+
+    AppScaffold(
+        currentTab = pestanaActual,
+        onTabSelected = onTabSelected,
+        // La barra inferior solo en las cuatro secciones principales; el resto son
+        // pantallas de detalle a las que se entra y de las que se sale con atras.
+        showNav = pestanaActual != null,
+        // Los perifericos se abren desde los iconos de la barra, que ahora existe
+        // en todas las pantallas. El NavController vive aqui, asi que ninguna
+        // pantalla necesita saber nada de esto.
+        onOpenBodycam = { navController.navigate(Routes.BODYCAM) },
+        onOpenLens = { navController.navigate(Routes.GAFAS) },
+    ) { innerPadding ->
     // Fondo fijo oscuro detras de las transiciones y fundidos cortos:
     // sin esto se percibe un destello entre pantalla y pantalla.
     NavHost(
@@ -108,6 +130,10 @@ fun AppNavHost() {
         startDestination = Routes.OPERATIONS,
         modifier = Modifier
             .fillMaxSize()
+            // El hueco de las barras se descuenta AQUI y en ningun otro sitio: es
+            // lo que hace que las pantallas sean solo contenido. Sin esto, todas
+            // dibujan por debajo de la barra inferior y se comen su propia cabecera.
+            .padding(innerPadding)
             .background(FondoBase),
         enterTransition = { fadeIn(tween(FADE_IN_MILLIS)) },
         exitTransition = { fadeOut(tween(FADE_OUT_MILLIS)) },
@@ -130,7 +156,6 @@ fun AppNavHost() {
                 },
                 onOpenBodycamControl = { navController.navigate(Routes.BODYCAM) },
                 onOpenLensControl = { navController.navigate(Routes.GAFAS) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -143,7 +168,6 @@ fun AppNavHost() {
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
                 onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },
                 onBack = { navController.popBackStack() },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -158,7 +182,6 @@ fun AppNavHost() {
                     )
                 },
                 onBack = { navController.popBackStack() },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -206,7 +229,6 @@ fun AppNavHost() {
                         AppContainer.agoraRepository,
                     )
                 },
-                onTabSelected = onTabSelected,
                 onOpenLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
                 focusLatitude = entrada.arguments?.getString("focusLat")?.toDoubleOrNull(),
                 focusLongitude = entrada.arguments?.getString("focusLng")?.toDoubleOrNull(),
@@ -217,7 +239,6 @@ fun AppNavHost() {
             IncidentListScreen(
                 viewModel = viewModel { IncidentListViewModel(repositorio) },
                 onOpenIncident = { id -> navController.navigate(Routes.incidentDetail(id)) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -225,7 +246,6 @@ fun AppNavHost() {
             ProfileScreen(
                 profile = repositorio.officerProfile,
                 onOpenVault = { navController.navigate(Routes.VAULT) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -239,7 +259,6 @@ fun AppNavHost() {
                     )
                 },
                 onBack = { navController.popBackStack() },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -251,7 +270,6 @@ fun AppNavHost() {
                 // El reporte IA solo existe para el caso de demostracion INC-001,
                 // igual que en el prototipo web original.
                 onGenerateReport = { navController.navigate(Routes.draftReport("INC-001")) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -276,7 +294,6 @@ fun AppNavHost() {
                 onOpenSosLivestream = {
                     navController.navigate(Routes.livestream(LivestreamViewModel.OWN_CAMERA_UID))
                 },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -287,7 +304,6 @@ fun AppNavHost() {
                 viewModel = viewModel(key = "draft-$id") { DraftReportViewModel(repositorio, id) },
                 onBack = { navController.popBackStack() },
                 onApproved = { navController.navigate(Routes.rmsForm(it)) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -297,7 +313,6 @@ fun AppNavHost() {
                 viewModel = viewModel(key = "rms-$id") { RmsFormViewModel(repositorio, id) },
                 onBack = { navController.popBackStack() },
                 onSubmitted = { navController.navigate(Routes.submitted(it)) },
-                onTabSelected = onTabSelected,
             )
         }
 
@@ -309,9 +324,9 @@ fun AppNavHost() {
                         popUpTo(Routes.OPERATIONS)
                     }
                 },
-                onTabSelected = onTabSelected,
             )
         }
+    }
     }
 
     // Alertas SOS de otros agentes. Los dialogos abren su propia ventana por
@@ -345,3 +360,18 @@ private fun androidx.navigation.NavBackStackEntry.requireId(): String =
 // Fundidos cortos: mas de 300 ms se siente lento en uso de campo.
 private const val FADE_IN_MILLIS = 220
 private const val FADE_OUT_MILLIS = 180
+
+/**
+ * Que pestana inferior corresponde a una ruta, o null si no es una seccion.
+ *
+ * Vive aqui y no en cada pantalla porque el cromo es de la app, no de la pantalla:
+ * antes cada una declaraba su pestana y su barra, y por eso la barra superior
+ * acababa siendo distinta segun donde estuvieras.
+ */
+private fun pestanaDeLaRuta(ruta: String?): MainTab? = when (ruta) {
+    Routes.OPERATIONS -> MainTab.OPERATIONS
+    Routes.MAP, Routes.MAP_WITH_FOCUS -> MainTab.MAP
+    Routes.INCIDENTS -> MainTab.INCIDENTS
+    Routes.PROFILE -> MainTab.PROFILE
+    else -> null
+}

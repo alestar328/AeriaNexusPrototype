@@ -40,17 +40,17 @@ class AvisoDeGafas(private val context: Context) {
         // evidencia sin recoger.
         crearCanal(
             id = CANAL,
-            nombre = "Video de las gafas",
+            nombre = "Glasses video",
             importancia = NotificationManager.IMPORTANCE_HIGH,
         )
 
         val texto = if (cuantos == 1) {
-            "Hay 1 video en las gafas sin traer. Se descarga por su WiFi."
+            "1 video on the glasses still to retrieve. Downloads over their Wi-Fi."
         } else {
-            "Hay $cuantos videos en las gafas sin traer. Se descargan por su WiFi."
+            "$cuantos videos on the glasses still to retrieve. Download over their Wi-Fi."
         }
         val aviso = Notification.Builder(context, CANAL)
-            .setContentTitle("Video de las gafas pendiente")
+            .setContentTitle("Glasses video pending")
             .setContentText(texto)
             .setStyle(Notification.BigTextStyle().bigText(texto))
             .setSmallIcon(R.drawable.ic_launcher_foreground)
@@ -84,14 +84,14 @@ class AvisoDeGafas(private val context: Context) {
         // grabando. Desde Android O eso lo manda el CANAL, no la notificacion.
         crearCanal(
             id = CANAL_SIN_GAFAS,
-            nombre = "SOS sin gafas",
+            nombre = "SOS without glasses",
             importancia = NotificationManager.IMPORTANCE_HIGH,
             vibra = true,
         )
-        val texto = "El SOS esta en marcha pero las gafas NO estan grabando. " +
-            "Comprueba que estan encendidas y enlazadas."
+        val texto = "The SOS is running but the glasses are NOT recording. " +
+            "Check that they are switched on and linked."
         val aviso = Notification.Builder(context, CANAL_SIN_GAFAS)
-            .setContentTitle("SOS sin gafas")
+            .setContentTitle("SOS without glasses")
             .setContentText(texto)
             .setStyle(Notification.BigTextStyle().bigText(texto))
             .setSmallIcon(R.drawable.ic_launcher_foreground)

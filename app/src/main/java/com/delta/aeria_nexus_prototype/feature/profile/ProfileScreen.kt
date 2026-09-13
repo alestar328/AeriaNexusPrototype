@@ -41,7 +41,6 @@ import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
@@ -57,73 +56,70 @@ import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 fun ProfileScreen(
     profile: OfficerProfile,
     onOpenVault: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
-    AppScaffold(currentTab = MainTab.PROFILE, onTabSelected = onTabSelected) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column {
-                Text(
-                    text = "AERIA NEXUS",
-                    color = TextoTerciario,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 3.sp,
-                )
-                Text(
-                    text = "PROFILE",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Black,
-                )
-            }
-
-            AvatarCard(profile)
-
-            SectionLabel("Evidence Vault")
-            VaultRow(onOpenVault)
-
-            SectionLabel("Officer Information")
-            CardSurface {
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    InfoRow("Agency", profile.agency)
-                    InfoRow("Unit", profile.unit)
-                    InfoRow("Rank", profile.rank)
-                    InfoRow("Jurisdiction", profile.jurisdiction, isLast = true)
-                }
-            }
-
-            SectionLabel("Language Profile")
-            CardSurface {
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    InfoRow("Profile", profile.languageProfile)
-                    InfoRow("Transcript", profile.transcriptLanguage)
-                    InfoRow("RMS Report", profile.reportLanguage, isLast = true)
-                }
-            }
-            PolicyNote("Language settings are admin-assigned. Contact your supervisor to change language configuration.")
-
-            SectionLabel("Device & Connections")
-            CardSurface {
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    InfoRow("Device ID", profile.deviceId, mono = true)
-                    ConnectionRow("Falcon Core (FC)", profile.fcConnected)
-                    ConnectionRow("Falcon Lens (FL)", profile.flConnected)
-                    InfoRow("App Version", profile.appVersion, mono = true, isLast = true)
-                }
-            }
-            PolicyNote(
-                "GPS is enabled by agency policy. Evidence is automatically geotagged. " +
-                    "Officer breadcrumb tracking is admin-controlled.",
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column {
+            Text(
+                text = "AERIA NEXUS",
+                color = TextoTerciario,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                letterSpacing = 3.sp,
+            )
+            Text(
+                text = "PROFILE",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Black,
             )
         }
+
+        AvatarCard(profile)
+
+        SectionLabel("Evidence Vault")
+        VaultRow(onOpenVault)
+
+        SectionLabel("Officer Information")
+        CardSurface {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                InfoRow("Agency", profile.agency)
+                InfoRow("Unit", profile.unit)
+                InfoRow("Rank", profile.rank)
+                InfoRow("Jurisdiction", profile.jurisdiction, isLast = true)
+            }
+        }
+
+        SectionLabel("Language Profile")
+        CardSurface {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                InfoRow("Profile", profile.languageProfile)
+                InfoRow("Transcript", profile.transcriptLanguage)
+                InfoRow("RMS Report", profile.reportLanguage, isLast = true)
+            }
+        }
+        PolicyNote("Language settings are admin-assigned. Contact your supervisor to change language configuration.")
+
+        SectionLabel("Device & Connections")
+        CardSurface {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                InfoRow("Device ID", profile.deviceId, mono = true)
+                ConnectionRow("Falcon Core (FC)", profile.fcConnected)
+                ConnectionRow("Falcon Lens (FL)", profile.flConnected)
+                InfoRow("App Version", profile.appVersion, mono = true, isLast = true)
+            }
+        }
+        PolicyNote(
+            "GPS is enabled by agency policy. Evidence is automatically geotagged. " +
+                "Officer breadcrumb tracking is admin-controlled.",
+        )
     }
+
 }
 
 @Composable

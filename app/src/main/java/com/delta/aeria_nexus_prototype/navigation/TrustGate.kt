@@ -88,7 +88,11 @@ fun TrustGate() {
             )
         }
 
-        if (BuildConfig.DEBUG) {
+        // No mira BuildConfig.DEBUG sino su propia bandera: en release vale false
+        // salvo que se pida a proposito con SIMULADOR_CONFIANZA_EN_RELEASE=true, que
+        // es como se genera la APK de pruebas para el manager. Una release con esto
+        // puesto NO exige alta ni PIN y no puede llegar a campo.
+        if (BuildConfig.SIMULADOR_CONFIANZA) {
             TrustStateSimulator(
                 status = status,
                 onSeleccionar = { estado, motivo ->

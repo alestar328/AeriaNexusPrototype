@@ -46,6 +46,10 @@ private const val TAG = "AeriaGafasAP"
  * lista ni descarga nada. Es una sonda de debug y desaparece del release: solo se
  * llama desde `MainActivity` bajo `BuildConfig.DEBUG`.
  */
+// Sonda de depuracion: llama a las APIs de Bluetooth sin comprobar permiso
+// porque para cuando se lanza ya se ha concedido en Operations. Si faltara,
+// el SecurityException sale en el log, que es donde se mira esta sonda.
+@android.annotation.SuppressLint("MissingPermission")
 object GafasApPrueba {
 
     /** Para no arrancar dos veces el SDK ni dos escaneos a la vez. */

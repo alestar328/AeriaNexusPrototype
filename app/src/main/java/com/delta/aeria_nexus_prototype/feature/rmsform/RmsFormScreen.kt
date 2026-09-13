@@ -60,7 +60,6 @@ import com.delta.aeria_nexus_prototype.data.model.ReportIncident
 import com.delta.aeria_nexus_prototype.data.model.Suspect
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
 import com.delta.aeria_nexus_prototype.ui.components.SourceBadge
 import com.delta.aeria_nexus_prototype.ui.components.confidenceColor
@@ -81,7 +80,6 @@ fun RmsFormScreen(
     viewModel: RmsFormViewModel,
     onBack: () -> Unit,
     onSubmitted: (String) -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val incident = uiState.incident
@@ -93,62 +91,61 @@ fun RmsFormScreen(
         }
     }
 
-    AppScaffold(currentTab = null, onTabSelected = onTabSelected, showNav = false) { innerPadding ->
-        if (incident == null) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(innerPadding),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Text("Incident not found.", color = TextoSecundario, fontSize = 14.sp)
-            }
-            return@AppScaffold
+    if (incident == null) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text("Incident not found.", color = TextoSecundario, fontSize = 14.sp)
         }
+        return
+    }
 
-        Column(Modifier.fillMaxSize().padding(innerPadding)) {
-            FormHeader(
-                caseNumber = incident.caseNumber,
-                isSubmitting = uiState.isSubmitting,
-                onBack = onBack,
-                onSubmit = viewModel::submit,
-            )
-            StepBar(current = uiState.step, onStepSelected = viewModel::goToStep)
-            HorizontalDivider(color = BordeSutil)
+    Column(Modifier.fillMaxSize()) {
+        FormHeader(
+            caseNumber = incident.caseNumber,
+            isSubmitting = uiState.isSubmitting,
+            onBack = onBack,
+            onSubmit = viewModel::submit,
+        )
+        StepBar(current = uiState.step, onStepSelected = viewModel::goToStep)
+        HorizontalDivider(color = BordeSutil)
 
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-            ) {
-                when (uiState.step) {
-                    RmsStep.INFORMATION -> InformationStep(
-                        incident = incident,
-                        uiState = uiState,
-                        onToggleEdit = viewModel::toggleEditingNarrative,
-                        onNarrativeChange = viewModel::onNarrativeChange,
-                        onRegenerate = viewModel::regenerate,
-                        onNext = { viewModel.goToStep(RmsStep.SUSPECTS) },
-                    )
-                    RmsStep.SUSPECTS -> SuspectsStep(
-                        suspects = incident.suspects,
-                        onBackStep = { viewModel.goToStep(RmsStep.INFORMATION) },
-                        onNext = { viewModel.goToStep(RmsStep.SEIZED) },
-                    )
-                    RmsStep.SEIZED -> SeizedStep(
-                        onBackStep = { viewModel.goToStep(RmsStep.SUSPECTS) },
-                        onNext = { viewModel.goToStep(RmsStep.MEDIA) },
-                    )
-                    RmsStep.MEDIA -> MediaStep(
-                        evidence = incident.evidence,
-                        isSubmitting = uiState.isSubmitting,
-                        onBackStep = { viewModel.goToStep(RmsStep.SEIZED) },
-                        onSubmit = viewModel::submit,
-                    )
-                }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+        ) {
+            when (uiState.step) {
+                RmsStep.INFORMATION -> InformationStep(
+                    incident = incident,
+                    uiState = uiState,
+                    onToggleEdit = viewModel::toggleEditingNarrative,
+                    onNarrativeChange = viewModel::onNarrativeChange,
+                    onRegenerate = viewModel::regenerate,
+                    onNext = { viewModel.goToStep(RmsStep.SUSPECTS) },
+                )
+                RmsStep.SUSPECTS -> SuspectsStep(
+                    suspects = incident.suspects,
+                    onBackStep = { viewModel.goToStep(RmsStep.INFORMATION) },
+                    onNext = { viewModel.goToStep(RmsStep.SEIZED) },
+                )
+                RmsStep.SEIZED -> SeizedStep(
+                    onBackStep = { viewModel.goToStep(RmsStep.SUSPECTS) },
+                    onNext = { viewModel.goToStep(RmsStep.MEDIA) },
+                )
+                RmsStep.MEDIA -> MediaStep(
+                    evidence = incident.evidence,
+                    isSubmitting = uiState.isSubmitting,
+                    onBackStep = { viewModel.goToStep(RmsStep.SEIZED) },
+                    onSubmit = viewModel::submit,
+                )
             }
         }
     }
+
 }
 
 @Composable

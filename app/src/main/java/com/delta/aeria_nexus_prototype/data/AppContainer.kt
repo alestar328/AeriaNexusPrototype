@@ -102,9 +102,9 @@ object AppContainer {
             aviso = AvisoDeGafas(appContext),
         )
         localEvidenceRepository = LocalEvidenceRepository(appContext)
-        // Armazon: la mecanica de descarga esta entera pero el protocolo de las
-        // gafas sigue sin averiguarse, asi que hoy no lo llama nadie. Construirlo
-        // aqui no abre red ni consume nada.
+        // Trae de las gafas a la boveda. Lo usa DescargaDeGafas, que es quien
+        // orquesta encender el AP, unirse, listar y bajar. Construirlo aqui no
+        // abre red ni consume nada.
         gafasMediaRepository = GafasMediaRepository(
             context = appContext,
             evidencia = localEvidenceRepository,

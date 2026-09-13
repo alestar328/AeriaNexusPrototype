@@ -45,7 +45,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.model.OfficerIncident
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.components.StatusBadge
 import com.delta.aeria_nexus_prototype.ui.components.SyncBadge
 import com.delta.aeria_nexus_prototype.ui.components.priorityColor
@@ -62,34 +61,31 @@ import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
 fun IncidentListScreen(
     viewModel: IncidentListViewModel,
     onOpenIncident: (String) -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    AppScaffold(currentTab = MainTab.INCIDENTS, onTabSelected = onTabSelected) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-        ) {
-            ListHeader(needsReviewCount = uiState.needsReviewCount)
-            SearchField(query = uiState.query, onQueryChange = viewModel::onQueryChange)
-            Spacer(Modifier.height(12.dp))
-            FilterTabs(selected = uiState.filter, onFilterChange = viewModel::onFilterChange)
-            Spacer(Modifier.height(16.dp))
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+    ) {
+        ListHeader(needsReviewCount = uiState.needsReviewCount)
+        SearchField(query = uiState.query, onQueryChange = viewModel::onQueryChange)
+        Spacer(Modifier.height(12.dp))
+        FilterTabs(selected = uiState.filter, onFilterChange = viewModel::onFilterChange)
+        Spacer(Modifier.height(16.dp))
 
-            if (uiState.incidents.isEmpty()) {
-                EmptyListMessage()
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(uiState.incidents, key = { it.id }) { incidente ->
-                        IncidentCard(incident = incidente, onClick = { onOpenIncident(incidente.id) })
-                    }
+        if (uiState.incidents.isEmpty()) {
+            EmptyListMessage()
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(uiState.incidents, key = { it.id }) { incidente ->
+                    IncidentCard(incident = incidente, onClick = { onOpenIncident(incidente.id) })
                 }
             }
         }
     }
+
 }
 
 @Composable

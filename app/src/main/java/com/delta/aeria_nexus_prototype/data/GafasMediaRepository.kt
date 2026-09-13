@@ -113,7 +113,7 @@ class GafasMediaRepository(
      * Se expone porque el SDK del fabricante hace sus peticiones con su propio
      * OkHttp y no sabe nada de esta red: para que llegue hay que atarle el proceso,
      * y eso necesita el objeto [Network]. Solo lo usa la sonda de depuracion; el
-     * camino normal es [abrir], que ata el socket sin tocar al resto de la app.
+     * camino normal es [abrirSeguro], que ata el socket sin tocar al resto de la app.
      */
     val redDeLasGafas: Network? get() = red
 
@@ -193,9 +193,8 @@ class GafasMediaRepository(
      * Muestra un dialogo del sistema que el agente tiene que aceptar, y la app
      * debe estar en primer plano. Devuelve false si no se consigue a tiempo.
      *
-     * PROTOCOLO (1 de 3): [ssid] y [passphrase] no se conocen todavia. Al capturar
-     * el BLE saldra de donde los saca la app oficial — lo mas probable es que se
-     * pidan por GATT junto con la orden de encender el AP.
+     * [ssid] y [passphrase] los da el propio SDK al encender el AP por BLE
+     * (`turnOnWifi`): no hay que adivinarlos. Ver [DescargaDeGafas].
      */
     suspend fun conectar(ssid: String, passphrase: String?): Boolean =
         withContext(Dispatchers.IO) {
@@ -256,10 +255,8 @@ class GafasMediaRepository(
     /**
      * Lista el material que hay en las gafas.
      *
-     * PROTOCOLO (2 de 3): ni el endpoint ni el formato de la respuesta se conocen.
-     * Cuando se capture el trafico, esto es lo unico que hay que escribir: pedir la
-     * URL real y traducir su respuesta a [ArchivoEnGafas]. La mecanica de red ya
-     * esta debajo, en [abrir].
+     * Va contra `https://<ip>/list?fileType=all`, que es lo que usa el SDK del
+     * fabricante. La peticion se ata a la red del AP en [abrirSeguro].
      */
     suspend fun listar(): List<ArchivoEnGafas> = withContext(Dispatchers.IO) {
         if (red == null) {
@@ -329,19 +326,19 @@ class GafasMediaRepository(
      */
     suspend fun descargar(archivo: ArchivoEnGafas): ResultadoDescarga =
         withContext(Dispatchers.IO) {
-            if (red == null) return@withContext ResultadoDescarga.Fallo("Sin conexion con las gafas")
+            if (red == null) return@withContext ResultadoDescarga.Fallo("No connection to the glasses")
             val destino = evidencia.createGafasVideoTarget(extension(archivo.nombre))
-                ?: return@withContext ResultadoDescarga.Fallo("Sin carpeta privada donde descargar")
+                ?: return@withContext ResultadoDescarga.Fallo("No private folder to download into")
 
             val ip = pasarela
-                ?: return@withContext ResultadoDescarga.Fallo("El AP de las gafas no dio ruta")
+                ?: return@withContext ResultadoDescarga.Fallo("The glasses access point gave no route")
             val conexion = abrirSeguro(URL(archivo.rutaDeDescarga(ip)))
-                ?: return@withContext ResultadoDescarga.Fallo("No se pudo abrir ${archivo.nombre}")
+                ?: return@withContext ResultadoDescarga.Fallo("Could not open ${archivo.nombre}")
             try {
                 val codigo = conexion.responseCode
                 if (codigo !in 200..299) {
                     evidencia.discard(destino)
-                    return@withContext ResultadoDescarga.Fallo("Las gafas respondieron $codigo")
+                    return@withContext ResultadoDescarga.Fallo("The glasses answered $codigo")
                 }
                 conexion.inputStream.use { entrada ->
                     destino.file.outputStream().use { salida -> entrada.copyTo(salida, COPIA) }
@@ -349,7 +346,7 @@ class GafasMediaRepository(
             } catch (e: Exception) {
                 Log.e(TAG, "Descarga interrumpida de ${archivo.nombre}: ${e.message}")
                 evidencia.discard(destino)
-                return@withContext ResultadoDescarga.Fallo("Descarga interrumpida: ${e.message}")
+                return@withContext ResultadoDescarga.Fallo("Download interrupted: ${e.message}")
             } finally {
                 conexion.disconnect()
             }
@@ -359,7 +356,7 @@ class GafasMediaRepository(
             val sellada = evidencia.seal(destino)
             if (sellada == null) {
                 Log.e(TAG, "${archivo.nombre} descargado pero SIN cifrar")
-                return@withContext ResultadoDescarga.Fallo("Descargado sin cifrar: revisar la boveda")
+                return@withContext ResultadoDescarga.Fallo("Downloaded unencrypted: check the vault")
             }
             // Queda EN BRUTO: cifrado y fechado, pero sin incidente. Quien decide
             // a que pertenece es el agente, al categorizarlo — las gafas entregan

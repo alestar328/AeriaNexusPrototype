@@ -32,7 +32,6 @@ import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,7 +49,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,7 +56,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteFin
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteInicio
@@ -85,7 +82,6 @@ fun OperationsScreen(
     onOpenSosLivestream: () -> Unit,
     onOpenBodycamControl: () -> Unit,
     onOpenLensControl: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val activeIncident by viewModel.activeIncident.collectAsStateWithLifecycle()
     val sosActive by viewModel.sosActive.collectAsStateWithLifecycle()
@@ -133,105 +129,76 @@ fun OperationsScreen(
         }
     }
 
-    AppScaffold(
-        currentTab = MainTab.OPERATIONS,
-        onTabSelected = onTabSelected,
-        isRecording = activeIncident?.isRecording == true,
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            BrandHeader()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        BrandHeader()
 
-            // Las dos tarjetas grandes se reparten con weight el alto que
-            // realmente queda en este telefono, en lugar de usar alturas
-            // fijas que desbordaban en pantallas bajas. Por debajo del
-            // umbral se compactan ademas los contenidos internos.
-            BoxWithConstraints(modifier = Modifier.weight(1f)) {
-                val compacto = maxHeight < 500.dp
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-                ) {
-                    NewIncidentButton(
-                        compacto = compacto,
-                        onClick = { onOpenActiveIncident(viewModel.createIncident()) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    ContinueIncidentButton(
-                        compacto = compacto,
-                        incidentId = activeIncident?.id,
-                        startedAtMillis = activeIncident?.startedAtMillis,
-                        onClick = { activeIncident?.let { onOpenActiveIncident(it.id) } },
-                        modifier = Modifier.weight(1f),
-                    )
-                    // Los dos aparatos del agente, uno al lado del otro: ambos
-                    // llevan a su mando a distancia y ninguno es mas importante.
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DeviceControlButton(
-                            icon = Icons.Filled.Videocam,
-                            label = "BODYCAM",
-                            compacto = compacto,
-                            onClick = onOpenBodycamControl,
-                            modifier = Modifier.weight(1f),
-                        )
-                        DeviceControlButton(
-                            icon = ImageVector.vectorResource(R.drawable.icon_eyeglasses),
-                            label = "FALCON LENS",
-                            compacto = compacto,
-                            onClick = onOpenLensControl,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // El PTT ya no es decorativo: manda la voz de este
-                        // telefono al canal de Agora, igual que el boton F2 de
-                        // la bodycam pero para el agente que no la lleva encima.
-                        PttButton(
-                            activo = pttActivo,
-                            compacto = compacto,
-                            onPress = {
-                                if (viewModel.tienePermisoMicrofono()) {
-                                    viewModel.iniciarPtt()
-                                } else {
-                                    pttPermissionLauncher.launch(
-                                        Manifest.permission.RECORD_AUDIO,
-                                    )
-                                }
-                            },
-                            onRelease = { viewModel.terminarPtt() },
-                            modifier = Modifier.weight(1f),
-                        )
-                        // La llamada a central sigue siendo decorativa: no hay
-                        // telefonia en el prototipo.
-                        RadioActionButton(
-                            icon = Icons.Filled.Phone,
-                            description = "Call dispatch",
-                            compacto = compacto,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
+        // Las dos tarjetas grandes se reparten con weight el alto que
+        // realmente queda en este telefono, en lugar de usar alturas
+        // fijas que desbordaban en pantallas bajas. Por debajo del
+        // umbral se compactan ademas los contenidos internos.
+        BoxWithConstraints(modifier = Modifier.weight(1f)) {
+            val compacto = maxHeight < 500.dp
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+            ) {
+                NewIncidentButton(
+                    compacto = compacto,
+                    onClick = { onOpenActiveIncident(viewModel.createIncident()) },
+                    modifier = Modifier.weight(1f),
+                )
+                ContinueIncidentButton(
+                    compacto = compacto,
+                    incidentId = activeIncident?.id,
+                    startedAtMillis = activeIncident?.startedAtMillis,
+                    onClick = { activeIncident?.let { onOpenActiveIncident(it.id) } },
+                    modifier = Modifier.weight(1f),
+                )
+                // La llamada a central se queda fuera de momento: era
+                // decorativa (no hay telefonia en el prototipo) y ocupaba
+                // media fila. Se recupera cuando exista central de verdad.
+                // RadioActionButton(
+                //     icon = Icons.Filled.Phone,
+                //     description = "Call dispatch",
+                //     compacto = compacto,
+                //     modifier = Modifier.weight(1f),
+                // )
             }
-
-            Spacer(Modifier.height(10.dp))
-            EmergencyButton(
-                sosActive = sosActive,
-                onClick = {
-                    if (sosActive) {
-                        viewModel.cancelSos()
-                    } else {
-                        sosPermissionLauncher.launch(
-                            arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
-                        )
-                    }
-                },
-            )
         }
+
+        // El PTT va a lo ancho y pegado al SOS, con el mismo peso visual: son
+        // las dos cosas que el agente puede necesitar pulsar sin mirar.
+        Spacer(Modifier.height(10.dp))
+        PttButton(
+            activo = pttActivo,
+            onPress = {
+                if (viewModel.tienePermisoMicrofono()) {
+                    viewModel.iniciarPtt()
+                } else {
+                    pttPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onRelease = { viewModel.terminarPtt() },
+        )
+        Spacer(Modifier.height(10.dp))
+        EmergencyButton(
+            sosActive = sosActive,
+            onClick = {
+                if (sosActive) {
+                    viewModel.cancelSos()
+                } else {
+                    sosPermissionLauncher.launch(
+                        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+                    )
+                }
+            },
+        )
     }
+
 }
 
 @Composable
@@ -365,44 +332,6 @@ private fun ContinueIncidentButton(
     }
 }
 
-/** Acceso al mando a distancia de un aparato del agente: bodycam o gafas. */
-@Composable
-private fun DeviceControlButton(
-    icon: ImageVector,
-    label: String,
-    compacto: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            // heightIn y no height: si el usuario agranda la fuente del
-            // sistema, el boton crece en lugar de recortar el texto.
-            .heightIn(min = if (compacto) 52.dp else 64.dp)
-            .clip(RoundedCornerShape(24.dp))
-            .background(AzulOscuroPanel)
-            .border(1.dp, AzulPrimario.copy(alpha = 0.2f), RoundedCornerShape(24.dp))
-            .clickable(onClick = onClick),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = AzulClaro,
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = label,
-            color = AzulClaro,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 1.sp,
-        )
-    }
-}
-
 @Composable
 private fun RadioActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -453,10 +382,8 @@ private fun RadioActionButton(
 @Composable
 private fun PttButton(
     activo: Boolean,
-    compacto: Boolean,
     onPress: () -> Unit,
     onRelease: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     // Late mientras se transmite, como el SOS: tiene que verse de reojo.
     val latido by rememberInfiniteTransition(label = "pttLatido").animateFloat(
@@ -470,14 +397,15 @@ private fun PttButton(
     )
 
     Box(
-        modifier = modifier
-            .heightIn(min = if (compacto) 64.dp else 96.dp)
-            .clip(RoundedCornerShape(24.dp))
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(72.dp)
+            .clip(RoundedCornerShape(16.dp))
             .background(if (activo) AzulPrimario.copy(alpha = 0.35f) else AzulOscuroPanel)
             .border(
                 1.dp,
                 if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
-                RoundedCornerShape(24.dp),
+                RoundedCornerShape(16.dp),
             )
             .pointerInput(Unit) {
                 detectTapGestures(
@@ -493,34 +421,26 @@ private fun PttButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                Icons.Filled.Mic,
+                contentDescription = "Push to talk",
+                tint = AzulClaro,
                 modifier = Modifier
-                    .size(if (compacto) 40.dp else 56.dp)
-                    .alpha(if (activo) latido else 1f)
-                    .background(
-                        if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
-                        RoundedCornerShape(16.dp),
-                    )
-                    .border(1.dp, AzulClaro.copy(alpha = 0.2f), RoundedCornerShape(16.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Mic,
-                    contentDescription = "Push to talk",
-                    tint = if (activo) AzulOscuroPanel else AzulClaro,
-                    modifier = Modifier.size(if (compacto) 24.dp else 32.dp),
-                )
-            }
-            Spacer(Modifier.height(4.dp))
+                    .size(26.dp)
+                    .alpha(if (activo) latido else 1f),
+            )
             // El texto esta siempre puesto, tambien en reposo: si apareciera solo
-            // al transmitir, el boton cambiaria de alto en mitad de la pulsacion.
+            // al transmitir, el boton cambiaria de ancho en mitad de la pulsacion.
             Text(
-                text = if (activo) "ON AIR" else "PTT",
-                color = if (activo) AzulClaro else TextoTerciario,
-                fontSize = 10.sp,
+                text = if (activo) "ON AIR — RELEASE TO STOP" else "PTT — HOLD TO TALK",
+                color = if (activo) AzulClaro else TextoSecundario,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.Black,
-                letterSpacing = 2.sp,
+                letterSpacing = 1.sp,
             )
         }
     }

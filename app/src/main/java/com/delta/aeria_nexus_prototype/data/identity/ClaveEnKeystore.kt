@@ -4,7 +4,6 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -65,11 +64,14 @@ internal class ClaveEnKeystore private constructor(
         intentos(conAtestacion = retoDeAtestacion != null).forEach { intento ->
             try {
                 return generar(intento, retoDeAtestacion)
-            } catch (e: StrongBoxUnavailableException) {
-                ultimoFallo = e
             } catch (e: java.security.ProviderException) {
-                // Varios terminales lanzan ProviderException cuando la atestacion
-                // no esta soportada o la clave de atestacion del fabricante caduco.
+                // Aqui cae tambien StrongBoxUnavailableException, que hereda de
+                // ProviderException. NO se captura por su nombre: esa clase existe
+                // desde API 28 y el minSdk es 26, asi que nombrarla en un catch
+                // hace que el verificador de ART no resuelva el metodo en Android
+                // 8.0/8.1 y reviente al entrar, antes siquiera de generar la clave.
+                // Ademas varios terminales lanzan ProviderException a secas cuando
+                // la atestacion no esta soportada o la clave del fabricante caduco.
                 ultimoFallo = e
             }
         }

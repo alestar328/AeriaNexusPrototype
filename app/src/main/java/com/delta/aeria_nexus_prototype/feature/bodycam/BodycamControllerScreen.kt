@@ -53,7 +53,6 @@ import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.DeviceActionButton
-import com.delta.aeria_nexus_prototype.ui.components.MainTab
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulOscuroPanel
@@ -75,7 +74,6 @@ fun BodycamControllerScreen(
     onOpenViewfinder: () -> Unit,
     onOpenRecordingMonitor: () -> Unit,
     onBack: () -> Unit,
-    onTabSelected: (MainTab) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -93,32 +91,26 @@ fun BodycamControllerScreen(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { resultados -> if (resultados.values.all { it }) viewModel.connect() }
 
-    AppScaffold(
-        currentTab = null,
-        onTabSelected = onTabSelected,
-        isRecording = uiState.isRecording,
-        showNav = false,
-    ) { innerPadding ->
-        BodycamControllerContent(
-            uiState = uiState,
-            onBack = onBack,
-            onConnect = {
-                if (!viewModel.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
-                } else {
-                    viewModel.connect()
-                }
-            },
-            onDisconnect = viewModel::disconnect,
-            onToggleLivestream = viewModel::toggleLivestream,
-            onTogglePhoto = viewModel::takePhoto,
-            onToggleRecording = viewModel::toggleRecording,
-            onOpenLivestream = onOpenLivestream,
-            onOpenViewfinder = onOpenViewfinder,
-            onOpenRecordingMonitor = onOpenRecordingMonitor,
-            modifier = Modifier.padding(innerPadding),
-        )
-    }
+    BodycamControllerContent(
+        uiState = uiState,
+        onBack = onBack,
+        onConnect = {
+            if (!viewModel.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
+            } else {
+                viewModel.connect()
+            }
+        },
+        onDisconnect = viewModel::disconnect,
+        onToggleLivestream = viewModel::toggleLivestream,
+        onTogglePhoto = viewModel::takePhoto,
+        onToggleRecording = viewModel::toggleRecording,
+        onOpenLivestream = onOpenLivestream,
+        onOpenViewfinder = onOpenViewfinder,
+        onOpenRecordingMonitor = onOpenRecordingMonitor,
+        modifier = Modifier,
+    )
+
 }
 
 @Composable
