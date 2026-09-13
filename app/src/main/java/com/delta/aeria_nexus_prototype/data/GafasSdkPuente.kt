@@ -24,6 +24,18 @@ object GafasSdkPuente {
     private var sdkIniciado = false
 
     /**
+     * Cierto mientras la sonda de depuracion `GafasSondaEstado` tiene el canal.
+     *
+     * El SDK guarda un solo oyente estatico, asi que si la pantalla FALCON LENS
+     * abre su GATT mientras la sonda esta midiendo, los dos se pisan y las
+     * escrituras empiezan a fallar con `write characteristic error`. Con esto la
+     * pantalla se aparta en vez de competir. Solo lo pone la sonda, que unicamente
+     * existe en compilaciones de depuracion: en release siempre vale false.
+     */
+    @Volatile
+    var sondaTieneElCanal = false
+
+    /**
      * Arranca el SDK. Su `init` **no valida la clave**: pone su bandera interna a
      * cierto y responde "Certification successful" sin tocar la red. No hace falta
      * licencia de partner, pero sin esta llamada todas las ordenes responden

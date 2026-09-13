@@ -36,6 +36,12 @@ data class GafasControlUiState(
  * [GafasRepository] observa el enlace de audio que trae el sistema (y de paso
  * sabe si hay permiso de Bluetooth), y [GafasCommandRepository] abre y cierra el
  * GATT propietario por el que viajan las ordenes.
+ *
+ * **El canal ya no es de esta pantalla.** Desde que el SOS de la bodycam hace
+ * grabar a las gafas (ver `ReleSosGafas`), el canal lo mantiene abierto
+ * `BodycamService` durante todo el turno, asi que salir de aqui no lo cierra:
+ * cerrarlo dejaria al oficial sin gafas en la siguiente emergencia. Esta pantalla
+ * pasa a ser sobre todo un indicador.
  */
 class GafasControlViewModel(
     private val mando: GafasCommandRepository,
@@ -66,7 +72,7 @@ class GafasControlViewModel(
                         } else {
                             null
                         },
-                        espacioLibre = formatearEspacio(camara.bytesLibres),
+                        espacioLibre = formatearEspacio(camara.kilobytesLibres),
                     )
                 }
             }
@@ -94,17 +100,6 @@ class GafasControlViewModel(
         mando.conectar()
     }
 
-    /**
-     * Cierra el GATT al salir de la pantalla.
-     *
-     * Las gafas siguen grabando si se les mando grabar: lo que se suelta es el
-     * canal de mando, no la grabacion. Dejarlo abierto haria que la siguiente
-     * conexion reusara un enlace cacheado y fallaran las escrituras.
-     */
-    override fun onCleared() {
-        mando.desconectar()
-    }
-
     private fun mostrarAviso(mensaje: String) {
         avisoJob?.cancel()
         _uiState.update { it.copy(aviso = mensaje) }
@@ -114,9 +109,16 @@ class GafasControlViewModel(
         }
     }
 
-    private fun formatearEspacio(bytes: Long): String? {
-        if (bytes < 0) return null
-        val gigas = bytes.toDouble() / (1024 * 1024 * 1024)
+    /**
+     * El SDK devuelve el espacio en **kilobytes**, no en bytes.
+     *
+     * Medido el 2026-09-13 contra las gafas: `total=26540012 libres=19679128`, que
+     * en KB son 25,3 GB de tarjeta y 18,8 GB libres. Tratandolo como bytes salia
+     * "0.0 GB libres" con la tarjeta a tres cuartos de vacia.
+     */
+    private fun formatearEspacio(kilobytes: Long): String? {
+        if (kilobytes < 0) return null
+        val gigas = kilobytes.toDouble() / (1024 * 1024)
         return String.format(java.util.Locale.US, "%.1f GB", gigas)
     }
 

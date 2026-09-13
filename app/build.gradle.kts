@@ -23,7 +23,7 @@ val bodycamMac: String = localProperties.getProperty("BODYCAM_MAC") ?: ""
 val gafasMac: String = localProperties.getProperty("GAFAS_MAC") ?: ""
 
 // La version vive en version.properties (raiz del repo, versionado en git) en
-// vez de escribirse aqui, para que la tarea incrementarVersion de mas abajo
+// vez de escribirse aqui, para que la tarea git addincrementarVersion de mas abajo
 // pueda subirla automaticamente cada vez que se genera un APK de release.
 val versionPropertiesFile = rootProject.file("version.properties")
 val versionProperties = Properties().apply {

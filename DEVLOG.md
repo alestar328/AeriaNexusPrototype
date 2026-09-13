@@ -6,6 +6,107 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-13 — El SOS de la bodycam hace grabar a las gafas (parte 1), y lo que dice el AAR
+
+### Por que
+
+El manager cerro una cuestion de producto: **el oficial no va a manejar los perifericos desde
+la app**. En campo no hay tiempo. Solo pulsara el SOS o la grabacion de la bodycam, que lleva
+en el pecho. Asi que las gafas tienen que obedecer sin que nadie toque el telefono.
+
+Las gafas y la bodycam **no pueden hablarse**: las gafas solo entienden el GATT propietario
+del fabricante y lo unico que lo habla es su SDK de Android, que corre en el movil. El puente
+es el telefono, pero invisible.
+
+### Lo que se ha hecho (parte 1: solo SOS)
+
+- **`data/ReleSosGafas.kt`** (nuevo) — oye el SOS de la bodycam y manda grabar/parar a las
+  gafas. Escucha `BodycamRepository.isStreaming` y **no** `buttonEvents`: el boton avisa
+  antes pero se pierde en un microcorte, mientras que `isStreaming` lo alimentan el boton Y
+  el STATUS de cada 5 s. En una emergencia importa mas no perderselo que ganar un segundo.
+- **`data/GafasCommandRepository.kt`** — canal permanente con `mantenerCanal()` /
+  `soltarCanal()` y bucle de reintento con espera creciente, copiando el patron de
+  `BodycamRepository`. El bucle vigila **tambien el READY**, no solo la conexion: el SDK
+  puede abrir el GATT y no dar nunca READY, y sin READY no acepta ordenes.
+  `iniciarGrabacion()` acepta un callback con el resultado.
+- **`BodycamService.kt`** — pasa a ser dueño de los DOS enlaces y arranca el rele. Va aqui
+  porque es lo unico que mantiene el proceso vivo en segundo plano.
+- **`feature/gafas/GafasControlViewModel.kt`** — ya **no** cierra el canal en `onCleared()`.
+  Cerrarlo dejaria al oficial sin gafas en la siguiente emergencia. La pantalla FALCON LENS
+  pasa a ser, de hecho, un indicador.
+- **`data/GafasSondaEstado.kt`** (nuevo, solo debug) — sonda que engancha todos los avisos
+  que las gafas empujan solas. Se lanza con `--es gafas_sonda escuchar|ciclo|parar`.
+
+### Verificado contra el hardware el mismo dia
+
+```
+17:41:07.770  SOS de la bodycam: se manda grabar a las gafas
+17:41:10.112  startRecord -> ok=true
+17:41:10.113  las gafas estan grabando el SOS
+17:41:26.310  fin del SOS: se manda parar a las gafas
+17:41:27.546  stopRecord -> ok=true  VIDEO_1788984986630.mp4
+17:41:28.262  aviso de video: VIDEO_1788984988214.mp4
+```
+
+Disparado por broadcast del boton 133 en la W1, con las dos MAC reales y el telefono en el
+bolsillo. Unos 2,3 s desde que el rele reacciona hasta que las gafas confirman.
+
+### Lo que se averiguo desmontando el AAR y midiendo
+
+- **No existe ninguna orden para preguntar si las gafas graban.** Ni publica ni interna.
+  Confirmado sobre los 13 metodos de `BleeqUpCommandManager` y los simbolos ofuscados.
+- **Pero si avisan de lo que hacen solas.** `registerButtonCallback` (publico, no lo usaba
+  nadie) entrega las pulsaciones fisicas, y se midio la semantica: **derecho corto = foto**
+  (3/3), **derecho largo = arranca/para grabacion**, izquierdo corto sin efecto en camara.
+  Con eso se puede sostener el estado sin mentir. Tambien hay `registerPowerCallback`
+  (bateria de las gafas) sin usar.
+- **Los avisos de camara llegan por CUALQUIER captura**, tambien las que no pidio el
+  telefono, y **llegan al PARAR**, no al empezar (cierra el TODO que habia en el codigo).
+  Lo que NO traen es el origen: las cadenas `appcapture` / `handcapture` / `aicapture` estan
+  en `a/x`, que parsea el `fileType` de `Data`, y `Data` pertenece al listado REST por WiFi.
+  El origen solo se sabe listando ficheros por el punto de acceso.
+- **`startRecord` responde `ok=true` con el mensaje `start record failure` y graba bien.**
+  Reproducido 3 veces. El `ok` vale; el texto no se le puede enseñar a nadie.
+- **El opcode interno `0x10104` (`registerStateCallback`) NO es el estado de grabacion.**
+  No disparo ni una vez en un ciclo completo. Con `unRegisterSomState` de por medio (SOM =
+  System On Module) apunta a estado de sistema. Via cerrada, no volver a mirarla.
+- **El espacio libre venia en KILOBYTES, no en bytes.** `total=26540012 libres=19679128` son
+  25,3 GB de tarjeta y 18,8 GB libres, y la pantalla decia "0.0 GB". Arreglado en
+  `GafasControlViewModel.formatearEspacio()` y el campo se renombro a `kilobytesLibres`.
+- **El canal BLE se cae solo.** Medido: se solto a los 22 minutos sin que nadie lo pidiera.
+  De ahi que el bucle de reintento no sea opcional.
+- **El enlace LE solo existia dentro de la pantalla.** Con el GATT cerrado el `dumpsys` pasa
+  de `ACL BR/EDR:Y LE:Y` a `LE:N`: el BR/EDR (audio) es del sistema y nunca se cae, que es
+  por que el icono de la barra no parpadeaba mientras la pantalla decia "Conectando...".
+
+### Decisiones tomadas
+
+- **Parte 1 solo con el SOS (boton 133).** El 134 se queda fuera: no es "empieza a grabar"
+  sino que conmuta un buffer que a menudo ya esta corriendo — el primer disparo de la prueba
+  devolvio `BTN_REC_STOP`. Atarle las gafas seria arrancarlas y pararlas todo el turno.
+  Decidirlo con datos de un turno real antes de activarlo.
+- **Un fallo de las gafas nunca retrasa ni rompe el SOS.** El rele deja `NO_DISPONIBLES` y
+  un `Log.e("SOS SIN GAFAS")`, y ese estado no se pisa al terminar el SOS.
+- **Las fotos de las gafas se descartan**: sin uso practico, dicho por el usuario.
+
+### Pendiente / proximo paso
+
+1. **Aviso en vivo cuando el SOS se queda sin gafas.** Hoy solo queda el log, que es un
+   post-mortem. Durante la sesion las gafas se desenlazaron solas y nadie se habria enterado.
+   Es decision del manager: aviso sonoro, marca en el SOS que va al backend, o asumirlo.
+2. **Parte 2**: estado honesto con `registerButtonCallback` y los avisos de camara.
+3. **Parte 3**: descarga y entrega al backend. Ojo, **el AP WiFi esta apagado mientras
+   graban**, asi que no se puede descargar durante el incidente; y si el oficial no
+   interactua, hay que decidir CUANDO se descarga (al cerrar incidente, al volver a
+   comisaria, al poner a cargar). Es operativa, preguntar al manager.
+4. **Sin explicar**: `stopRecord` devuelve un nombre de fichero y el aviso anuncia otro
+   distinto ~0,8 s despues (2 de 2). Puede ser el par `videoName`/`videoParent` de `Data`.
+   Se resuelve listando por WiFi.
+5. El boton "SOLTAR EL MANDO" de FALCON LENS suelta el canal y el bucle lo vuelve a levantar
+   a los pocos segundos. Se dejo asi a peticion del usuario (no tocar la pantalla).
+
+---
+
 ## 2026-09-12 — Mando a distancia de las gafas: grabar y parar desde Nexus
 
 ### Que se ha hecho
@@ -370,12 +471,20 @@ Por orden, y el primero no es de codigo:
    nunca, asi que su propio `startScan` no sirve), y por que el AP esta fijado a un canal
    que Europa no permite.
 
-### Pendiente de comprobar, no de codigo
+### Resuelto el 2026-09-13: la tarde del 9 ya esta imputada
 
 La sesion de la tarde del 9 (categorizacion en bruto, `RawEvidenceRepository`,
-`CategorizeDialog`, BD a v2) **no parece estar en la tabla de horas**: las cuatro filas
-de desarrollo de ese dia salen de las marcas 08:41-12:21 y esa sesion es posterior.
-Confirmarlo antes de facturar.
+`CategorizeDialog`, BD a v2) **no estaba** en la tabla de horas: las cuatro filas de
+desarrollo de ese dia salen de las marcas 08:41-12:21 y esa sesion es posterior. Las marcas
+de fichero la situan entre **13:13 y 15:57 (2,7 h medidas)**, y fue a parar al commit
+`22768a9` junto con el trabajo del 11. Anotada como bloque nuevo **`AN-7`** (boveda,
+categorizacion de evidencia en bruto) con **3 h**, aplicando la regla de redondeo que fijo el
+usuario ese dia: **siempre al alza al medio punto** (2,7 -> 3; 2,1 -> 2,5; 2,5 se queda en
+2,5). El mes pasa de 30,2 a **33,2 h = 664 EUR**.
+
+Sigue pendiente de confirmar la fila del **3 de septiembre**: 4 h `ESTIMADO`, sin commits ese
+dia y con marcas de fichero que solo cubren 21:56-23:51 (~1,9 h). Ahi el riesgo es de
+sobre-imputacion, no de defecto. Y el hueco **16:39-17:40 del 8** sigue sin contar a proposito.
 
 ---
 

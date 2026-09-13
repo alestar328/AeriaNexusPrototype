@@ -34,6 +34,8 @@ object AppContainer {
         private set
     lateinit var gafasCommandRepository: GafasCommandRepository
         private set
+    lateinit var releSosGafas: ReleSosGafas
+        private set
     lateinit var rawEvidenceRepository: RawEvidenceRepository
         private set
     lateinit var localEvidenceRepository: LocalEvidenceRepository
@@ -83,6 +85,10 @@ object AppContainer {
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
         // desde la pantalla de control y se cierra al salir de ella.
         gafasCommandRepository = GafasCommandRepository(appContext)
+        // El SOS de la bodycam hace grabar a las gafas sin que el oficial toque el
+        // telefono. Construirlo no vigila nada todavia: lo arranca BodycamService,
+        // que es quien mantiene vivo el proceso en segundo plano.
+        releSosGafas = ReleSosGafas(bodycamRepository, gafasCommandRepository)
         localEvidenceRepository = LocalEvidenceRepository(appContext)
         // Armazon: la mecanica de descarga esta entera pero el protocolo de las
         // gafas sigue sin averiguarse, asi que hoy no lo llama nadie. Construirlo

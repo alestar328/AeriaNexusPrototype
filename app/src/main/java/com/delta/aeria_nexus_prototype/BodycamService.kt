@@ -9,17 +9,28 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import com.delta.aeria_nexus_prototype.data.AppContainer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 /**
- * Foreground service que sostiene el enlace Bluetooth con la bodycam.
+ * Foreground service que sostiene los enlaces con los perifericos del oficial.
  *
  * Sin el, Android congela el proceso al pasar a segundo plano (pantalla
  * apagada, otra app al frente) y el socket RFCOMM muere; la bodycam ademas
  * reacciona a esa caida. Vive exactamente mientras el usuario quiera el
  * enlace: BodycamRepository lo arranca en connect() y lo para en disconnect().
- * No contiene logica de conexion — solo mantiene el proceso vivo.
+ *
+ * Ademas de mantener el proceso vivo, es el **dueño del canal de mando de las
+ * gafas** y de [ReleSosGafas]. Van aqui y no en una pantalla porque el oficial no
+ * va a tener el telefono en la mano: cuando pulse el SOS de la bodycam, el canal
+ * con las gafas tiene que llevar rato abierto. No contiene logica de conexion:
+ * solo decide quien vive y cuanto.
  */
 class BodycamService : Service() {
+
+    private val alcance = CoroutineScope(SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
@@ -44,6 +55,19 @@ class BodycamService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notificacion)
         }
+
+        // El canal de las gafas se mantiene solo, con reintento: el GATT se cae por
+        // su cuenta y un SOS no puede esperar a que alguien abra una pantalla.
+        AppContainer.gafasCommandRepository.mantenerCanal()
+        AppContainer.releSosGafas.vigilar(alcance)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        alcance.cancel()
+        // Sin bodycam no hay quien dispare el SOS, asi que tener el canal de las
+        // gafas abierto solo gastaria su bateria.
+        AppContainer.gafasCommandRepository.soltarCanal()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY

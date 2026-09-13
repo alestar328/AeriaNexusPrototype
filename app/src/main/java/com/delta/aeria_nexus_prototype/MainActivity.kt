@@ -22,6 +22,7 @@ import com.delta.aeria_nexus_prototype.data.model.EvidenceSource
 import kotlinx.coroutines.launch
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.GafasApPrueba
+import com.delta.aeria_nexus_prototype.data.GafasSondaEstado
 import com.delta.aeria_nexus_prototype.data.identity.Pkcs10
 import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
 import com.delta.aeria_nexus_prototype.data.identity.TrustBlockReason
@@ -90,6 +91,7 @@ class MainActivity : ComponentActivity() {
             importarCertificadoDelAgenteDebug(intent)
             importarEnBrutoDebug(intent)
             encenderApDeLasGafasDebug(intent)
+            sondarEstadoDeLasGafasDebug(intent)
         }
         enableEdgeToEdge()
         setContent {
@@ -230,6 +232,36 @@ private fun ComponentActivity.importarEnBrutoDebug(intent: Intent) {
  * que credenciales, que es lo que le faltaba a GafasMediaRepository. Solo existe
  * bajo BuildConfig.DEBUG. Ver GafasApPrueba.
  */
+/**
+ * Engancha todos los avisos que las gafas empujan solas y los vuelca al log.
+ *
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es gafas_sonda escuchar
+ *
+ * Con `ciclo` en vez de `escuchar`, ademas graba y para sola a los pocos segundos,
+ * para comparar los avisos de una grabacion pedida por la app con los de una
+ * pedida a mano con el boton de las gafas.
+ *
+ *     adb logcat -s AeriaSondaEstado
+ *
+ * Con `parar` suelta el canal, que hay que hacer antes de volver a usar la
+ * pantalla FALCON LENS.
+ *
+ * Responde a si el telefono puede enterarse de que las gafas graban sin haberlo
+ * pedido el. Hay que salir de FALCON LENS antes: el SDK guarda un solo oyente y la
+ * sonda y GafasCommandRepository se pisan. Ver GafasSondaEstado.
+ */
+private fun ComponentActivity.sondarEstadoDeLasGafasDebug(intent: Intent) {
+    val modo = intent.getStringExtra("gafas_sonda") ?: return
+    // Si el sistema recrea la actividad, onCreate vuelve con el MISMO intent y la
+    // sonda se disparaba dos veces, pisandose el GATT. Se consume el extra.
+    intent.removeExtra("gafas_sonda")
+    if (modo == "parar") {
+        GafasSondaEstado.parar()
+        return
+    }
+    GafasSondaEstado.arrancar(this, lifecycleScope, conCiclo = modo == "ciclo")
+}
+
 private fun ComponentActivity.encenderApDeLasGafasDebug(intent: Intent) {
     if (intent.hasExtra("gafas_scan")) {
         GafasApPrueba.escanearCrudo(this)
