@@ -6,6 +6,7 @@ import android.util.Log
 import com.bleequp.bleequplibrary.BleeqUpCommandManager
 import com.bleequp.bleequplibrary.BleeqUpDevice
 import com.bleequp.bleequplibrary.BleeqUpDeviceManager
+import com.bleequp.bleequplibrary.KeyEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,14 +42,20 @@ data class GafasEstadoCamara(
  * aparato: aquel es Bluetooth clasico (HFP/A2DP, lo trae el sistema) y este es un
  * GATT propietario que se abre y se cierra desde esta pantalla.
  *
- * ## Lo que este canal NO puede decir
+ * ## Como se sabe si estan grabando
  *
- * **No hay ninguna orden para preguntar si las gafas estan grabando.** El SDK trae
- * `startRecord` y `stopRecord`, pero nada que devuelva el estado, asi que [grabando]
- * es solo lo que hemos mandado nosotros. Si el agente pulsa el boton fisico de las
- * gafas, este valor se queda desfasado y la pantalla miente hasta la siguiente
- * orden. Por eso la pantalla no promete "REC" como hecho, sino como ultima orden
- * dada.
+ * **No hay ninguna orden para preguntarselo**: el SDK trae `startRecord` y
+ * `stopRecord` pero nada que devuelva el estado, ni publico ni interno (comprobado
+ * sobre el AAR el 2026-09-13). Asi que [grabando] no se consulta, se **mantiene**
+ * con las tres cosas que el aparato cuenta solo:
+ *
+ * 1. Lo que le hemos mandado nosotros.
+ * 2. El **boton fisico** del agente. Medido: el gesto largo del boton derecho
+ *    conmuta la grabacion, y el corto hace una foto. Sin esto, en cuanto el agente
+ *    tocaba las gafas el valor se quedaba desfasado y la pantalla mentia.
+ * 3. El **aviso de video**, que llega cuando las gafas CIERRAN un fichero. Ese es
+ *    el unico dato duro de los tres: si hay aviso, la grabacion termino, venga de
+ *    donde venga la orden. Por eso manda sobre los otros dos.
  *
  * ## Lo que graban las gafas y lo que llega a Nexus
  *
@@ -74,7 +81,22 @@ class GafasCommandRepository(private val context: Context) {
     private val _mensajes = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val mensajes: SharedFlow<String> = _mensajes.asSharedFlow()
 
+    /**
+     * Nombre de cada video que las gafas CIERRAN, venga la orden de donde venga.
+     *
+     * Es el aviso que dispara todo lo de despues: ese fichero se queda en la
+     * tarjeta de las gafas y hay que ir a por el por su WiFi. Ver [ReleGafas].
+     */
+    private val _videosCerrados = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val videosCerrados: SharedFlow<String> = _videosCerrados.asSharedFlow()
+
     private var aparato: BleeqUpDevice? = null
+
+    // El aparato del intento EN CURSO, que todavia no ha dado READY. Sin guardarlo,
+    // abandonar un intento colgado dejaba al SDK conectando por su cuenta y su
+    // onConnected tardio se mezclaba con el intento siguiente: se llegaron a ver
+    // tres "GATT abierto" en el mismo milisegundo.
+    private var aparatoEnIntento: BleeqUpDevice? = null
 
     private val alcance = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -102,6 +124,7 @@ class GafasCommandRepository(private val context: Context) {
             aparato = device
             _estado.value = GafasControlState.LISTO
             escucharCamara(device)
+            escucharBotones(device)
             refrescarEstado()
         }
 
@@ -122,10 +145,10 @@ class GafasCommandRepository(private val context: Context) {
     /**
      * Avisa de los ficheros que las gafas van cerrando.
      *
-     * **Sin confirmar contra el aparato**: no se sabe si `onVideoInfo` llega al
-     * empezar la grabacion o al terminarla, asi que de momento solo se enseña el
-     * nombre y no se toca [grabando] con el. En cuanto se vea el orden real de los
-     * avisos con las gafas delante, esto puede corregir el estado.
+     * Medido contra el aparato el 2026-09-13: **el aviso de video llega al PARAR**,
+     * no al empezar (1,8 s despues del gesto de parada). Y llega por cualquier
+     * grabacion, tambien las que no pedimos nosotros. Asi que un aviso de video es
+     * la prueba de que la grabacion termino, y corrige [grabando] sin preguntar.
      */
     private fun escucharCamara(device: BleeqUpDevice) {
         BleeqUpCommandManager.registerCameraCallback(
@@ -133,6 +156,10 @@ class GafasCommandRepository(private val context: Context) {
             object : BleeqUpCommandManager.CameraListener {
                 override fun onVideoInfo(info: String) {
                     Log.i(TAG, "aviso de video: $info")
+                    _grabando.value = false
+                    // Este nombre es el bueno. El que devuelve stopRecord NO EXISTE
+                    // en la tarjeta: comprobado contra el listado por WiFi, 3 de 3.
+                    _videosCerrados.tryEmit(info)
                     _mensajes.tryEmit("Video en las gafas: $info")
                 }
 
@@ -145,11 +172,49 @@ class GafasCommandRepository(private val context: Context) {
     }
 
     /**
+     * Sigue los botones fisicos de las gafas para no quedarse desfasado.
+     *
+     * El manager pidio que el agente no maneje los perifericos desde la app, asi
+     * que esto **no es una forma de mandar**: es la forma de enterarse si los toca
+     * de todos modos. Sin ello, un agente que arranque la grabacion a mano dejaria
+     * a la app diciendo que las gafas estan paradas.
+     *
+     * Semantica medida el 2026-09-13, con el gesto repetido tres veces: derecho
+     * corto hace una **foto**, derecho largo **conmuta la grabacion**, e izquierdo
+     * corto no toca la camara. Son dos muestras del gesto largo, asi que el aviso
+     * de video sigue siendo quien tiene la ultima palabra.
+     */
+    private fun escucharBotones(device: BleeqUpDevice) {
+        BleeqUpCommandManager.registerButtonCallback(
+            device,
+            object : BleeqUpCommandManager.ButtonListener {
+                override fun onLeftButtonEvent(evento: KeyEvent) {
+                    Log.i(TAG, "boton izquierdo de las gafas: $evento")
+                }
+
+                override fun onRightButtonEvent(evento: KeyEvent) {
+                    Log.i(TAG, "boton derecho de las gafas: $evento")
+                    if (evento != KeyEvent.long) return
+                    val grabandoAhora = !_grabando.value
+                    _grabando.value = grabandoAhora
+                    _mensajes.tryEmit(
+                        if (grabandoAhora) {
+                            "El agente arranco la grabacion desde las gafas"
+                        } else {
+                            "El agente paro la grabacion desde las gafas"
+                        },
+                    )
+                }
+            },
+        )
+    }
+
+    /**
      * Pide que el canal este abierto y **se mantenga** abierto.
      *
-     * Es lo que necesita el rele del SOS ([ReleSosGafas]): cuando el oficial pulsa
-     * el SOS de la bodycam no hay tiempo de abrir un GATT, y fuera de la pantalla
-     * FALCON LENS antes no habia enlace ninguno. Idempotente.
+     * Es lo que necesita [ReleGafas]: cuando el oficial pulsa grabar o el SOS en la
+     * bodycam no hay tiempo de abrir un GATT, y fuera de la pantalla FALCON LENS
+     * antes no habia enlace ninguno. Idempotente.
      */
     fun mantenerCanal() {
         if (canalDeseado) return
@@ -226,6 +291,7 @@ class GafasCommandRepository(private val context: Context) {
             _mensajes.tryEmit("No se encuentra el aparato emparejado")
             return
         }
+        aparatoEnIntento = emparejado
         BleeqUpDeviceManager.registerCallback(oyente)
         BleeqUpDeviceManager.connect(emparejado, GafasSdkPuente.ESPERA_CONEXION_MS) { abierto ->
             // Aqui solo se sabe si el GATT se abrio; las ordenes esperan a READY.
@@ -244,9 +310,12 @@ class GafasCommandRepository(private val context: Context) {
      * fallar con `write characteristic error`.
      */
     fun desconectar() {
-        val device = aparato
+        // Si el intento nunca llego a READY, 'aparato' es null pero el SDK sigue
+        // conectando: hay que soltarlo igual o se queda un GATT huerfano abierto.
+        val device = aparato ?: aparatoEnIntento
         if (device != null) {
             runCatching { BleeqUpCommandManager.unregisterCameraCallback(device) }
+            runCatching { BleeqUpCommandManager.unregisterButtonCallback(device) }
             runCatching { BleeqUpDeviceManager.disconnect(device) }
                 .onFailure { Log.w(TAG, "no se pudo soltar el GATT: ${it.message}") }
         }
@@ -270,11 +339,27 @@ class GafasCommandRepository(private val context: Context) {
             alTerminar?.invoke(false)
             return
         }
+        // Medido el 2026-09-13: con el canal en mal estado, startRecord se manda y
+        // su callback NO llega nunca. Sin este limite el rele se quedaba esperando
+        // en silencio y la grabacion salia sin gafas sin que constara en ningun
+        // sitio. El primero que llegue, respuesta o limite, es el que contesta.
+        val yaRespondio = java.util.concurrent.atomic.AtomicBoolean(false)
         BleeqUpCommandManager.startRecord(device) { ok, mensaje ->
             Log.i(TAG, "startRecord -> ok=$ok $mensaje")
+            if (!yaRespondio.compareAndSet(false, true)) return@startRecord
             if (ok) _grabando.value = true
             _mensajes.tryEmit(if (ok) "Grabando en las gafas" else "No arranco: $mensaje")
             alTerminar?.invoke(ok)
+        }
+        alcance.launch {
+            delay(ESPERA_DE_ORDEN_MILLIS)
+            if (!yaRespondio.compareAndSet(false, true)) return@launch
+            Log.e(TAG, "startRecord no contesto en $ESPERA_DE_ORDEN_MILLIS ms: se da por fallido")
+            _mensajes.tryEmit("Las gafas no contestaron")
+            // El canal esta en mal estado aunque diga LISTO: soltarlo hace que el
+            // bucle lo rehaga, en vez de dejarlo roto hasta la siguiente grabacion.
+            desconectar()
+            alTerminar?.invoke(false)
         }
     }
 
@@ -322,6 +407,16 @@ class GafasCommandRepository(private val context: Context) {
         }
     }
 
+    /**
+     * El aparato para las ordenes de WiFi, que las manda [BleeqUpWifiManager].
+     *
+     * Es el mismo GATT, pero otro objeto del SDK, asi que necesita el aparato en
+     * crudo. Devuelve null si el canal no esta listo, que es cuando el SDK
+     * responde "the device is not ready" a todo.
+     */
+    internal fun aparatoParaWifi(): BleeqUpDevice? =
+        aparato.takeIf { _estado.value == GafasControlState.LISTO }
+
     /** El aparato si el canal acepta ordenes, y si no un aviso para el agente. */
     private fun listasParaOrdenes(): BleeqUpDevice? {
         val device = aparato
@@ -338,10 +433,14 @@ class GafasCommandRepository(private val context: Context) {
 
         /** Lo que se le concede al SDK para pasar de GATT abierto a READY. */
         const val ESPERA_DE_READY_MILLIS = 10_000L
+
+        /** Lo que se espera a que el SDK conteste una orden antes de darla por perdida. */
+        const val ESPERA_DE_ORDEN_MILLIS = 6_000L
     }
 
     private fun olvidar() {
         aparato = null
+        aparatoEnIntento = null
         _estado.value = GafasControlState.DESCONECTADO
         // El estado de grabacion solo valia mientras hubiera enlace: sin canal no
         // hay forma de saber si siguen grabando, y afirmarlo seria inventarselo.

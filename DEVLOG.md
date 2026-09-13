@@ -89,20 +89,159 @@ bolsillo. Unos 2,3 s desde que el rele reacciona hasta que las gafas confirman.
   un `Log.e("SOS SIN GAFAS")`, y ese estado no se pisa al terminar el SOS.
 - **Las fotos de las gafas se descartan**: sin uso practico, dicho por el usuario.
 
+### Parte 2, el mismo dia: el estado deja de mentir
+
+`grabando` ya no es "la ultima orden que dimos". Se mantiene con tres fuentes, en orden de
+fiabilidad: lo que mandamos nosotros, el **boton fisico del agente** (derecho largo conmuta) y
+el **aviso de video**, que llega al cerrar fichero y manda sobre los otros dos porque es el
+unico dato duro: si hay aviso, la grabacion termino, venga de donde venga la orden.
+
+Todo dentro de `GafasCommandRepository`: `escucharBotones()` nuevo, `onVideoInfo` pone
+`grabando` a false, y ambos se sueltan en `desconectar()`.
+
+Verificado contra el aparato:
+
+```
+17:57:42.090  boton derecho de las gafas: long        (el agente arranca)
+17:58:16.232  boton derecho de las gafas: long        (el agente para)
+17:58:18.340  aviso de video: VIDEO_1788984930954.mp4 (lo confirma 2,1 s despues)
+```
+
+Grabacion de 34 s hecha entera desde las gafas, sin tocar el telefono. **Ojo: se verifico la
+maquina de estados en el log, no los pixeles** — la grabacion termino antes de poder capturar la
+pantalla FALCON LENS en marcha. Y se vio un `getStorageInfo fallo: command timeout` aislado
+justo despues de conectar, sin consecuencias pero conviene no olvidarlo.
+
+El gesto largo sale de **dos muestras**, no de veinte. Por eso el aviso de video tiene la ultima
+palabra y no al reves.
+
+### Listado por WiFi: resuelto lo de los dos nombres de fichero
+
+`data/GafasSondaListado.kt` (nuevo, solo debug) enciende el AP de las gafas, une el telefono y
+vuelca el listado entero con todos los campos. Se lanza con
+`--es gafas_listar <clave8> --es gafas_pais US`.
+
+**Solo existe UN fichero.** El nombre que devuelve `stopRecord` **no esta en la tarjeta**;
+el que anuncia el aviso de camara si, y su duracion cuadra con lo medido:
+
+| Grabacion | Medido por reloj | `fileDuration` |
+|---|---|---|
+| ciclo 16:45 | 7,14 s | 7.198 ms |
+| SOS 17:41 | 16,2 s | 16.265 ms |
+| boton largo 17:57 | 34,1 s | 31.891 ms |
+| ciclo 15:38 | 25,3 s | 24.194 ms |
+
+Comprobado contra los 61 ficheros del listado: `VIDEO_1788985578117`, `VIDEO_1788989567464` y
+`VIDEO_1788984986630` (los tres de `stopRecord`) **NO EXISTEN**. Es otro campo basura del SDK,
+como el `start record failure`. **Regla: el aviso de camara es la fuente buena.** La parte 2 ya
+se apoyaba en el, asi que no hay nada que cambiar.
+
+### Dos hallazgos nuevos del listado, ninguno menor
+
+1. **El reloj de las gafas salta hacia atras al apagarlas.** Las marcas de los nombres no son
+   monotonas: 15:39 -> `1788985578949`, 16:45 -> `1788989568207` (+66,5 min, cuadra), pero
+   17:41 -> `1788984988214`, que es **76 minutos ANTES** que el de las 15:39. El salto coincide
+   con el apagado y encendido del aparato. **No se puede fechar evidencia por el nombre ni por
+   `fileTime`.** El SDK trae `timeStampSync(device, callback)` justo para esto y **no lo llama
+   nadie**: deberia ir en el `onReady` del canal.
+2. **Las gafas trocean a los 5 minutos.** Seis ficheros con duracion clavada en ~300.000 ms
+   (300184, 300395, 300350, 300028, 300484, 299851). Un SOS largo **no produce un video, produce
+   varios**, y la parte 3 tiene que recogerlos todos. Encaja con el par `videoName`/`videoParent`
+   de la clase `Data`, que el `FileData` publico tira.
+
+Confirmado ademas lo que se sospechaba: los videos salen con `fileType='video'` a secas. El
+`appcapture`/`handcapture`/`aicapture` es cosa de **fotos** y el SDK los colapsa a `image`; como
+las fotos se descartan, esa via no sirve para nada. Tema cerrado.
+
+**La parte 3 ya tiene cimientos:** `listar()` de `GafasMediaRepository` era un hueco con un TODO
+de protocolo y ya no hace falta adivinarlo. Tipos validos `all` / `video` / `image`, borrado en
+`/delete?fileName=`, y el listado trae nombre, tipo, miniatura, bytes, duracion, instante y
+resolucion. **Pero ojo:** el SDK usa su propio OkHttp y no conoce la red del AP, asi que hay que
+atarle el proceso con `bindProcessToNetwork`. En produccion **eso no se puede hacer** (ataria
+Agora, las subidas y el mapa a una red sin internet); la sonda lo hace y lo deshace en un
+`finally`, pero para la parte 3 hay que resolverlo de otra forma.
+
+### Parte 3: la descarga, y el canal 149 deja de ser un problema
+
+**El despliegue es en FILIPINAS.** Eso tumba la objecion regulatoria que bloqueaba todo desde el
+09-sep: la banda de 5,8 GHz alli si se usa. Y probado contra el firmware el mismo dia, **`PH`
+funciona**, asi que no hay que declarar `US` ni ningun pais falso:
+
+    4/4 turnOnWifi clave='Aeria123' pais='PH' -> AP ENCENDIDO
+
+Va en `local.properties` como `PAIS_PERIFERICOS=PH` -> `BuildConfig`, igual que las MAC, y se
+aplica solo alrededor de `turnOnWifi` **restaurando el Locale despues**: cambiarlo afecta al
+proceso entero (formatos de fecha y numero de toda la app) y no puede quedarse puesto.
+
+**El protocolo entero, sacado del AAR** (al re-extraerlo sin colisiones de mayusculas/minusculas,
+que en Windows habian machacado 13 clases):
+
+    Listar:    https://<ip>/list?fileType=all|video|image
+    Descargar: https://<ip>/<fileType>?fileName=<nombre>   (+ Range: bytes=N-)
+    Borrar:    https://<ip>/delete?fileName=<nombre>
+
+Con eso **no hace falta `bindProcessToNetwork`**: la descarga va con HTTP propio atando socket a
+socket, y Agora, las subidas y el mapa siguen con su red. Era el bloqueo de fondo de la parte 3.
+
+Ficheros: `data/DescargaDeGafas.kt` (el ciclo entero), `data/GafasPendientesRepository.kt` (lista
+en disco), `data/AvisoDeGafas.kt` (la notificacion), y `listar()`/`descargar()` de
+`GafasMediaRepository` ya de verdad — se fueron sus tres `TODO PROTOCOLO`.
+
+**Verificado de punta a punta el 2026-09-13, sin ningun override de adb:**
+
+    20:18:56  ReleGafas: la bodycam esta capturando: se manda grabar a las gafas
+    20:19:10  aviso de video: VIDEO_1788989342108.mp4
+    20:19:10  GafasPendientes: pendiente de descargar (1 en total)
+    20:19:10  AvisoDeGafas: avisado: 1 video(s) pendiente(s)
+    20:20:04  declarando pais 'PH' para encender el AP (canal 149)
+    20:20:18  VIDEO_...mp4 en la boveda: gafas_agent_007_2026-09-13_20-20-17-005.mp4.fev
+    20:20:18  descarga terminada: 1 traidos, 0 fallados
+    20:20:18  AP apagado ok=true
+
+14 segundos del boton al fichero cifrado.
+
+### Dos fallos encontrados por el camino
+
+1. **Las claves de un `LazyColumn` son unicas en TODA la lista, no por bloque `items()`.** La
+   boveda usaba el nombre del fichero como clave en sus dos apartados, y un video recien traido
+   esta en los dos a la vez —sellado Y pendiente de categorizar—, asi que **la app moria** al
+   abrir la boveda. Arreglado con prefijos `pendiente:` / `boveda:`. Bug viejo, de la sesion de
+   categorizacion del 09-sep; la descarga solo fue lo primero que lo destapo.
+2. **`createTarget` nombraba con resolucion de segundos.** Con capturas manuales nunca fallo,
+   pero bajando varios ficheros en bucle dos podian salir con el MISMO nombre y pisarse. Ahora
+   lleva milisegundos y ademas comprueba que no exista.
+
+### Aviso en vivo cuando el SOS se queda sin gafas
+
+Era el hueco que quedaba del diseño: el fallo solo dejaba un `Log.e` que el oficial nunca iba a
+ver. Ahora `AvisoDeGafas.avisarSosSinGafas()` lanza una notificacion **con sonido y vibracion**,
+en canal propio y con id propio para que no quede tapada por la de "video pendiente".
+
+**Solo en SOS.** Una grabacion rutinaria que se quede sin gafas sigue dejando solo el log: el
+video se puede repetir, y un aviso sonoro por cada grabacion acabaria ignorandose, que es
+justo lo que no puede pasarle al aviso importante. El rele distingue el caso mirando
+`isStreaming` en el momento de arrancar.
+
+Desde Android O el sonido y la vibracion los manda el CANAL, no la notificacion: por eso va en
+`crearCanal(vibra = true)` y no con el `setDefaults` deprecado.
+
+**Sin verificar contra el hardware**: para provocarlo hay que apagar las gafas y disparar un SOS.
+
 ### Pendiente / proximo paso
 
-1. **Aviso en vivo cuando el SOS se queda sin gafas.** Hoy solo queda el log, que es un
-   post-mortem. Durante la sesion las gafas se desenlazaron solas y nadie se habria enterado.
-   Es decision del manager: aviso sonoro, marca en el SOS que va al backend, o asumirlo.
-2. **Parte 2**: estado honesto con `registerButtonCallback` y los avisos de camara.
-3. **Parte 3**: descarga y entrega al backend. Ojo, **el AP WiFi esta apagado mientras
+0. **Antes de entregar nada al manager: reactivar `FLAG_SECURE`** (`MainActivity.kt:79`, sigue
+   comentado desde el 22-jul) y generar **release**, no el debug de 239 MB con las sondas dentro.
+
+1. **Llamar a `timeStampSync` al quedar READY.** Hoy las gafas fechan mal sus ficheros.
+
+2. **Parte 3**: descarga y entrega al backend. Ojo, **el AP WiFi esta apagado mientras
    graban**, asi que no se puede descargar durante el incidente; y si el oficial no
    interactua, hay que decidir CUANDO se descarga (al cerrar incidente, al volver a
    comisaria, al poner a cargar). Es operativa, preguntar al manager.
-4. **Sin explicar**: `stopRecord` devuelve un nombre de fichero y el aviso anuncia otro
+3. **Sin explicar**: `stopRecord` devuelve un nombre de fichero y el aviso anuncia otro
    distinto ~0,8 s despues (2 de 2). Puede ser el par `videoName`/`videoParent` de `Data`.
    Se resuelve listando por WiFi.
-5. El boton "SOLTAR EL MANDO" de FALCON LENS suelta el canal y el bucle lo vuelve a levantar
+4. El boton "SOLTAR EL MANDO" de FALCON LENS suelta el canal y el bucle lo vuelve a levantar
    a los pocos segundos. Se dejo asi a peticion del usuario (no tocar la pantalla).
 
 ---

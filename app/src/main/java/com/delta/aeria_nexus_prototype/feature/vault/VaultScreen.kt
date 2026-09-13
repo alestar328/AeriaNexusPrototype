@@ -296,12 +296,17 @@ private fun EvidenceList(
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (pendientes.isNotEmpty()) {
             item { Apartado("Pending categorization") }
-            items(pendientes, key = { it.fileName }) { fila ->
+            // Las claves llevan prefijo porque un LazyColumn las exige unicas en
+            // TODA la lista, no dentro de cada items(). Un fichero recien traido
+            // esta en los dos apartados a la vez —sellado en la boveda y pendiente
+            // de categorizar—, asi que sin el prefijo la misma clave sale dos veces
+            // y la pantalla muere al medir.
+            items(pendientes, key = { "pendiente:${it.fileName}" }) { fila ->
                 RawEvidenceRow(fila = fila, onCategorizar = { onCategorizar(fila) })
             }
             item { Apartado("Vault") }
         }
-        items(evidencias, key = { it.name }) { evidencia -> EvidenceRow(evidencia) }
+        items(evidencias, key = { "boveda:${it.name}" }) { evidencia -> EvidenceRow(evidencia) }
     }
 }
 

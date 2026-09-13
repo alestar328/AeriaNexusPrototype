@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.GafasApPrueba
 import com.delta.aeria_nexus_prototype.data.GafasSondaEstado
+import com.delta.aeria_nexus_prototype.data.GafasSdkPuente
+import com.delta.aeria_nexus_prototype.data.GafasSondaListado
 import com.delta.aeria_nexus_prototype.data.identity.Pkcs10
 import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
 import com.delta.aeria_nexus_prototype.data.identity.TrustBlockReason
@@ -92,6 +94,7 @@ class MainActivity : ComponentActivity() {
             importarEnBrutoDebug(intent)
             encenderApDeLasGafasDebug(intent)
             sondarEstadoDeLasGafasDebug(intent)
+            listarLasGafasDebug(intent)
         }
         enableEdgeToEdge()
         setContent {
@@ -250,6 +253,29 @@ private fun ComponentActivity.importarEnBrutoDebug(intent: Intent) {
  * pedido el. Hay que salir de FALCON LENS antes: el SDK guarda un solo oyente y la
  * sonda y GafasCommandRepository se pisan. Ver GafasSondaEstado.
  */
+/**
+ * Enciende el AP de las gafas, se une y vuelca el listado completo de su tarjeta.
+ *
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es gafas_listar Aeria123 --es gafas_pais US
+ *
+ *     adb logcat -s AeriaSondaListado
+ *
+ * La clave son exactamente 8 letras o digitos, y el pais importa: con codigo
+ * europeo el AP sale en el canal 149 y el telefono no puede unirse. Sirve para
+ * saber si los dos nombres de fichero que aparecen al parar una grabacion son dos
+ * ficheros o uno. Ver GafasSondaListado.
+ */
+private fun ComponentActivity.listarLasGafasDebug(intent: Intent) {
+    // El pais se recoge SIEMPRE, aunque no haya listado: es lo que decide si el AP
+    // de las gafas puede encenderse en la descarga de verdad. Ver GafasSdkPuente.
+    intent.getStringExtra("gafas_pais")?.let { GafasSdkPuente.paisParaElPuntoDeAcceso = it }
+    val clave = intent.getStringExtra("gafas_listar") ?: return
+    // Si el sistema recrea la actividad, onCreate vuelve con el MISMO intent y la
+    // sonda se disparaba dos veces, pisandose el GATT. Se consume el extra.
+    intent.removeExtra("gafas_listar")
+    GafasSondaListado.arrancar(this, lifecycleScope, clave, intent.getStringExtra("gafas_pais"))
+}
+
 private fun ComponentActivity.sondarEstadoDeLasGafasDebug(intent: Intent) {
     val modo = intent.getStringExtra("gafas_sonda") ?: return
     // Si el sistema recrea la actividad, onCreate vuelve con el MISMO intent y la

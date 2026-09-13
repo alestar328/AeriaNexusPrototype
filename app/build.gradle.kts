@@ -21,6 +21,11 @@ val mapboxAccessToken: String = localProperties.getProperty("MAPBOX_ACCESS_TOKEN
 val agoraAppId: String = localProperties.getProperty("AGORA_APP_ID") ?: ""
 val bodycamMac: String = localProperties.getProperty("BODYCAM_MAC") ?: ""
 val gafasMac: String = localProperties.getProperty("GAFAS_MAC") ?: ""
+// Pais que se le declara al SDK de las gafas al encender su punto de acceso. Su
+// unico canal es el 149 (5745 MHz) y el firmware se niega si el pais del telefono
+// no lo permite: con un movil en ES responde "Open WiFi failed". El despliegue es
+// en Filipinas, asi que aqui va PH. Vacio = se usa el pais real del terminal.
+val paisPerifericos: String = localProperties.getProperty("PAIS_PERIFERICOS") ?: ""
 
 // La version vive en version.properties (raiz del repo, versionado en git) en
 // vez de escribirse aqui, para que la tarea git addincrementarVersion de mas abajo
@@ -49,6 +54,7 @@ android {
         buildConfigField("String", "AGORA_APP_ID", "\"$agoraAppId\"")
         buildConfigField("String", "BODYCAM_MAC", "\"$bodycamMac\"")
         buildConfigField("String", "GAFAS_MAC", "\"$gafasMac\"")
+        buildConfigField("String", "PAIS_PERIFERICOS", "\"$paisPerifericos\"")
     }
 
     // Firma de release. La ruta y las contrasenas viven en local.properties, que

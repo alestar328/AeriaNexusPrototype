@@ -62,11 +62,28 @@ class LocalEvidenceRepository(private val context: Context) {
 
     private fun createAudioTarget(): MediaTarget? = createTarget("audio", "m4a")
 
+    /**
+     * Nombre unico para una captura nueva.
+     *
+     * Lleva milisegundos y, aun asi, comprueba que no exista: la descarga de las
+     * gafas baja varios ficheros seguidos, y con resolucion de segundos dos videos
+     * pequenos salian con el MISMO nombre. El segundo pisaba al primero y la
+     * boveda acababa con dos filas apuntando al mismo fichero, lo que reventaba la
+     * pantalla al pintar dos elementos con la misma clave. Hasta que hubo descargas
+     * en lote esto no podia pasar: las capturas del telefono las hace una persona,
+     * de una en una.
+     */
     private fun createTarget(type: String, extension: String): MediaTarget? {
         val carpeta = capturesDir() ?: return null
-        val fecha = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        val nombre = "${type}_${AGENT_ID}_$fecha.$extension"
-        val archivo = File(carpeta, nombre)
+        val fecha = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss-SSS", Locale.US).format(Date())
+        var nombre = "${type}_${AGENT_ID}_$fecha.$extension"
+        var archivo = File(carpeta, nombre)
+        var repeticion = 1
+        while (archivo.exists()) {
+            nombre = "${type}_${AGENT_ID}_${fecha}_$repeticion.$extension"
+            archivo = File(carpeta, nombre)
+            repeticion++
+        }
         val uri = FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.fileprovider", archivo)
         return MediaTarget(uri, archivo, nombre)
     }

@@ -151,8 +151,10 @@ fun AppNavHost() {
             GafasControlScreen(
                 viewModel = viewModel {
                     GafasControlViewModel(
-                        AppContainer.gafasCommandRepository,
-                        AppContainer.gafasRepository,
+                        mando = AppContainer.gafasCommandRepository,
+                        presencia = AppContainer.gafasRepository,
+                        pendientes = AppContainer.gafasPendientesRepository,
+                        descarga = AppContainer.descargaDeGafas,
                     )
                 },
                 onBack = { navController.popBackStack() },

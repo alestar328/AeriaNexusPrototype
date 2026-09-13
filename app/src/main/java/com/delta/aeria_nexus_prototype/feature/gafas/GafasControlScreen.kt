@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
+import com.delta.aeria_nexus_prototype.data.EstadoDescarga
 import com.delta.aeria_nexus_prototype.data.GafasControlState
 import com.delta.aeria_nexus_prototype.data.GafasState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
@@ -102,6 +104,7 @@ fun GafasControlScreen(
             onDesconectar = viewModel::desconectar,
             onAlternarGrabacion = viewModel::alternarGrabacion,
             onHacerFoto = viewModel::hacerFoto,
+            onTraerVideos = viewModel::traerVideos,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -115,6 +118,7 @@ private fun GafasControlContent(
     onDesconectar: () -> Unit,
     onAlternarGrabacion: () -> Unit,
     onHacerFoto: () -> Unit,
+    onTraerVideos: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -128,6 +132,15 @@ private fun GafasControlContent(
 
         if (uiState.aviso != null) {
             BandaDeAviso(texto = uiState.aviso)
+        }
+
+        if (uiState.pendientes > 0 || uiState.descarga !is EstadoDescarga.Parada) {
+            TarjetaDePendientes(
+                pendientes = uiState.pendientes,
+                descarga = uiState.descarga,
+                puedeTraer = uiState.control == GafasControlState.LISTO && !uiState.grabando,
+                onTraerVideos = onTraerVideos,
+            )
         }
 
         Spacer(Modifier.weight(1f))
@@ -160,6 +173,73 @@ private fun GafasControlContent(
             PanelSinMando(uiState = uiState, onReintentar = onReintentar)
         }
     }
+}
+
+/**
+ * Lo unico que la app le pide al oficial en todo el turno.
+ *
+ * El video no viaja solo: se queda en la tarjeta de las gafas y hay que encender
+ * su WiFi para traerlo. Por eso esta tarjeta solo aparece cuando hay algo
+ * pendiente de verdad — el resto del tiempo la pantalla es un indicador y no
+ * estorba.
+ */
+@Composable
+private fun TarjetaDePendientes(
+    pendientes: Int,
+    descarga: EstadoDescarga,
+    puedeTraer: Boolean,
+    onTraerVideos: () -> Unit,
+) {
+    CardSurface {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = if (pendientes == 1) "1 VIDEO SIN TRAER" else "$pendientes VIDEOS SIN TRAER",
+                color = AmarilloAviso,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = textoDeDescarga(descarga, puedeTraer),
+                color = TextoSecundario,
+                fontSize = 13.sp,
+            )
+            if (pendientes > 0 && descarga !is EstadoDescarga.Trayendo) {
+                DeviceActionButton(
+                    label = "TRAER AL TELEFONO",
+                    sublabel = "Enciende el WiFi de las gafas",
+                    icon = Icons.Filled.CloudDownload,
+                    accentColor = if (puedeTraer) AzulPrimario else TextoTerciario,
+                    onClick = { if (puedeTraer) onTraerVideos() },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+private fun textoDeDescarga(descarga: EstadoDescarga, puedeTraer: Boolean): String = when (descarga) {
+    is EstadoDescarga.Parada ->
+        if (puedeTraer) {
+            "Estan en la tarjeta de las gafas, cifrados al llegar a la boveda."
+        } else {
+            "Hay que esperar: no se puede traer mientras se graba."
+        }
+
+    is EstadoDescarga.EncendiendoWifi -> "Encendiendo el WiFi de las gafas..."
+    is EstadoDescarga.Uniendose -> "Uniendo el telefono al WiFi de las gafas..."
+    is EstadoDescarga.Trayendo ->
+        "Trayendo ${descarga.hecho + 1} de ${descarga.total}: ${descarga.nombre}"
+
+    is EstadoDescarga.Terminada -> if (descarga.fallados == 0) {
+        "Listo: ${descarga.traidos} en la boveda, sin categorizar."
+    } else {
+        "${descarga.traidos} en la boveda y ${descarga.fallados} sin traer. Vuelve a intentarlo."
+    }
+
+    is EstadoDescarga.Fallo -> descarga.motivo
 }
 
 @Composable
@@ -356,5 +436,6 @@ private fun GafasControlGrabandoPreview() {
         onDesconectar = {},
         onAlternarGrabacion = {},
         onHacerFoto = {},
+        onTraerVideos = {},
     )
 }

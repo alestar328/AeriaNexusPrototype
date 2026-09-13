@@ -10,7 +10,6 @@ import android.os.Build
 import android.util.Log
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.model.EvidenceSource
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -23,11 +22,20 @@ private const val TAG = "AeriaGafasMedia"
 data class ArchivoEnGafas(
     /** Nombre con el que lo llaman las gafas. Se conserva por trazabilidad. */
     val nombre: String,
-    /** Ruta o URL con la que se descarga, tal cual venga en el listado. */
-    val ruta: String,
+    /** `video` o `image`. Va en la ruta de descarga, no es solo informativo. */
+    val tipo: String,
     val bytes: Long = -1L,
+    /**
+     * Fecha que declaran las gafas. **No es de fiar**: su reloj salta hacia atras
+     * al apagarlas (medido el 2026-09-13), asi que quien fecha la evidencia es el
+     * telefono. Se conserva solo como dato del aparato.
+     */
     val fechaMillis: Long = -1L,
-)
+    val duracionMillis: Long = -1L,
+) {
+    /** `https://<ip>/<tipo>?fileName=<nombre>`, sacado del SDK del fabricante. */
+    fun rutaDeDescarga(ip: String): String = "https://$ip/$tipo?fileName=$nombre"
+}
 
 /** Resultado de traerse un fichero de las gafas a la boveda. */
 sealed interface ResultadoDescarga {
@@ -43,19 +51,20 @@ sealed interface ResultadoDescarga {
  * Trae el material de las gafas BleeqUp Ranger **directamente a la boveda**, sin
  * pasar por la galeria.
  *
- * ## Estado: ARMAZON. Nunca ha hablado con unas gafas.
+ * ## El protocolo, sacado del AAR del fabricante el 2026-09-13
  *
- * Compila y la mecanica esta entera —unirse a su punto de acceso, atar los
- * sockets a esa red, descargar en streaming, cifrar y borrar el claro— pero el
- * protocolo de las gafas es propietario y no esta documentado. **Faltan
- * exactamente tres datos**, marcados en el codigo con `PROTOCOLO`, y no se han
- * inventado a proposito: un endpoint adivinado que "casi" funciona es peor que un
- * hueco declarado.
+ *     Listar:    https://<ip>/list?fileType=all|video|image
+ *     Descargar: https://<ip>/<fileType>?fileName=<nombre>   (+ Range: bytes=N-)
+ *     Borrar:    https://<ip>/delete?fileName=<nombre>
  *
- *   1. Las credenciales del AP (SSID y clave). Probablemente se piden por BLE, en
- *      alguno de los dos servicios GATT propietarios sin documentar.
- *   2. El endpoint del listado y la forma de su respuesta.
- *   3. Como se construye la URL de descarga de cada fichero.
+ * Las credenciales del AP las da el propio SDK por BLE (`turnOnWifi`), y la IP no
+ * se adivina: la dice el sistema en [pasarela] con el telefono ya unido.
+ *
+ * **Se hace con HTTP propio y no con el SDK a proposito.** El cliente del
+ * fabricante es un OkHttp global que no sabe nada de la red del AP, asi que usarlo
+ * obligaria a `bindProcessToNetwork`, y eso ataria TAMBIEN a Agora, las subidas y
+ * el mapa a una red sin internet. Aqui cada socket se ata por su cuenta y el resto
+ * de la app sigue con su red.
  *
  * Se averiguan con el camino 2 del informe (`docs/preguntar al manager sobre las
  * gafas.docx`): capturar el `btsnoop_hci.log` y el HTTP contra 192.168.43.1
@@ -97,6 +106,16 @@ class GafasMediaRepository(
     private var callback: ConnectivityManager.NetworkCallback? = null
 
     val conectado: Boolean get() = red != null
+
+    /**
+     * La red del AP mientras se este unido, o null.
+     *
+     * Se expone porque el SDK del fabricante hace sus peticiones con su propio
+     * OkHttp y no sabe nada de esta red: para que llegue hay que atarle el proceso,
+     * y eso necesita el objeto [Network]. Solo lo usa la sonda de depuracion; el
+     * camino normal es [abrir], que ata el socket sin tocar al resto de la app.
+     */
+    val redDeLasGafas: Network? get() = red
 
     /**
      * Pasarela de la red de las gafas: **la IP real de su servidor**.
@@ -247,12 +266,55 @@ class GafasMediaRepository(
             Log.w(TAG, "listar() sin estar unido al AP de las gafas")
             return@withContext emptyList()
         }
-        Log.w(
-            TAG,
-            "PROTOCOLO sin averiguar: no se conoce el endpoint del listado de $BASE. " +
-                "Ver docs/preguntar al manager sobre las gafas.docx (camino 2).",
-        )
-        emptyList()
+        val ip = pasarela ?: return@withContext emptyList<ArchivoEnGafas>().also {
+            Log.w(TAG, "listar() sin pasarela: el AP no dio ruta")
+        }
+        val conexion = abrirSeguro(URL("https://$ip/list?fileType=all"))
+            ?: return@withContext emptyList()
+        val cuerpo = try {
+            if (conexion.responseCode !in 200..299) {
+                Log.e(TAG, "el listado respondio ${conexion.responseCode}")
+                return@withContext emptyList()
+            }
+            conexion.inputStream.bufferedReader().readText()
+        } catch (e: Exception) {
+            Log.e(TAG, "listado ilegible: ${e.message}")
+            return@withContext emptyList()
+        } finally {
+            conexion.disconnect()
+        }
+        traducirListado(cuerpo)
+    }
+
+    /**
+     * Traduce la respuesta del listado.
+     *
+     * Es tolerante a proposito: si un fichero viene con algun campo raro se
+     * descarta ese y siguen los demas. Un listado que se cae entero por una linea
+     * mala dejaria al agente sin poder traer NADA.
+     */
+    private fun traducirListado(cuerpo: String): List<ArchivoEnGafas> {
+        return try {
+            val datos = org.json.JSONObject(cuerpo).optJSONArray("data")
+                ?: return emptyList<ArchivoEnGafas>().also { Log.w(TAG, "listado sin campo 'data'") }
+            (0 until datos.length()).mapNotNull { i ->
+                val objeto = datos.optJSONObject(i) ?: return@mapNotNull null
+                val nombre = objeto.optString("fileName").takeIf { it.isNotEmpty() }
+                    ?: return@mapNotNull null
+                ArchivoEnGafas(
+                    nombre = nombre,
+                    // El listado marca las fotos con su origen (appcapture, handcapture,
+                    // aicapture); para la URL de descarga solo valen 'video' e 'image'.
+                    tipo = if (objeto.optString("fileType") == "video") "video" else "image",
+                    bytes = objeto.optLong("fileSize", -1L),
+                    fechaMillis = objeto.optLong("fileTime", -1L),
+                    duracionMillis = objeto.optLong("fileDuration", -1L),
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "listado con formato inesperado: ${e.message}")
+            emptyList()
+        }
     }
 
     /**
@@ -262,9 +324,8 @@ class GafasMediaRepository(
      * igual que una captura del propio telefono. Si algo falla por el camino, el
      * temporal se descarta: media descarga no es evidencia.
      *
-     * PROTOCOLO (3 de 3): [ArchivoEnGafas.ruta] se concatena a [BASE] tal cual. Si
-     * el listado real devuelve URLs absolutas, o exige cabeceras o sesion, es aqui
-     * donde se ajusta.
+     * La URL se construye con [ArchivoEnGafas.rutaDeDescarga] y la pasarela real
+     * del AP, no con una IP fija.
      */
     suspend fun descargar(archivo: ArchivoEnGafas): ResultadoDescarga =
         withContext(Dispatchers.IO) {
@@ -272,7 +333,9 @@ class GafasMediaRepository(
             val destino = evidencia.createGafasVideoTarget(extension(archivo.nombre))
                 ?: return@withContext ResultadoDescarga.Fallo("Sin carpeta privada donde descargar")
 
-            val conexion = abrir(archivo.ruta)
+            val ip = pasarela
+                ?: return@withContext ResultadoDescarga.Fallo("El AP de las gafas no dio ruta")
+            val conexion = abrirSeguro(URL(archivo.rutaDeDescarga(ip)))
                 ?: return@withContext ResultadoDescarga.Fallo("No se pudo abrir ${archivo.nombre}")
             try {
                 val codigo = conexion.responseCode
@@ -313,36 +376,11 @@ class GafasMediaRepository(
             ResultadoDescarga.Cifrada(archivo, sellada)
         }
 
-    /**
-     * Abre una peticion **atada a la red de las gafas**. Todo lo que hable con
-     * 192.168.43.1 tiene que pasar por aqui: una URL abierta por la via normal se
-     * iria por los datos moviles y no encontraria nada.
-     *
-     * Va por http:// a proposito. El servidor tambien escucha en 443, pero con un
-     * certificado que no conocemos; el dia que haga falta ese puerto hay que
-     * anadir un TrustManager **acotado a esta conexion**, nunca global.
-     */
-    private fun abrir(ruta: String): HttpURLConnection? {
-        val red = this.red ?: return null
-        val url = if (ruta.startsWith("http")) URL(ruta) else URL("$BASE/${ruta.trimStart('/')}")
-        return try {
-            (red.openConnection(url) as HttpURLConnection).apply {
-                connectTimeout = TIMEOUT_MS.toInt()
-                readTimeout = LECTURA_MS
-                requestMethod = "GET"
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "No se pudo abrir $url: ${e.message}")
-            null
-        }
-    }
-
     private fun extension(nombre: String): String =
         nombre.substringAfterLast('.', "").lowercase().ifEmpty { "mp4" }
 
     companion object {
         /** Servidor de las gafas cuando el telefono esta en su punto de acceso. */
-        const val BASE = "http://192.168.43.1"
 
         private const val TIMEOUT_MS = 15_000L
         private const val LECTURA_MS = 30_000

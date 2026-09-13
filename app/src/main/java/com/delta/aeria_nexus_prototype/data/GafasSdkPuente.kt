@@ -36,6 +36,23 @@ object GafasSdkPuente {
     var sondaTieneElCanal = false
 
     /**
+     * Pais que se le declara al SDK al encender el punto de acceso de las gafas.
+     *
+     * **No es un ajuste tecnico, es una decision del cliente que sigue sin tomarse.**
+     * Las gafas solo ofrecen su AP en 5745 MHz (canal 149), que el dominio
+     * regulatorio europeo no permite, y el SDK mete `Locale.getDefault().country`
+     * en la trama sin exponerlo por parametro: con el telefono en `ES` el firmware
+     * responde `Open WiFi failed` y no hay video que traer. Declarar otro pais lo
+     * enciende, pero eso es **emitir en 5,8 GHz en Europa**.
+     *
+     * Por eso vive null y a la vista en vez de escondido en una constante: quien lo
+     * ponga esta tomando esa decision. Hoy solo lo pone la depuracion, con
+     * `--es gafas_pais US`. Ver el DEVLOG del 2026-09-09 (3).
+     */
+    @Volatile
+    var paisParaElPuntoDeAcceso: String? = null
+
+    /**
      * Arranca el SDK. Su `init` **no valida la clave**: pone su bandera interna a
      * cierto y responde "Certification successful" sin tocar la red. No hace falta
      * licencia de partner, pero sin esta llamada todas las ordenes responden

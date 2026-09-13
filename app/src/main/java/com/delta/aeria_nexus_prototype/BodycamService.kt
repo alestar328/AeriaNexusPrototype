@@ -23,7 +23,7 @@ import kotlinx.coroutines.cancel
  * enlace: BodycamRepository lo arranca en connect() y lo para en disconnect().
  *
  * Ademas de mantener el proceso vivo, es el **dueño del canal de mando de las
- * gafas** y de [ReleSosGafas]. Van aqui y no en una pantalla porque el oficial no
+ * gafas** y de [ReleGafas]. Van aqui y no en una pantalla porque el oficial no
  * va a tener el telefono en la mano: cuando pulse el SOS de la bodycam, el canal
  * con las gafas tiene que llevar rato abierto. No contiene logica de conexion:
  * solo decide quien vive y cuanto.
@@ -57,16 +57,17 @@ class BodycamService : Service() {
         }
 
         // El canal de las gafas se mantiene solo, con reintento: el GATT se cae por
-        // su cuenta y un SOS no puede esperar a que alguien abra una pantalla.
+        // su cuenta y un boton de la bodycam no puede esperar a que alguien abra una
+        // pantalla.
         AppContainer.gafasCommandRepository.mantenerCanal()
-        AppContainer.releSosGafas.vigilar(alcance)
+        AppContainer.releGafas.vigilar(alcance)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         alcance.cancel()
-        // Sin bodycam no hay quien dispare el SOS, asi que tener el canal de las
-        // gafas abierto solo gastaria su bateria.
+        // Sin bodycam no hay quien dispare la grabacion, asi que tener el canal de
+        // las gafas abierto solo gastaria su bateria.
         AppContainer.gafasCommandRepository.soltarCanal()
     }
 

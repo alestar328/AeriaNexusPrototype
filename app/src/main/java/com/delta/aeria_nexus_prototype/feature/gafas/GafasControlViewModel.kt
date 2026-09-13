@@ -2,9 +2,12 @@ package com.delta.aeria_nexus_prototype.feature.gafas
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.delta.aeria_nexus_prototype.data.DescargaDeGafas
+import com.delta.aeria_nexus_prototype.data.EstadoDescarga
 import com.delta.aeria_nexus_prototype.data.GafasCommandRepository
 import com.delta.aeria_nexus_prototype.data.GafasControlState
 import com.delta.aeria_nexus_prototype.data.GafasRepository
+import com.delta.aeria_nexus_prototype.data.GafasPendientesRepository
 import com.delta.aeria_nexus_prototype.data.GafasState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -27,6 +30,10 @@ data class GafasControlUiState(
     val espacioLibre: String? = null,
     /** Respuesta corta de las gafas; se borra sola. */
     val aviso: String? = null,
+    /** Videos que siguen en la tarjeta de las gafas y hay que traer. */
+    val pendientes: Int = 0,
+    /** En que punto va la descarga, si es que hay una. */
+    val descarga: EstadoDescarga = EstadoDescarga.Parada,
 )
 
 /**
@@ -37,8 +44,8 @@ data class GafasControlUiState(
  * sabe si hay permiso de Bluetooth), y [GafasCommandRepository] abre y cierra el
  * GATT propietario por el que viajan las ordenes.
  *
- * **El canal ya no es de esta pantalla.** Desde que el SOS de la bodycam hace
- * grabar a las gafas (ver `ReleSosGafas`), el canal lo mantiene abierto
+ * **El canal ya no es de esta pantalla.** Desde que la bodycam hace grabar a las
+ * gafas (ver `ReleGafas`), el canal lo mantiene abierto
  * `BodycamService` durante todo el turno, asi que salir de aqui no lo cierra:
  * cerrarlo dejaria al oficial sin gafas en la siguiente emergencia. Esta pantalla
  * pasa a ser sobre todo un indicador.
@@ -46,6 +53,8 @@ data class GafasControlUiState(
 class GafasControlViewModel(
     private val mando: GafasCommandRepository,
     private val presencia: GafasRepository,
+    private val pendientes: GafasPendientesRepository,
+    private val descarga: DescargaDeGafas,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(GafasControlUiState())
@@ -80,7 +89,31 @@ class GafasControlViewModel(
         viewModelScope.launch {
             mando.mensajes.collect { mensaje -> mostrarAviso(mensaje) }
         }
+        viewModelScope.launch {
+            pendientes.pendientes.collect { lista ->
+                _uiState.update { it.copy(pendientes = lista.size) }
+            }
+        }
+        viewModelScope.launch {
+            descarga.estado.collect { estado -> _uiState.update { it.copy(descarga = estado) } }
+        }
     }
+
+    /**
+     * Trae a la boveda lo que las gafas tienen pendiente.
+     *
+     * La clave del punto de acceso se genera aqui y no se le enseña a nadie: es de
+     * usar y tirar, dura lo que dura la descarga y el oficial no tiene por que
+     * saberla. El SDK exige exactamente 8 letras o digitos.
+     */
+    fun traerVideos() {
+        viewModelScope.launch { descarga.traerPendientes(claveDeUsarYTirar()) }
+    }
+
+    fun olvidarResultadoDeDescarga() = descarga.olvidarResultado()
+
+    private fun claveDeUsarYTirar(): String =
+        (1..8).map { LETRAS_DE_CLAVE.random() }.joinToString("")
 
     fun conectar() = mando.conectar()
 
@@ -125,5 +158,8 @@ class GafasControlViewModel(
     private companion object {
         /** Lo que dura en pantalla la respuesta de las gafas. */
         const val AVISO_MILLIS = 3_000L
+
+        /** Sin enes ni acentos: el SSID y la clave viajan por un protocolo ASCII. */
+        const val LETRAS_DE_CLAVE = "abcdefghijkmnpqrstuvwxyz23456789"
     }
 }

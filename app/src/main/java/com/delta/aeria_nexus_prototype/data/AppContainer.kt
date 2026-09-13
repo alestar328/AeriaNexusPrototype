@@ -34,7 +34,11 @@ object AppContainer {
         private set
     lateinit var gafasCommandRepository: GafasCommandRepository
         private set
-    lateinit var releSosGafas: ReleSosGafas
+    lateinit var gafasPendientesRepository: GafasPendientesRepository
+        private set
+    lateinit var releGafas: ReleGafas
+        private set
+    lateinit var descargaDeGafas: DescargaDeGafas
         private set
     lateinit var rawEvidenceRepository: RawEvidenceRepository
         private set
@@ -85,10 +89,18 @@ object AppContainer {
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
         // desde la pantalla de control y se cierra al salir de ella.
         gafasCommandRepository = GafasCommandRepository(appContext)
-        // El SOS de la bodycam hace grabar a las gafas sin que el oficial toque el
-        // telefono. Construirlo no vigila nada todavia: lo arranca BodycamService,
-        // que es quien mantiene vivo el proceso en segundo plano.
-        releSosGafas = ReleSosGafas(bodycamRepository, gafasCommandRepository)
+        // Los videos que se quedan en la tarjeta de las gafas esperando descarga.
+        // Va en disco: entre que se graban y alguien los trae pueden pasar horas.
+        gafasPendientesRepository = GafasPendientesRepository(appContext)
+        // Grabar y parar con la bodycam hace grabar y parar a las gafas, sin que el
+        // oficial toque el telefono. Construirlo no vigila nada todavia: lo arranca
+        // BodycamService, que es quien mantiene vivo el proceso en segundo plano.
+        releGafas = ReleGafas(
+            bodycam = bodycamRepository,
+            gafas = gafasCommandRepository,
+            pendientes = gafasPendientesRepository,
+            aviso = AvisoDeGafas(appContext),
+        )
         localEvidenceRepository = LocalEvidenceRepository(appContext)
         // Armazon: la mecanica de descarga esta entera pero el protocolo de las
         // gafas sigue sin averiguarse, asi que hoy no lo llama nadie. Construirlo
@@ -97,6 +109,14 @@ object AppContainer {
             context = appContext,
             evidencia = localEvidenceRepository,
             enBruto = rawEvidenceRepository,
+        )
+        // Trae a la boveda lo que las gafas dejaron en su tarjeta. Necesita el
+        // repositorio de medios, que se construye mas arriba con la boveda ya viva.
+        descargaDeGafas = DescargaDeGafas(
+            media = gafasMediaRepository,
+            pendientes = gafasPendientesRepository,
+            mando = gafasCommandRepository,
+            bodycam = bodycamRepository,
         )
         vaultRepository = VaultRepository(appContext)
         // Decide si la app llega siquiera a la pantalla de operaciones, asi que
