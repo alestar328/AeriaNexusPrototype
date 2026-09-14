@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
+import com.delta.aeria_nexus_prototype.data.BuscadorBodycam
+import com.delta.aeria_nexus_prototype.data.DispositivoCercano
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,16 +25,22 @@ data class BodycamControllerUiState(
     val openViewer: Boolean = false,
     // Mensaje corto de confirmacion o error de un comando; se borra solo.
     val commandFeedback: String? = null,
+    // Bodycam con la que conecta este telefono; null hasta que el agente elige una.
+    val bodycamElegida: DispositivoCercano? = null,
+    val mostrarSelector: Boolean = false,
+    val buscando: Boolean = false,
+    val cercanas: List<DispositivoCercano> = emptyList(),
 )
 
 /**
  * Controlador remoto de la bodycam W1 por Bluetooth. El livestream desde aqui
  * tiene la misma semantica que el boton fisico SOS de la bodycam: al publicar
- * video como uid 9001, todos los telefonos del canal reciben la emergencia.
+ * video con su uid de bodycam, todos los telefonos del canal reciben la emergencia.
  * Foto y grabacion son locales en la bodycam y no disparan ningun SOS.
  */
 class BodycamControllerViewModel(
     private val bodycamRepository: BodycamRepository,
+    private val buscadorBodycam: BuscadorBodycam,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -44,8 +53,14 @@ class BodycamControllerViewModel(
     private var livestreamRequested = false
 
     private var feedbackJob: Job? = null
+    private var busquedaJob: Job? = null
 
     init {
+        viewModelScope.launch {
+            bodycamRepository.bodycamElegida.collect { elegida ->
+                _uiState.update { it.copy(bodycamElegida = elegida) }
+            }
+        }
         viewModelScope.launch {
             bodycamRepository.state.collect { estado ->
                 _uiState.update { it.copy(connectionState = estado) }
@@ -91,6 +106,46 @@ class BodycamControllerViewModel(
     fun disconnect() = bodycamRepository.disconnect()
 
     fun hasBluetoothPermission(): Boolean = bodycamRepository.hasBluetoothPermission()
+
+    fun permisosDeBusqueda(): Array<String> = buscadorBodycam.permisosNecesarios()
+
+    fun tienePermisosDeBusqueda(): Boolean = buscadorBodycam.tienePermisos()
+
+    fun abrirSelector() {
+        _uiState.update { it.copy(mostrarSelector = true) }
+        buscar()
+    }
+
+    fun buscar() {
+        // Los reintentos de conexion llaman a cancelDiscovery() y matarian la
+        // busqueda a medias; ademas quien busca otra camara ya no quiere la actual.
+        bodycamRepository.disconnect()
+        val anterior = busquedaJob
+        busquedaJob = viewModelScope.launch {
+            // Hay que esperar a que la busqueda anterior acabe de cerrarse: su
+            // cancelDiscovery() final cortaria la nueva recien arrancada.
+            anterior?.cancelAndJoin()
+            _uiState.update { it.copy(buscando = true, cercanas = emptyList()) }
+            try {
+                buscadorBodycam.buscar().collect { lista ->
+                    _uiState.update { it.copy(cercanas = lista) }
+                }
+            } finally {
+                _uiState.update { it.copy(buscando = false) }
+            }
+        }
+    }
+
+    fun elegirBodycam(dispositivo: DispositivoCercano) {
+        cerrarSelector()
+        bodycamRepository.elegirBodycam(dispositivo)
+        bodycamRepository.connect()
+    }
+
+    fun cerrarSelector() {
+        busquedaJob?.cancel()
+        _uiState.update { it.copy(mostrarSelector = false) }
+    }
 
     fun toggleLivestream() {
         if (_uiState.value.isStreaming) {

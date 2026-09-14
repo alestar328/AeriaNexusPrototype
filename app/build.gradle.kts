@@ -19,7 +19,6 @@ val localProperties = Properties().apply {
 }
 val mapboxAccessToken: String = localProperties.getProperty("MAPBOX_ACCESS_TOKEN") ?: ""
 val agoraAppId: String = localProperties.getProperty("AGORA_APP_ID") ?: ""
-val bodycamMac: String = localProperties.getProperty("BODYCAM_MAC") ?: ""
 val gafasMac: String = localProperties.getProperty("GAFAS_MAC") ?: ""
 // Pais que se le declara al SDK de las gafas al encender su punto de acceso. Su
 // unico canal es el 149 (5745 MHz) y el firmware se niega si el pais del telefono
@@ -57,7 +56,6 @@ android {
 
         buildConfigField("String", "MAPBOX_ACCESS_TOKEN", "\"$mapboxAccessToken\"")
         buildConfigField("String", "AGORA_APP_ID", "\"$agoraAppId\"")
-        buildConfigField("String", "BODYCAM_MAC", "\"$bodycamMac\"")
         buildConfigField("String", "GAFAS_MAC", "\"$gafasMac\"")
         buildConfigField("String", "PAIS_PERIFERICOS", "\"$paisPerifericos\"")
         buildConfigField("boolean", "SIMULADOR_CONFIANZA", "true")

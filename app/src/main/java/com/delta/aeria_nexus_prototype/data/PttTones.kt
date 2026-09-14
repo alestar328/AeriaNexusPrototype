@@ -28,7 +28,7 @@ private const val TAG = "NexusTone"
  * La regla que separa unos de otros sin pensar: **dos notas son tuyas, una nota
  * es de otro.** [entra] y [sale] los dispara AgoraRepository al abrirse o
  * cerrarse el PTT de un companero, venga de su telefono (data stream) o de una
- * bodycam (audio del uid 9001).
+ * bodycam (su audio en el canal).
  *
  * Aqui el boton es de mantener-para-hablar, asi que el tono confirma algo que en
  * la bodycam no hace falta confirmar: que el dedo llego a agarrar el boton y que

@@ -84,10 +84,16 @@ class AgoraRepository(
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
 
-    // True mientras la bodycam (uid 9001) publica video en el canal. Que la
-    // bodycam transmita ES su senal de SOS: asi funciona su boton fisico 133
-    // y tambien el comando STREAM_START enviado desde el telefono.
-    private var bodycamStreamActive = false
+    // Bodycams que estan publicando video en el canal, por uid. Que una bodycam
+    // transmita ES su senal de SOS: asi funciona su boton fisico 133 y tambien el
+    // comando STREAM_START enviado desde el telefono. Es un conjunto y no un flag
+    // porque cada unidad tiene su uid y dos pueden estar en SOS a la vez.
+    // Los callbacks de Agora llegan todos por el mismo hilo, como uidsEnEscucha.
+    private val bodycamsEmitiendo = mutableSetOf<Int>()
+
+    // Bodycams con el PTT abierto, por uid. El aviso se enciende con la primera y
+    // se apaga cuando se calla la ultima.
+    private val bodycamsHablando = mutableSetOf<Int>()
 
     private val _remoteAgents = MutableStateFlow<Map<Int, RemoteAgent>>(emptyMap())
     val remoteAgents: StateFlow<Map<Int, RemoteAgent>> = _remoteAgents.asStateFlow()
@@ -113,8 +119,8 @@ class AgoraRepository(
     private val _remoteVideoStopped = MutableStateFlow<Int?>(null)
     val remoteVideoStopped: StateFlow<Int?> = _remoteVideoStopped.asStateFlow()
 
-    // Una bodycam del sistema tiene el PTT abierto y su voz esta sonando en el
-    // canal. Se deduce del estado del audio remoto de uid 9001, igual que el SOS
+    // Alguna bodycam del sistema tiene el PTT abierto y su voz esta sonando en el
+    // canal. Se deduce del estado de su audio remoto, igual que el SOS
     // de la bodycam se deduce de su video: la camara no manda nada por el data
     // stream, asi que su propio audio es el unico anuncio que llega a todos.
     //
@@ -123,12 +129,12 @@ class AgoraRepository(
     private val _bodycamHablando = MutableStateFlow(false)
     val bodycamHablando: StateFlow<Boolean> = _bodycamHablando.asStateFlow()
 
-    // PENDIENTE (bloqueado por BODYCAM_UID fijo): identidad del oficial que habla.
+    // PENDIENTE: identidad del oficial que habla.
     //
-    // Hoy TODAS las bodycams comparten el uid 9001, asi que no se puede saber cual
-    // habla — ni siquiera pueden coexistir dos en el canal, porque Agora expulsa al
-    // duplicado. Por eso el aviso es generico y este flujo se queda preparado sin
-    // alimentar.
+    // Desde el 2026-09-14 cada bodycam entra con su propio uid, asi que ya se sabe
+    // QUE unidad habla, pero no QUIEN la lleva: eso lo sabe la atadura, que solo
+    // conoce el telefono emparejado. Por eso el aviso sigue siendo generico y este
+    // flujo se queda preparado sin alimentar.
     //
     // Cuando haya autenticacion y usuarios de prueba reales, el camino mas corto NO
     // pasa por tocar la bodycam (que no publica en el data stream): es el TELEFONO
@@ -153,8 +159,8 @@ class AgoraRepository(
     val pttPropioActivo: StateFlow<Boolean> = _pttPropioActivo.asStateFlow()
 
     // Companeros con el PTT abierto DESDE SU TELEFONO, por uid → numero de oficial.
-    // La bodycam no entra aqui: su PTT se detecta por el audio del uid fijo 9001
-    // (bodycamHablando), porque no publica nada en el data stream.
+    // Las bodycams no entran aqui: su PTT se detecta por su audio
+    // (bodycamHablando), porque no publican nada en el data stream.
     private val _pttsRemotos = MutableStateFlow<Map<Int, String>>(emptyMap())
     val pttsRemotos: StateFlow<Map<Int, String>> = _pttsRemotos.asStateFlow()
 
@@ -193,9 +199,9 @@ class AgoraRepository(
         }
 
         override fun onUserJoined(uid: Int, elapsed: Int) {
-            // La bodycam (uid fijo 9001) es un dispositivo, no un agente: no
-            // debe inflar el contador de usuarios.
-            if (uid != BODYCAM_UID) _connectedUsers.value++
+            // Una bodycam es un dispositivo, no un agente: no debe inflar el
+            // contador de usuarios.
+            if (!esBodycam(uid)) _connectedUsers.value++
             // Excepcion al autoSubscribeAudio=false: a la bodycam se la escucha
             // siempre, sin aceptar ningun livestream. Es el PTT — el agente pulsa
             // F2 y su voz tiene que llegar a TODOS los telefonos del sistema, que
@@ -203,7 +209,7 @@ class AgoraRepository(
             // movil emparejado. No reabre el problema que cerraba
             // autoSubscribeAudio=false (que cada voz sonase en todo el canal):
             // la bodycam solo publica audio mientras el PTT esta abierto.
-            if (uid == BODYCAM_UID) escucharBodycam()
+            if (esBodycam(uid)) escucharBodycam(uid)
             // Reenviamos posicion y SOS activo para que el recien llegado nos
             // vea de inmediato, sin esperar al siguiente heartbeat.
             sendCurrentLocation()
@@ -211,17 +217,17 @@ class AgoraRepository(
         }
 
         override fun onUserOffline(uid: Int, reason: Int) {
-            if (uid != BODYCAM_UID && _connectedUsers.value > 1) _connectedUsers.value--
+            if (!esBodycam(uid) && _connectedUsers.value > 1) _connectedUsers.value--
             // Quien se va del canal con el PTT abierto no llega a mandar su
             // "ptt_off": sin esto su banda se quedaria puesta para siempre.
             uidsEnEscucha.remove(uid)
             cerrarPttRemoto(uid)
-            if (uid == BODYCAM_UID) {
-                onBodycamStreamChanged(streaming = false)
+            if (esBodycam(uid)) {
+                onBodycamStreamChanged(uid, streaming = false)
                 // Si se va del canal con el PTT abierto no llega ningun cambio de
                 // estado de audio, y el aviso se quedaria colgado para siempre.
-                marcarBodycamHablando(false)
-                _oficialHablando.value = null
+                marcarBodycamHablando(uid, hablando = false)
+                if (bodycamsHablando.isEmpty()) _oficialHablando.value = null
             }
             // Un emisor que se desconecta equivale a un livestream cortado.
             _remoteVideoStopped.value = uid
@@ -244,9 +250,10 @@ class AgoraRepository(
          * parpadear la banda durante toda la transmision.
          */
         override fun onRemoteAudioStateChanged(uid: Int, state: Int, reason: Int, elapsed: Int) {
-            if (uid != BODYCAM_UID) return
+            if (!esBodycam(uid)) return
             marcarBodycamHablando(
-                when (state) {
+                uid,
+                hablando = when (state) {
                     Constants.REMOTE_AUDIO_STATE_STOPPED,
                     Constants.REMOTE_AUDIO_STATE_FAILED,
                     -> false
@@ -261,14 +268,14 @@ class AgoraRepository(
                 Constants.REMOTE_VIDEO_STATE_FAILED,
                 -> {
                     _remoteVideoStopped.value = uid
-                    if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = false)
+                    if (esBodycam(uid)) onBodycamStreamChanged(uid, streaming = false)
                 }
 
                 Constants.REMOTE_VIDEO_STATE_STARTING,
                 Constants.REMOTE_VIDEO_STATE_DECODING,
                 -> {
                     if (_remoteVideoStopped.value == uid) _remoteVideoStopped.value = null
-                    if (uid == BODYCAM_UID) onBodycamStreamChanged(streaming = true)
+                    if (esBodycam(uid)) onBodycamStreamChanged(uid, streaming = true)
                 }
             }
         }
@@ -333,7 +340,7 @@ class AgoraRepository(
                 clientRoleType = Constants.CLIENT_ROLE_BROADCASTER
                 // El audio ajeno se escucha solo al aceptar un livestream; con
                 // auto-subscribe cada voz publicada sonaria en todo el canal.
-                // Unica excepcion: la bodycam (uid 9001), que se suscribe a mano en
+                // Unica excepcion: las bodycams, que se suscriben a mano en
                 // onUserJoined porque su audio ES el PTT. Ver escucharBodycam().
                 autoSubscribeAudio = false
                 autoSubscribeVideo = true
@@ -341,8 +348,8 @@ class AgoraRepository(
                 publishCameraTrack = false
             }
             // Cada telefono entra con un uid aleatorio, como en Falcon One, pero por
-            // encima del rango reservado a servicios (bodycam 9001, grabador en la
-            // nube 90000-99999): coincidir con el grabador romperia la grabacion.
+            // encima del rango reservado a servicios (bodycams y grabador en la nube,
+            // ver esBodycam): coincidir con el grabador romperia la grabacion.
             miUid = Random.nextInt(PRIMER_UID_TELEFONO, Int.MAX_VALUE)
             rtcEngine.joinChannel(null, CHANNEL_ID, miUid, options)
         } catch (e: Exception) {
@@ -428,19 +435,19 @@ class AgoraRepository(
         // es el PTT, que vive por su cuenta y no se apaga al dejar de ver el video.
         // Por lo mismo tampoco se silencia a un agente que este hablando por su PTT:
         // cerrar su video no cierra su radio.
-        if (uid != BODYCAM_UID && uid !in _pttsRemotos.value) {
+        if (!esBodycam(uid) && uid !in _pttsRemotos.value) {
             rtcEngine.muteRemoteAudioStream(uid, true)
         }
         rtcEngine.setupRemoteVideo(VideoCanvas(null, VideoCanvas.RENDER_MODE_HIDDEN, uid))
     }
 
     /**
-     * Abre la escucha del audio de la bodycam (uid 9001) y la deja abierta. Es el
+     * Abre la escucha del audio de la bodycam [uid] y la deja abierta. Es el
      * canal del PTT: la bodycam solo publica voz mientras el agente tiene el
      * microfono abierto, asi que suscribirse de forma permanente no mete ruido.
      */
-    fun escucharBodycam() {
-        engine?.muteRemoteAudioStream(BODYCAM_UID, false)
+    private fun escucharBodycam(uid: Int) {
+        engine?.muteRemoteAudioStream(uid, false)
     }
 
     /** True si el sistema ya concedio el microfono; el PTT no puede abrirse sin el. */
@@ -531,16 +538,16 @@ class AgoraRepository(
 
     /**
      * Unico sitio donde cambia [_bodycamHablando], y a proposito: el tono de
-     * recepcion tiene que sonar en el FLANCO, no en cada aviso.
+     * recepcion tiene que sonar en el FLANCO de cada bodycam, no en cada aviso.
      * onRemoteAudioStateChanged repite "true" cada pocos segundos mientras dura la
      * transmision (el estado va y viene entre DECODING y FROZEN con el PTT
-     * perfectamente abierto). El StateFlow se traga la repeticion porque el valor
-     * no cambia, pero un pitido por aviso seria un chasquido continuo encima de la
-     * voz del companero.
+     * perfectamente abierto). Un pitido por aviso seria un chasquido continuo
+     * encima de la voz del companero.
      */
-    private fun marcarBodycamHablando(hablando: Boolean) {
-        if (_bodycamHablando.value == hablando) return
-        _bodycamHablando.value = hablando
+    private fun marcarBodycamHablando(uid: Int, hablando: Boolean) {
+        val cambio = if (hablando) bodycamsHablando.add(uid) else bodycamsHablando.remove(uid)
+        if (!cambio) return
+        _bodycamHablando.value = bodycamsHablando.isNotEmpty()
         if (hablando) PttTones.entra() else PttTones.sale()
     }
 
@@ -554,7 +561,7 @@ class AgoraRepository(
         // onUserOffline, que llama por cualquiera que se va del canal.
         if (uid in _pttsRemotos.value) PttTones.sale()
         _pttsRemotos.update { it - uid }
-        if (uid == BODYCAM_UID || uid in uidsEnEscucha) return
+        if (esBodycam(uid) || uid in uidsEnEscucha) return
         engine?.muteRemoteAudioStream(uid, true)
     }
 
@@ -609,16 +616,16 @@ class AgoraRepository(
      * que esta es la unica via para que TODOS los telefonos se enteren), y al
      * apagarse se emite la cancelacion para cerrar popups y avisar el corte.
      */
-    private fun onBodycamStreamChanged(streaming: Boolean) {
-        if (streaming == bodycamStreamActive) return
-        bodycamStreamActive = streaming
+    private fun onBodycamStreamChanged(uid: Int, streaming: Boolean) {
+        val cambio = if (streaming) bodycamsEmitiendo.add(uid) else bodycamsEmitiendo.remove(uid)
+        if (!cambio) return
         val ahora = System.currentTimeMillis()
         if (streaming) {
             _incomingSos.tryEmit(
                 SosAlert(
-                    sessionKey = "$BODYCAM_UID@$ahora",
+                    sessionKey = "$uid@$ahora",
                     officer = BODYCAM_OFFICER,
-                    uid = BODYCAM_UID,
+                    uid = uid,
                     startedAtMillis = ahora,
                     // La bodycam no emite GPS; el agente que la lleva comparte
                     // su posicion desde el telefono como cualquier otro.
@@ -632,7 +639,7 @@ class AgoraRepository(
             _incomingSosCancel.tryEmit(
                 SosCancel(
                     officer = BODYCAM_OFFICER,
-                    uid = BODYCAM_UID,
+                    uid = uid,
                     timestampMillis = ahora,
                     latitude = null,
                     longitude = null,
@@ -795,8 +802,9 @@ class AgoraRepository(
 
             "ptt_on" -> {
                 // Un companero abre su microfono desde el telefono. Su uid es
-                // aleatorio (a diferencia del 9001 de la bodycam), asi que la
-                // suscripcion no puede estar cableada: se abre al oir el anuncio.
+                // aleatorio (a diferencia del de una bodycam, que cae en su rango),
+                // asi que la suscripcion no puede estar cableada: se abre al oir
+                // el anuncio.
                 engine?.muteRemoteAudioStream(remoteUid, false)
                 // El tono va antes de apuntarlo, para no sonar dos veces si
                 // llegase un "ptt_on" repetido del mismo agente.
@@ -827,8 +835,22 @@ class AgoraRepository(
         // Mismo canal que la app Flutter: ambas versiones se ven entre si.
         private const val CHANNEL_ID = "falcon_group_channel"
 
-        // Uid fijo con el que la bodycam entra al canal cuando transmite.
-        const val BODYCAM_UID = 9001
+        // Cada bodycam entra al canal con un uid sacado de su identidad (BWC-896E
+        // entra como 10000 + 0x896E), calculado en BodycamIdentity.uidAgora de
+        // BodyCamServer. Aqui solo hace falta el rango, que queda por debajo del
+        // grabador en la nube (90000-99999).
+        private const val PRIMER_UID_BODYCAM = 10_000
+        private const val ULTIMO_UID_BODYCAM = 89_999
+
+        // Uid con el que entraban TODAS las bodycams antes del 2026-09-14. Se sigue
+        // reconociendo para que una unidad sin actualizar no deje de disparar el SOS
+        // en los telefonos: una emergencia perdida es peor que dos unidades que se
+        // pisan. Quitarlo cuando no quede ninguna W1 con la version antigua.
+        private const val UID_BODYCAM_ANTIGUO = 9001
+
+        /** True si [uid] es una bodycam y no un telefono ni el grabador en la nube. */
+        fun esBodycam(uid: Int): Boolean =
+            uid == UID_BODYCAM_ANTIGUO || uid in PRIMER_UID_BODYCAM..ULTIMO_UID_BODYCAM
 
         // Nombre que muestran las alertas SOS originadas por la bodycam.
         private const val BODYCAM_OFFICER = "BODYCAM"
@@ -837,8 +859,8 @@ class AgoraRepository(
         private const val HEARTBEAT_INTERVAL_MILLIS = 3_000L
         private const val BACKEND_HEARTBEAT_MILLIS = 10_000L
 
-        // Por debajo quedan los uids de servicios: 9001 la bodycam y 90000-99999 el
-        // grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
+        // Por debajo quedan los uids de servicios: las bodycams (ver esBodycam) y
+        // 90000-99999 el grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
         private const val PRIMER_UID_TELEFONO = 100_000
     }
 }

@@ -14,7 +14,6 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.delta.aeria_nexus_prototype.BodycamService
-import com.delta.aeria_nexus_prototype.BuildConfig
 import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.IOException
@@ -136,6 +135,13 @@ class BodycamRepository(private val context: Context) {
 
     val isConnected: Boolean get() = _state.value == BodycamState.CONNECTED
 
+    // La MAC no es secreta (la W1 la anuncia a cualquiera que busque), por eso
+    // basta con preferencias en claro.
+    private val prefs = context.getSharedPreferences(FICHERO_PREFS, Context.MODE_PRIVATE)
+
+    private val _bodycamElegida = MutableStateFlow(leerBodycamElegida())
+    val bodycamElegida: StateFlow<DispositivoCercano?> = _bodycamElegida.asStateFlow()
+
     // Bateria de la bodycam (no la del telefono), del campo battery del STATUS.
     private val _batteryPercent = MutableStateFlow(0)
     val batteryPercent: StateFlow<Int> = _batteryPercent.asStateFlow()
@@ -166,6 +172,13 @@ class BodycamRepository(private val context: Context) {
     @Volatile private var fileServerIp: String? = null
     @Volatile private var fileServerPort = DEFAULT_FILE_SERVER_PORT
 
+    // Numero con el que la bodycam enlazada entra en el canal de Agora, del campo
+    // stream_uid del STATUS. Cada unidad tiene el suyo: es lo que permite saber si
+    // un SOS o un PTT del canal viene de la bodycam propia o de la de otro agente.
+    // Null hasta el primer STATUS de la camara elegida.
+    @Volatile var uidAgoraBodycam: Int? = null
+        private set
+
     // Lineas BTN_* de los botones fisicos, para el flujo SOS de fases siguientes.
     private val _buttonEvents = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val buttonEvents: SharedFlow<String> = _buttonEvents.asSharedFlow()
@@ -190,8 +203,8 @@ class BodycamRepository(private val context: Context) {
      * cualquier caida, hasta que se llame a [disconnect].
      */
     fun connect() {
-        if (BuildConfig.BODYCAM_MAC.isEmpty()) {
-            Log.w(TAG, "BODYCAM_MAC vacio en local.properties: bodycam deshabilitada")
+        if (_bodycamElegida.value == null) {
+            Log.w(TAG, "No hay bodycam elegida: primero hay que buscarla")
             return
         }
         if (!hasBluetoothPermission()) {
@@ -211,6 +224,27 @@ class BodycamRepository(private val context: Context) {
                 connectionJob = scope.launch { connectionLoop() }
             }
         }
+    }
+
+    /**
+     * Guarda la bodycam con la que conectara este telefono a partir de ahora. Corta
+     * el enlace actual: seguir hablando con la camara anterior confundiria al agente.
+     */
+    fun elegirBodycam(dispositivo: DispositivoCercano) {
+        disconnect()
+        prefs.edit()
+            .putString(CLAVE_MAC, dispositivo.mac)
+            .putString(CLAVE_NOMBRE, dispositivo.nombre)
+            .apply()
+        // El numero era de la camara anterior; el de la nueva llega en su STATUS.
+        uidAgoraBodycam = null
+        _bodycamElegida.value = dispositivo
+    }
+
+    private fun leerBodycamElegida(): DispositivoCercano? {
+        val mac = prefs.getString(CLAVE_MAC, null) ?: return null
+        val nombre = prefs.getString(CLAVE_NOMBRE, null) ?: mac
+        return DispositivoCercano(nombre = nombre, mac = mac, pareceBodycam = true)
     }
 
     /** Desconexion manual: cierra el socket y detiene los reintentos. */
@@ -250,10 +284,21 @@ class BodycamRepository(private val context: Context) {
                 return
             }
 
+            // Se lee en cada intento: si el agente cambia de bodycam con el bucle
+            // vivo, el siguiente intento ya va a la nueva.
+            val mac = _bodycamElegida.value?.mac
+            if (mac == null) {
+                synchronized(lock) {
+                    linkWanted = false
+                    connectionJob = null
+                }
+                break
+            }
+
             _state.value = BodycamState.CONNECTING
             val nuevoSocket = try {
                 adapter.cancelDiscovery()
-                createSocket(adapter.getRemoteDevice(BuildConfig.BODYCAM_MAC))
+                createSocket(adapter.getRemoteDevice(mac))
                     .also { it.connect() }
             } catch (e: Exception) {
                 Log.w(TAG, "Intento de conexion fallido: ${e.message}")
@@ -597,6 +642,7 @@ class BodycamRepository(private val context: Context) {
                     _isPttOn.value = estado.optBoolean("ptt", _isPttOn.value)
                     fileServerIp = estado.optString("file_server_ip").takeIf { it.isNotEmpty() }
                     fileServerPort = estado.optInt("file_server_port", fileServerPort)
+                    uidAgoraBodycam = estado.optInt("stream_uid").takeIf { it > 0 }
                 } catch (e: Exception) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
@@ -736,6 +782,10 @@ class BodycamRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "BodycamRepository"
+
+        private const val FICHERO_PREFS = "aeria_bodycam"
+        private const val CLAVE_MAC = "mac"
+        private const val CLAVE_NOMBRE = "nombre"
 
         // Permisos de runtime que exige Android 12+ para conectar por Bluetooth;
         // la UI los pide juntos en un solo dialogo ("Dispositivos cercanos").

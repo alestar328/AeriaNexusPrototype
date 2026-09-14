@@ -28,6 +28,8 @@ object AppContainer {
         private set
     lateinit var bodycamRepository: BodycamRepository
         private set
+    lateinit var buscadorBodycam: BuscadorBodycam
+        private set
     lateinit var gafasRepository: GafasRepository
         private set
     lateinit var gafasMediaRepository: GafasMediaRepository
@@ -85,6 +87,7 @@ object AppContainer {
             sosNotifier = SosNotifier(appContext, uploadConfig),
         )
         bodycamRepository = BodycamRepository(appContext)
+        buscadorBodycam = BuscadorBodycam(appContext)
         gafasRepository = GafasRepository(appContext)
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
         // desde la pantalla de control y se cierra al salir de ella.

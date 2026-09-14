@@ -37,9 +37,11 @@ class SosAlertViewModel(
                 // El SOS de la propia bodycam (enlazada por Bluetooth a este
                 // telefono) no suena aqui: el agente que la lleva lo disparo
                 // el mismo y ya lo ve en el controlador. La sirena es para
-                // las demas unidades.
-                val esBodycamPropia =
-                    alerta.uid == AgoraRepository.BODYCAM_UID && bodycamRepository.isConnected
+                // las demas unidades. Se compara el uid exacto de la camara
+                // enlazada: con "cualquier bodycam y tengo una conectada", el
+                // SOS de la bodycam de OTRO agente quedaba silenciado.
+                val esBodycamPropia = bodycamRepository.isConnected &&
+                    alerta.uid == bodycamRepository.uidAgoraBodycam
                 // Si ya hay una alerta en pantalla se conserva la primera; el
                 // heartbeat del emisor ya viene filtrado por el repositorio.
                 _uiState.update {

@@ -118,6 +118,8 @@ JSON bodies, UTF-8.
 - `source` — `phone` or `bodycam`.
 - `uid` — the Agora uid publishing the SOS video and audio. Record exactly this
   uid (individual mode, `subscribeVideoUids`/`subscribeAudioUids = [uid]`).
+- `bwc_id` — **bodycam only** (since 2026-09-14): the unit's identity, e.g.
+  `BWC-896E`. Its `uid` is derived from it, so two units never share one.
 - `latitude`/`longitude` — omitted when unknown, never `0.0`.
 
 Response `200 {"recording": "started" | "already_started"}`. Any non-2xx is
@@ -151,7 +153,8 @@ Stopping an unknown or already-stopped `sos_id` answers `200`.
    storage) is the moment to hash the files and attach them to the SOS/incident.
 4. **Recorder uid:** it must not collide with any device. Devices now use:
    - phones: random in `[100000, 2^31-1]`;
-   - bodycams: `9001`;
+   - bodycams: `10000 + the hex suffix of their bwc_id` (`BWC-896E` → `45182`), so
+     always within `[10000, 75535]`; units not yet updated still use `9001`;
    - **reserved for services: `90000–99999`**. Use one from that range.
 
 ### 2.4 Chain of custody
@@ -166,8 +169,8 @@ Cloud Recording writes to your third-party storage (S3 or similar), outside our
 
 ### 2.5 Known limits on our side
 
-- **All bodycams share uid 9001.** Two units in SOS at the same time collide in
-  Agora itself, before recording. Unique uids per unit are pending on our side.
+- ~~All bodycams share uid 9001.~~ **Fixed on 2026-09-14**: each unit has its own
+  uid (see 2.3). Only a unit still running the old version joins as `9001`.
 - **The channel runs without token** (no App Certificate). Anyone with the App ID
   can join. Not a blocker for recording, but it should be closed before production.
 - The bodycam also stops its local recording while it streams an SOS (the camera

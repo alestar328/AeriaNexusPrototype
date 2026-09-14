@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.BodycamRepository
 import com.delta.aeria_nexus_prototype.data.BodycamState
+import com.delta.aeria_nexus_prototype.data.DispositivoCercano
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.DeviceActionButton
@@ -91,9 +93,30 @@ fun BodycamControllerScreen(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { resultados -> if (resultados.values.all { it }) viewModel.connect() }
 
+    val permisosBusquedaLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { resultados -> if (resultados.values.all { it }) viewModel.abrirSelector() }
+
+    if (uiState.mostrarSelector) {
+        SelectorBodycamDialog(
+            buscando = uiState.buscando,
+            cercanas = uiState.cercanas,
+            onElegir = viewModel::elegirBodycam,
+            onBuscarOtraVez = viewModel::buscar,
+            onDismiss = viewModel::cerrarSelector,
+        )
+    }
+
     BodycamControllerContent(
         uiState = uiState,
         onBack = onBack,
+        onBuscarBodycam = {
+            if (viewModel.tienePermisosDeBusqueda()) {
+                viewModel.abrirSelector()
+            } else {
+                permisosBusquedaLauncher.launch(viewModel.permisosDeBusqueda())
+            }
+        },
         onConnect = {
             if (!viewModel.hasBluetoothPermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 bluetoothPermissionLauncher.launch(BodycamRepository.BLUETOOTH_RUNTIME_PERMISSIONS)
@@ -117,6 +140,7 @@ fun BodycamControllerScreen(
 private fun BodycamControllerContent(
     uiState: BodycamControllerUiState,
     onBack: () -> Unit,
+    onBuscarBodycam: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onToggleLivestream: () -> Unit,
@@ -186,7 +210,13 @@ private fun BodycamControllerContent(
             LivestreamButton(isStreaming = uiState.isStreaming, onClick = onToggleLivestream)
             DisconnectButton(onClick = onDisconnect)
         } else {
-            ConnectPanel(state = uiState.connectionState, onConnect = onConnect, onCancel = onDisconnect)
+            ConnectPanel(
+                state = uiState.connectionState,
+                bodycamElegida = uiState.bodycamElegida,
+                onBuscar = onBuscarBodycam,
+                onConnect = onConnect,
+                onCancel = onDisconnect,
+            )
         }
     }
 }
@@ -341,7 +371,7 @@ private fun LivestreamButton(isStreaming: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * Boton secundario del panel: abre el visor del livestream (uid 9001) o el
+ * Boton secundario del panel: abre el visor del livestream de la bodycam o el
  * visor remoto de foto, segun el estado de la bodycam.
  */
 @Composable
@@ -398,14 +428,34 @@ private fun DisconnectButton(onClick: () -> Unit) {
     }
 }
 
-/** Estado sin enlace: un unico boton grande para conectar (o cancelar). */
+/**
+ * Estado sin enlace: un unico boton grande para conectar (o cancelar). Sin bodycam
+ * elegida, ese boton abre la busqueda, porque no hay a quien conectar.
+ */
 @Composable
 private fun ConnectPanel(
     state: BodycamState,
+    bodycamElegida: DispositivoCercano?,
+    onBuscar: () -> Unit,
     onConnect: () -> Unit,
     onCancel: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (bodycamElegida == null) {
+            Text(
+                text = "No bodycam linked to this phone yet. Turn it on and search for it.",
+                color = TextoSecundario,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            BotonPanelPrincipal(texto = "FIND BODYCAM", conectando = false, onClick = onBuscar)
+            return@Column
+        }
+
+        BodycamElegidaRow(bodycamElegida = bodycamElegida, onCambiar = onBuscar)
+        Spacer(Modifier.height(12.dp))
         Text(
             text = when (state) {
                 BodycamState.CONNECTING -> "Searching for the bodycam…"
@@ -419,22 +469,58 @@ private fun ConnectPanel(
         )
         Spacer(Modifier.height(12.dp))
         val conectando = state == BodycamState.CONNECTING
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 72.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(if (conectando) Superficie else AzulPrimario)
-                .clickable { if (conectando) onCancel() else onConnect() },
-            contentAlignment = Alignment.Center,
+        BotonPanelPrincipal(
+            texto = if (conectando) "CANCEL" else "CONNECT BODYCAM",
+            conectando = conectando,
+            onClick = if (conectando) onCancel else onConnect,
+        )
+    }
+}
+
+/**
+ * Bodycam guardada en este telefono. Cambiarla es la salida cuando la conexion no
+ * llega nunca: casi siempre es que se eligio otro aparato.
+ */
+@Composable
+private fun BodycamElegidaRow(bodycamElegida: DispositivoCercano, onCambiar: () -> Unit) {
+    CardSurface(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = if (conectando) "CANCEL" else "CONNECT BODYCAM",
-                color = Color.White,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = 2.sp,
-            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = bodycamElegida.nombre,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(text = bodycamElegida.mac, color = TextoTerciario, fontSize = 14.sp)
+            }
+            TextButton(onClick = onCambiar, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(text = "CHANGE", color = AzulClaro, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            }
         }
+    }
+}
+
+@Composable
+private fun BotonPanelPrincipal(texto: String, conectando: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 72.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (conectando) Superficie else AzulPrimario)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = texto,
+            color = Color.White,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 2.sp,
+        )
     }
 }

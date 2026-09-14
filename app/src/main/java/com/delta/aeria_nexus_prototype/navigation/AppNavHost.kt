@@ -12,7 +12,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel
@@ -161,9 +160,15 @@ fun AppNavHost() {
 
         composable(Routes.BODYCAM) {
             BodycamControllerScreen(
-                viewModel = viewModel { BodycamControllerViewModel(AppContainer.bodycamRepository) },
+                viewModel = viewModel {
+                    BodycamControllerViewModel(AppContainer.bodycamRepository, AppContainer.buscadorBodycam)
+                },
                 onOpenLivestream = {
-                    navController.navigate(Routes.livestream(AgoraRepository.BODYCAM_UID))
+                    // Sin STATUS todavia no se sabe con que uid emite la camara, y un
+                    // visor apuntando a otro uid se quedaria en negro.
+                    AppContainer.bodycamRepository.uidAgoraBodycam?.let { uid ->
+                        navController.navigate(Routes.livestream(uid))
+                    }
                 },
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
                 onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },

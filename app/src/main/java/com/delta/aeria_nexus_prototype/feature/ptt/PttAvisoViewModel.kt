@@ -28,11 +28,10 @@ data class PttAvisoUiState(
  *
  * Los dos origenes NO se detectan igual, y por eso solo uno tiene nombre:
  *
- * - **Bodycam**: se deduce de su audio remoto (uid fijo 9001). El aviso es
- *   GENERICO a proposito, no por falta de diseno: todas las bodycams comparten ese
- *   uid, asi que el canal no permite saber cual habla. Cuando haya autenticacion y
- *   usuarios reales, el nombre entra por [AgoraRepository.oficialHablando] sin
- *   tocar nada mas de este fichero.
+ * - **Bodycam**: se deduce de su audio remoto. El aviso es GENERICO a proposito:
+ *   cada bodycam tiene su uid, asi que el canal dice que unidad habla, pero no que
+ *   agente la lleva. Cuando haya autenticacion y usuarios reales, el nombre entra
+ *   por [AgoraRepository.oficialHablando] sin tocar nada mas de este fichero.
  * - **Telefono**: llega anunciado por el data stream con el numero de oficial
  *   dentro ([AgoraRepository.pttsRemotos]), asi que ese si se puede nombrar.
  */

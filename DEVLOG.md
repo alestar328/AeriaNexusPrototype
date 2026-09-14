@@ -6,6 +6,143 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-14 — La bodycam se elige desde la app, y el PTT hacia la W1 no existe
+
+### Por que
+
+El manager no conseguia conectar su telefono con la bodycam. La causa: la MAC de la W1 se
+metia en el APK al compilar (`BODYCAM_MAC` de `local.properties`), asi que cada APK solo
+servia para una camara concreta. Tambien comento que el PTT del telefono no suena en la
+bodycam.
+
+### Hecho
+
+- **`BuscadorBodycam.kt`** (nuevo): busqueda Bluetooth de verdad, no solo la lista de
+  emparejados, porque el enlace es RFCOMM *insecure* y lo normal es que la W1 no este
+  emparejada. Marca como bodycam lo que empieza por `DSJ-` y lo pone arriba.
+- **`SelectorBodycamDialog.kt`** (nuevo) + boton CHANGE en el mando BODYCAM. La eleccion se
+  guarda en preferencias (`aeria_bodycam`) y `BodycamRepository` la lee en cada intento de
+  conexion. Fuera `BODYCAM_MAC` de `build.gradle.kts`.
+- Buscar corta el enlace actual: los reintentos llaman a `cancelDiscovery()` y matarian la
+  busqueda a medias.
+
+### Estado: VERIFICADO en el Samsung contra la W1
+
+- Con el Samsung **desemparejado** de la W1: aparece DSJ-ZXAN9A1, se elige y conecta.
+- Solo funciona porque BodyCamServer ahora **se hace visible 5 minutos al arrancar** (ver su
+  DEVLOG). Sin eso la W1 esta en `SCAN_MODE_CONNECTABLE` y una busqueda no la encuentra: la
+  primera prueba "funciono" solo porque el Samsung ya estaba emparejado.
+- Sale `Enlace sin autenticar` porque el Samsung no esta dado de alta en IAM. No corta.
+
+### PTT telefono → bodycam: no es un fallo, no existe
+
+La W1 solo entra en Agora mientras emite (SOS o su propio PTT) y con
+`autoSubscribeAudio = false`; tampoco lee `ptt_on`/`ptt_off`. Construirlo supone tenerla
+siempre en el canal (bateria y datos), sacar audio por su altavoz y evitar que el agente lo
+oiga por dos aparatos. **Pendiente de que el manager confirme si lo quiere.**
+
+### Cada bodycam con su uid de Agora (antes todas eran 9001)
+
+**Por que.** Con el uid fijo, dos unidades a la vez en el canal se echan una a otra, y
+`SosAlertViewModel` decidia "es mi bodycam" con `uid == 9001 && tengo alguna conectada`: **el
+agente A, con su bodycam enlazada, no oia el SOS de la bodycam del agente B**. Ademas es
+requisito previo del PTT hacia la bodycam.
+
+**Hecho.**
+- La bodycam saca su uid de su identidad IAM: `10000 + sufijo hex del BWC`. La W1 de pruebas
+  (`BWC-896E`) entra como **45182**. Detalle en el DEVLOG de BodyCamServer.
+- `AgoraRepository.esBodycam(uid)`: rango 10000-89999 **mas el 9001 antiguo**, para que una
+  unidad sin actualizar no deje de disparar el SOS. Quitarlo cuando no quede ninguna.
+- "Emitiendo" y "hablando" pasan de un flag a **un conjunto por uid**: dos bodycams pueden
+  estar en SOS o en PTT a la vez.
+- `BodycamRepository.uidAgoraBodycam` lee `stream_uid` del STATUS (llegaba y nadie lo leia).
+  Lo usan `SosAlertViewModel` (bodycam propia = ese uid exacto) y VIEW LIVE FEED.
+- `UidBodycamTest` (4 pruebas JVM): fija el contrato de rangos entre los dos repos.
+- `docs/BACKEND-PROXY-AND-SOS.md`: nuevo campo `bwc_id` y rango de bodycams para el backend.
+
+**Verificado con W1 + Samsung:** la W1 entra como `uid=45182`; su SOS no suena en el Samsung
+enlazado; desenlazado, **suena y se ve**; el PTT de la W1 da banda, tono y voz; VIEW LIVE FEED
+abre la imagen. **Sin probar:** dos bodycams a la vez (hace falta otra W1) y el Redmi, que no
+estaba conectado.
+
+**Hay que actualizar las dos apps a la vez** en los aparatos del manager: un telefono con el APK
+anterior no reconoce una W1 nueva como bodycam y **no le salta su SOS**.
+
+### PTT hacia la bodycam: requisitos y primera medicion
+
+**Requisitos fijados por el usuario:**
+- Suenan los aparatos ajenos, nunca los del propio agente.
+- Suena un solo aparato por agente: la bodycam si esta enlazada; si no, el telefono.
+- Sale por el altavoz de la W1.
+- Si hay un incidente grabando, el PTT suena igual y la grabacion sigue con su audio.
+- Suena para todos, sin grupos.
+- No se puede perder nada.
+- Elegido: **la bodycam siempre conectada al canal**.
+
+**Medido en la W1** con una sonda de depuracion (`SondaEscuchaPtt` en BodyCamServer):
+- **La grabacion conserva su audio.** La W1 entra a escuchar como audiencia, sin capturar, y
+  Agora **no abre el microfono**: en `audio_flinger` solo sigue la pista del anillo, sin
+  silenciar.
+- El modo de audio sigue en NORMAL y la entrada tarda 293 ms.
+- **La voz del PTT del Samsung sale por el altavoz** y el usuario la oye bien.
+- **Queda grabada en el anillo con fuerza** (-11 a -20 dB, frente a -23/-26 dB de alguien
+  hablando al lado); al acabar el PTT vuelve al silencio de la sala (-54 dB).
+- Salir del canal tampoco toca el anillo, al contrario que el incidente del 08-sep.
+
+**Hallazgo lateral:** el audio de la grabacion va a **8.000 Hz**, calidad telefonica.
+`MediaRecorder` no fija la frecuencia y cae en la de por defecto. Detalle en el DEVLOG de
+BodyCamServer.
+
+**Sin medir:**
+- La latencia de pulsar en el telefono a sonar en la W1: el Samsung estaba desenchufado.
+- La bateria: la medicion de 20 min se lanzo, pero el usuario la aparco. El CSV queda en la W1,
+  en `Android/data/com.falconone.bodycamserver/files/sonda_ptt_bateria.csv`.
+
+### Entrega al manager: decidido que se puede, falta generarla
+
+Las dos APK pueden salir con lo verificado hoy. Tiene que ser **release, no debug**. Antes de
+generar, **el usuario tiene que decidir `FLAG_SECURE`**: reactivarlo, o dejarlo apagado
+solo para esta prueba y que el manager pueda mandar capturas. Con el simulador de confianza
+puesto no hace falta alta ni PIN real (PIN de demostracion `004471`).
+
+Para el manager:
+- Si tiene instaladas versiones debug, la release no instala encima: hay que desinstalar, y
+  eso borra el alta y la boveda del telefono.
+- Abrir FalconOne Server a mano en la W1 y buscar desde el telefono en los 5 minutos
+  siguientes.
+- El PTT hacia la bodycam todavia no existe.
+
+### Horas
+
+**2,5 h** en `tabla_horas_facturacion_proyecto.xlsx`, repartidas en tres filas: AN-9 1,3,
+BC-10 0,6 y BC-8 0,6.
+- **Origen:** reloj de sesion 19:36-19:52 y 21:53-23:50, 2,2 h medidas y redondeadas al alza.
+  No se cuenta el hueco 19:52-21:34 del reinicio.
+- **Rango de formulas** ampliado de la fila 29 a la 33: el total pasa a la fila 34 y la
+  leyenda a la 36.
+- Septiembre suma **48 h**.
+
+### Proximo paso
+
+- **Generar las dos release** en cuanto se decida `FLAG_SECURE`, y pasarle al manager las
+  instrucciones de arriba.
+- **Quitar o dejar la sonda:** `SondaEscuchaPtt` solo existe en debug, asi que no molesta en
+  release. Borrarla cuando el PTT hacia la bodycam este construido.
+- **PTT hacia la bodycam**: requisitos cerrados hoy con el usuario (suena un aparato por agente,
+  nunca el propio; grabacion y PTT en paralelo; bodycam siempre conectada). La medicion clave
+  ya esta hecha y sale bien. Lo siguiente es construirlo:
+  1. BodyCamServer en el canal todo el tiempo, solo escuchando.
+  2. Que suene solo el PTT y no el audio de un SOS.
+  3. El numero de la bodycam y el del telefono emparejado se intercambian por Bluetooth, para
+     que cada uno ignore al otro.
+  4. El telefono calla si tiene bodycam enlazada.
+  5. Un motor de Agora compartido con el SOS y el PTT de la unidad.
+- Pendiente de preguntar: ¿el PTT tiene que quedar grabado como evidencia? Hoy no se guarda en
+  ningun sitio; tendria que grabarlo el backend, como el SOS. ¿Y el agente tiene que poder
+  HABLAR por la bodycam mientras graba un incidente? Hoy se le niega.
+
+---
+
 ## 2026-09-13 — El SOS de la bodycam hace grabar a las gafas (parte 1), y lo que dice el AAR
 
 ### Por que
@@ -226,6 +363,61 @@ Desde Android O el sonido y la vibracion los manda el CANAL, no la notificacion:
 `crearCanal(vibra = true)` y no con el `setDefaults` deprecado.
 
 **Sin verificar contra el hardware**: para provocarlo hay que apagar las gafas y disparar un SOS.
+
+### Cierre del dia: interfaz, renombrado y el APK de pruebas
+
+- **Todos los textos visibles pasados a ingles** (el despliegue es Filipinas). Los `Log` y los
+  comentarios se quedan en castellano: son para quien mantiene, no para el agente. De paso se
+  corrigio un texto que **habia pasado a ser mentira** ("si se usa el boton de las gafas, el
+  telefono no se entera": desde la parte 2 si se entera).
+- **Una sola barra superior para toda la app**, con el patron canonico de Android: un `Scaffold`
+  en `AppNavHost` envolviendo el `NavHost`. Las 12 pantallas pasan a ser **solo contenido** —sin
+  `AppScaffold`, sin `innerPadding` y sin el parametro `onTabSelected`, que quedaba muerto en las
+  doce— y la pestana activa y la barra inferior **se deducen de la ruta**. El hueco de las barras
+  se descuenta **solo** en el modificador del `NavHost`: esa linea es la que un script o un
+  refactor futuro se puede volver a llevar por delante (paso hoy, y dejo la cicatriz escrita).
+- **Los mandos de los perifericos se abren desde los iconos de la barra**, que existen en todas
+  las pantallas. Los botones BODYCAM y FALCON LENS de Operations se quitaron, y con ellos
+  `DeviceControlButton`. El **PTT** pasa a tener el peso del boton de emergencia. El boton de
+  llamada queda comentado (era decorativo).
+- **La ficha del oficial se ve entera sin scroll** en la pantalla de PIN: la pantalla mide el alto
+  disponible y por debajo de 760 dp utiles se aprieta, en vez de cortarse. El scroll sigue debajo
+  como ultimo recurso.
+- **Las gafas pasan a llamarse FalconOne** en las 24 cadenas visibles: titulo `FALCON ONE`, fuera
+  el subtitulo con el nombre del fabricante, y notificaciones y errores al dia. Los nombres de
+  clase y fichero (`GafasControlScreen`, `ReleGafas`...) NO se han renombrado: es refactor interno
+  sin efecto para el usuario.
+- **La descarga ya no se cuelga.** Tenia dos formas de quedarse en "Retrieving" para siempre: el
+  AP cayendose a media tanda (ahora se comprueba el enlace antes de cada fichero y se corta
+  diciendo cuantos se salvaron) y el AP yendose **sin cerrar el socket**, que es el caso feo
+  porque ni siquiera salta el timeout de lectura (ahora hay un tope global de 10 min a la tanda).
+- **Selector de estado de confianza en la APK de release de pruebas**, con interruptor de
+  compilacion `SIMULADOR_CONFIANZA_EN_RELEASE` en `local.properties`. **No se comento la
+  verificacion**: un codigo comentado no avisa de nada (ver `FLAG_SECURE`, comentado desde julio y
+  a punto de colarse hoy en la entrega). Con el puesto, la release **no exige alta ni PIN** y su
+  PIN de demostracion es `004471`, que esta en el codigo: esa APK no puede llegar a campo.
+
+### Repaso general del proyecto
+
+Lint paso de **53 errores a 1**. Los 41 de `ProxyEncoder` eran la API inestable de Media3 (un
+`@OptIn` en la clase) y 9 la sonda de gafas. **El que importaba de verdad**: `ClaveEnKeystore`
+capturaba `StrongBoxUnavailableException`, que existe desde **API 28**, con el `minSdk` en **26**.
+Nombrarla en un `catch` hace que ART no resuelva el metodo en Android 8.0/8.1 y reviente **al
+entrar**, antes de generar la clave: el alta de identidad no arrancaria en un terminal antiguo, y
+el despliegue es Filipinas. Se quito el catch especifico —hereda de `ProviderException`, que ya se
+capturaba— con lo que el comportamiento es identico en API 28+.
+
+Tambien se corrigio documentacion que ya no era cierta en cuatro sitios (`AppContainer` decia que
+el repositorio de medios "no lo llama nadie", `GafasMediaRepository` seguia con dos huecos
+`PROTOCOLO` resueltos, y `GafasCommandRepository` decia que el canal se abre "desde esta
+pantalla"), y se quito codigo muerto.
+
+**Queda sin resolver, y hace falta decidirlo:** los iconos de la barra solo navegan desde
+Operations; `RELEASE CONTROL` de la pantalla FalconOne miente (suelta el canal y el bucle lo
+levanta); `RadioActionButton` es codigo muerto conservado para que el comentario del boton de
+llamada tenga sentido; el `isRecording` de la barra sigue siendo el del incidente activo y no el
+global; y hay 6 ficheros por encima de las 300 lineas de la regla del proyecto (el mayor,
+`AgoraRepository`, con 848).
 
 ### Pendiente / proximo paso
 
