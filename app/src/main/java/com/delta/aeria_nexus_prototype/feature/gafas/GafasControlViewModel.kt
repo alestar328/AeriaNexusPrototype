@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.DescargaDeGafas
 import com.delta.aeria_nexus_prototype.data.EstadoDescarga
+import com.delta.aeria_nexus_prototype.data.GafasCandidatas
 import com.delta.aeria_nexus_prototype.data.GafasCommandRepository
 import com.delta.aeria_nexus_prototype.data.GafasControlState
 import com.delta.aeria_nexus_prototype.data.GafasRepository
@@ -34,6 +35,11 @@ data class GafasControlUiState(
     val pendientes: Int = 0,
     /** En que punto va la descarga, si es que hay una. */
     val descarga: EstadoDescarga = EstadoDescarga.Parada,
+    /** Las gafas de este agente, o null si todavia no las ha elegido. */
+    val gafasElegidas: GafasCandidatas? = null,
+    val selectorAbierto: Boolean = false,
+    /** Lo emparejado en el telefono, para el selector. */
+    val candidatas: List<GafasCandidatas> = emptyList(),
 )
 
 /**
@@ -97,6 +103,43 @@ class GafasControlViewModel(
         viewModelScope.launch {
             descarga.estado.collect { estado -> _uiState.update { it.copy(descarga = estado) } }
         }
+        viewModelScope.launch {
+            presencia.gafasElegidas.collect { gafas -> _uiState.update { it.copy(gafasElegidas = gafas) } }
+        }
+    }
+
+    /**
+     * Lo que se hace al entrar con permiso de Bluetooth: conectar con las gafas del
+     * agente. Si todavia no hay, se eligen solas cuando no hay duda, y si la hay se
+     * abre el selector.
+     */
+    fun alEntrar() {
+        presencia.elegirSolasSiNoHayDuda()
+        if (presencia.macElegida() == null) abrirSelector() else mando.conectar()
+    }
+
+    fun abrirSelector() {
+        _uiState.update { it.copy(selectorAbierto = true, candidatas = presencia.emparejadas()) }
+    }
+
+    /** Tras emparejar en los ajustes de Android la lista no se entera sola. */
+    fun releerCandidatas() {
+        _uiState.update { it.copy(candidatas = presencia.emparejadas()) }
+    }
+
+    fun cerrarSelector() {
+        _uiState.update { it.copy(selectorAbierto = false) }
+    }
+
+    /**
+     * Cambia de gafas. Se suelta antes el canal con las anteriores: si no, el SDK
+     * seguiria hablando con ellas y el bucle del turno no reconectaria nunca.
+     */
+    fun elegir(gafas: GafasCandidatas) {
+        mando.desconectar()
+        presencia.elegirGafas(gafas)
+        _uiState.update { it.copy(selectorAbierto = false) }
+        mando.conectar()
     }
 
     /**
@@ -130,7 +173,7 @@ class GafasControlViewModel(
     /** Tras conceder el permiso hay que releer: los avisos perdidos no vuelven. */
     fun alConcederBluetooth() {
         presencia.refrescar()
-        mando.conectar()
+        alEntrar()
     }
 
     private fun mostrarAviso(mensaje: String) {

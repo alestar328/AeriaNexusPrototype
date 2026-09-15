@@ -6,6 +6,324 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-15 (4) — Las gafas no conectaban en el teléfono del manager: MAC compilada y un fallo del SDK con Android 11
+
+### Por qué
+
+El manager no conseguía el control de las gafas: la pantalla FalconOne se quedaba en rojo
+«NO CONTROL» con «The FalconOne is not responding». Su teléfono es un Redmi. Primero se
+sospechó de la APK release.
+
+### Primer fallo: la MAC de las gafas iba compilada en el APK
+
+`GAFAS_MAC` de `local.properties` entraba en `BuildConfig`, como pasaba con la bodycam hasta
+el 14-sep. Cada APK solo reconocía nuestras gafas de pruebas.
+
+**Hecho:**
+- **`GafasRepository`**:
+  - las gafas elegidas se guardan en preferencias (`aeria_gafas`);
+  - `emparejadas()` lista lo emparejado, con las `BleeqUp`/`Ranger` primero;
+  - `elegirSolasSiNoHayDuda()` las elige solas si solo hay unas emparejadas. Se llama
+    también desde `refrescar()`, porque el relé de la bodycam no pasa por la pantalla.
+- **`GafasSdkPuente`, `GafasApPrueba` y `GafasCommandRepository`** leen la MAC elegida.
+- **`SelectorGafasDialog`** (nuevo), con OPEN BLUETOOTH SETTINGS y REFRESH. No hay búsqueda
+  por radio: las gafas no se anuncian, así que se emparejan en los ajustes de Android.
+  La pantalla FalconOne enseña el nombre de las gafas con CHANGE o CHOOSE.
+- Fuera `GAFAS_MAC` de `build.gradle.kts`. La línea de `local.properties` queda sin uso.
+
+**Verificado en el Redmi:** `Gafas elegidas: BleeqUp-Ranger-901FC` solas y enlace de audio
+CONNECTED. **Pero el control seguía sin abrir.**
+
+### La causa real: el SDK comprueba `BLUETOOTH_CONNECT` también en Android 11
+
+- **Descartado R8:** el Redmi llevaba debug y fallaba igual. El puente por reflexión
+  funcionaba (`registrado ... sin escanear`).
+- El sistema tenía **cero clientes GATT** de la app: el SDK ni lo intentaba.
+- **Desensamblado `BleeqUpDeviceManager.connect`** con `javap`:
+  `checkSelfPermission(mContext, BLUETOOTH_CONNECT)` y, si no es GRANTED,
+  `onResult(false)` y return **antes de `connectGatt`**. Hay la misma comprobación en
+  reconnect, disconnect y el WiFi.
+- `BLUETOOTH_CONNECT` no existe hasta Android 12, así que **en Android 11 da DENIED
+  siempre**. El Redmi es API 30; el Samsung, API 35.
+
+**Arreglo:** `GafasSdkPuente.ContextoConPermisosDeAndroid11`, un `ContextWrapper` que se
+pasa a `BleeqUpSDK.init`. Solo con `SDK_INT < S`, contesta `BLUETOOTH_CONNECT` con
+`BLUETOOTH` y `BLUETOOTH_SCAN` con `BLUETOOTH_ADMIN`, los permisos de instalación reales en
+esas versiones. `init` guarda el Context tal cual (comprobado en el bytecode), así que el
+envoltorio llega a todas las comprobaciones.
+
+**VERIFICADO en el Redmi:** «CONTROL READY», y `dumpsys bluetooth_manager` muestra el cliente
+GATT de `com.delta.aeria_nexus_prototype` conectado a `F0:74:E4:79:7C:B1` desde las 16:38:16.
+
+### De paso: Android 11 bloqueaba los avisos de las gafas
+
+En el logcat del Redmi:
+`Permission Denial: broadcasting ACL_CONNECTED ... requires ...DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`.
+En Android 12 o anterior esos avisos los emite el proceso de Bluetooth (uid 1002), y el
+receptor de `GafasRepository` era `RECEIVER_NOT_EXPORTED`. Pasa a `RECEIVER_EXPORTED`, como
+`BuscadorBodycam`: son broadcasts protegidos del sistema.
+
+**Sin verificar:** que el icono cambie al instante al conectar y desconectar en el Redmi.
+
+### Sin verificar
+
+- Grabar, foto y descarga por WiFi en el Redmi (Android 11). La descarga pasa por la misma
+  comprobación del SDK en `BleeqUpWifiManager`.
+- La APK release con gafas: nunca se ha probado.
+- **El teléfono del manager:** necesita un APK nuevo. Emparejar las gafas en Ajustes;
+  si solo tiene esas, se eligen solas.
+
+### Pendiente
+
+- Avisar al fabricante: su AAR tiene que comprobar `SDK_INT >= 31` antes de mirar
+  `BLUETOOTH_CONNECT`.
+- Generar la release para el manager (sube versión) y probarla contra las gafas antes de
+  mandarla.
+
+### Horas
+
+**2 h** en `tabla_horas_facturacion_proyecto.xlsx`, filas 38-39, AN-5 (1 + 1).
+- **Origen:** las indicó el usuario. El reloj de sesión da 0,85 h activas (15:06-15:27,
+  16:03-16:26 y 16:41-16:48); los huecos fueron suyos, con la release del manager y las
+  pruebas en el Redmi.
+- **Líneas .kt:** 378.
+
+**Septiembre suma 52,5 h.**
+
+---
+
+## 2026-09-15 (3) — Workflows 61 y 46: diario de auditoría local a prueba de manipulación
+
+### Por qué
+
+Tercero de la lista acordada. Es solo aditivo: no cambia ningún flujo que usen los
+testers. No hay hoja de detalle de ciberseguridad para estos dos workflows, así que el
+catálogo de eventos es **propuesta nuestra**. Se apoya en las familias de eventos y en
+las «calidades» de auditoría del §14 del documento de arquitectura.
+
+### Hecho
+
+- **`data/audit/CadenaDeAuditoria.kt`** (JVM puro):
+  - Cada línea es `orden TAB mac_anterior TAB json TAB mac`, con HMAC-SHA256 sobre las
+    tres primeras partes.
+  - Se firma el texto tal cual, sin depender del orden de claves de un serializador.
+  - `JsonPlano` compone el JSON a mano, porque `org.json` no existe en las pruebas JVM.
+- **`data/audit/AuditoriaLocal.kt`**:
+  - Clave `aeria.audit.hmac.v1` en el Keystore, propia (IAM-05).
+  - Fichero `files/audit/eventos.log`.
+  - Un solo hilo escritor, así que el orden del fichero es el orden real.
+  - **Registrar nunca falla hacia fuera.**
+  - El contexto se toma en el hilo que llama: el cierre de sesión lleva la sesión que se
+    cierra.
+  - Si falta la clave y hay diario, se aparta a `eventos-sin-clave-<ts>.log` y empieza otro
+    con `AUDITORIA_REINICIADA`.
+- **Campos de cada evento (§14.1):** id, ts, `uptime_ms` (para ver saltos de reloj), type,
+  family, actor, tenant, device, app_instance, release y session (id local creado en el
+  desbloqueo; lo sustituirá el del backend en el workflow 28). **Nunca contenido**: ni PIN,
+  ni contraseñas, ni notas.
+- **Eventos:**
+  - `IdentityRepository`: `SESION_ABIERTA` (origen), `PIN_INCORRECTO` (vía e intentos),
+    `PIN_BLOQUEO_TEMPORAL`, `PIN_CAMBIADO`, `PIN_CAMBIO_FALLIDO` y `SESION_CERRADA` (motivo).
+  - `BodycamRepository`: `BODYCAM_ENLACE`, `ATADURA_CREADA`, `ATADURA_RECHAZADA` y
+    `ATADURA_DESHECHA` (con `signed_notice_sent`).
+  - **Workflow 46:** `VaultViewModel` registra `BOVEDA_CREADA`, `BOVEDA_ABIERTA`,
+    `BOVEDA_CONTRASENA_INCORRECTA` y `BOVEDA_CERRADA` (MANUAL o motivo de la sesión, este
+    desde `AppContainer`). `VaultRepository.open()` registra **`EVIDENCIA_VISUALIZADA`
+    en cada apertura**, con el fichero y el resultado: todas las vistas previas de la app
+    pasan por ahí.
+- **Pantalla `feature/audit/`**: Profile → Session → Audit log, en solo lectura.
+  - Arriba, el estado de la cadena («CHAIN INTACT» o «CHAIN BROKEN AT EVENT #N» con el
+    motivo), con color, icono y texto.
+  - Debajo, los eventos del más reciente al más antiguo.
+- **`CadenaDeAuditoriaTest`: 8 pruebas.**
+  - Detectados: cambiar un dato, borrar uno de en medio, reordenar, renumerar para tapar
+    un borrado y rehacer la cadena con otra clave.
+  - Un TAB dentro de un valor no rompe el formato.
+  - Cortar el final **no** se detecta: la prueba lo fija como límite conocido.
+  - Total: **40 pruebas JVM en verde**.
+
+### VERIFICADO en el Samsung
+
+- Tras reinstalar: `AUDITORIA_INICIADA`, `SESION_ABIERTA`, `SESION_CERRADA (FIN_DE_TURNO)`,
+  tres `PIN_INCORRECTO` con los intentos bajando de 4 a 2, y otra `SESION_ABIERTA` con un id
+  de sesión distinto. Pantalla: **CHAIN INTACT, 7 events verified**.
+- **Manipulación:**
+  - Se sacó el fichero con `run-as` y se cambió `attempts_left` 4→5 en el evento #4.
+  - Pantalla: **«CHAIN BROKEN AT EVENT #4 — content was modified. 3 events before it are
+    valid.»**
+  - Restaurado el original: vuelve a CHAIN INTACT.
+
+### Incidencia de la prueba, anotada para no repetirla
+
+Los tres PIN incorrectos **fueron toques míos por adb**, no un fallo de la app. Los tres
+llevaban `004471`; el propio usuario desbloqueó después con ese PIN (evento 7). No se sabe
+qué dígito entró mal: adb no enseña qué tecla recibió cada toque. Probablemente fueron toques
+encadenados con la transición del diálogo de End shift. **Regla:** en la pantalla de PIN,
+capturar antes del último dígito y no teclear hasta ver la pantalla quieta. Cada fallo gasta
+uno de los 5 intentos del teléfono de los testers.
+
+### Sin verificar
+
+- Los eventos de bóveda y de evidencia: en el Samsung la bóveda está sin configurar.
+- Los de bodycam: la W1 no estaba conectada.
+- `AUDITORIA_REINICIADA` (clave perdida con diario escrito).
+- Diario grande: no hay rotación ni tope de tamaño, y verificar recorre todo el fichero.
+
+### Próximo paso
+
+- Con el Redmi y la W1: fin de turno (atadura con `FIN_DE_TURNO`), bóveda configurada y
+  evidencia abierta. Los eventos de esos flujos aparecerán en el diario.
+- ~~Excel IAM: workflow 61 a Parcial y 46 al 80 %; IAM-16 a Parcial.~~ Hecho: también
+  Sin-backend-YA, Plan-G0-G7 (cola local Hecho, catálogo de eventos Parcial) y el Resumen:
+  8 Hecho / 24 Parcial / 19 Sin empezar / 17 No aplica.
+
+### Horas de la tarde
+
+**1,5 h** en `tabla_horas_facturacion_proyecto.xlsx`, filas 35-37:
+- AN-4, reconexión: 0,3.
+- AN-2, revisión del IAM y workflows 5 y 30: 0,6.
+- **AN-10, bloque nuevo**, auditoría (workflows 61 y 46): 0,6.
+
+**Origen:** reloj de sesión 13:34-14:05 y 14:22-15:06, 1,25 h medidas y redondeadas al
+alza. No se cuentan 13:20-13:34 (anotar las horas de la mañana) ni 14:05-14:22 (espera a que
+se desbloqueara el Samsung).
+
+**Líneas .kt:** 176 de la reconexión, unas 529 de los workflows 5 y 30 y unas 903 de los
+61 y 46 (96 de pruebas).
+
+**Septiembre suma 50,5 h.**
+
+---
+
+## 2026-09-15 (2) — Revisión del IAM: lo que la hoja Sin-backend-YA da por hecho, contra el código
+
+### Por qué
+
+Retomar el IAM después de nueve días con gafas, PTT y vídeo. `Seguimiento-IAM-AeriaOne.xlsx`
+no se toca desde el 06-sep, así que antes de avanzar se comprobó en código, DEVLOG y
+memoria que lo marcado como hecho lo está.
+
+### Las dos filas «Hecho»: confirmadas, con matices
+
+- **Workflow 4 (PIN): hecho de verdad.** `PinLocal` hace lo que dice la hoja:
+  - verificador PBKDF2 + AES-GCM, y el PIN no se guarda;
+  - fichero envuelto con `DeviceKeyWrapper.identidad` (`EvidenceKeys.kt`), una clave distinta
+    de la de la evidencia;
+  - contador de intentos dentro del fichero, con bloqueo de 1, 5 y 30 min;
+  - el PIN se pide dos veces al crearlo y la derivación va fuera del hilo de la interfaz.
+
+  Desde el 06-sep solo cambió `ClaveEnKeystore` (13-sep: la excepción de StrongBox con
+  minSdk 26), sin efecto sobre el PIN. Hoy el verificador contó como fallo un PIN mal
+  tecleado en el Samsung.
+  - **La fila dice «alta y cambio», y el cambio (workflow 5) no existe.** El fondo sí:
+    `PinLocal.establecer()` sustituye el verificador y reinicia el contador. Falta la
+    pantalla.
+- **Workflow 13 (alta de la bodycam): hecho.** `BodycamIdentity` y `tools/alta-bodycam.sh`
+  están completos. Desde el 06-sep solo se añadió `uidAgora()`, que no toca la identidad.
+  Hoy no se ha vuelto a comprobar en la W1 (desconectada de adb).
+
+### Lo que la hoja exagera
+
+- **Workflow 30: no hay ningún gesto para cerrar sesión.** La única llamada a
+  `IdentityRepository.lock()` es `identityRepository::lock` en `TrustGate`, como botón de
+  reintentar de la pantalla BLOCKED, y a BLOCKED hoy solo se llega con el simulador. En
+  uso normal, una vez desbloqueada, la sesión solo se cierra si muere el proceso. La fila
+  dice «bloquear ya existe»: existe la función, no el gesto. (Primera versión de esta nota:
+  «no la llama nadie». Era falso: la búsqueda de `lock()` no veía la referencia `::lock`.)
+- Consecuencia en el **workflow 34:** deshacer la atadura con motivo `CIERRE_DE_SESION`
+  cuelga de `lock()`, así que **en uso normal no se ha ejecutado nunca**. Los workflows 33 y 34 siguen
+  como el 06-sep: escritos y compilando, **sin verificar en aparatos**.
+
+### Aviso para antes de auditar
+
+`local.properties` tiene **`SIMULADOR_CONFIANZA_EN_RELEASE=true`**. Las APK de release de
+pruebas llevan el simulador de confianza, que salta el alta y fija el PIN `004471`
+(`IdentityRepository.forzarEstado`). Es deliberado para los testers (13-sep), pero una
+auditoría no puede ver esa APK. **El Samsung está hoy con identidad simulada**
+(cmendez / DEV-92A71C), no con alta real: las pruebas de firma y de atadura hay que hacerlas
+con el Redmi.
+
+### Priorizado sin estorbar a las pruebas
+
+1. **Workflow 5, cambio de PIN.**
+2. **Workflow 30, fin de turno** con `lock()` y cierre de la bóveda.
+3. **Workflows 61 + 46, auditoría local** encadenada por hash.
+4. **Workflows 33/34:** verificar con el Redmi y la W1.
+5. **Workflow 21, parte local:** secretos, dependencias e inventario de librerías.
+
+**Aplazados porque estorban:**
+- 31, cifrar el canal: cambia el protocolo en las dos puntas.
+- 51, funciones sin red: recorta funciones.
+- 53, certificado caducado: los de pruebas caducan.
+- 66, reseteo de fábrica: toca el arranque.
+- 36/37, firmar la evidencia: cambia lo que se sube. Se hará sin bloquear.
+
+La hoja del Excel queda por corregir (estaba abierta en Excel).
+
+### Hecho el mismo día: workflows 5 y 30
+
+**Workflow 5, cambio de PIN** (`feature/pinchange/`, nuevo)
+- `ChangePinViewModel` + `ChangePinScreen`, en Profile → Session → Change PIN. Tres pasos:
+  PIN actual, nuevo y confirmación. Reutiliza `TecladoPin`, `PinDots` y `PoliticaPin` del
+  alta.
+- `IdentityRepository.comprobarPinActual()`: **cada fallo cuenta contra el mismo límite
+  que el desbloqueo**. Si no, un teléfono perdido con la sesión abierta dejaría probar PINs
+  sin límite. Agotar la tanda llama a `lock()`.
+- `IdentityRepository.cambiarPin()` vuelve a comprobar el PIN actual antes de escribir: es
+  el único sitio que escribe el verificador.
+- El actual se comprueba nada más teclearlo, no al final. El nuevo tiene que pasar
+  `PoliticaPin` y ser distinto del actual.
+
+**Workflow 30, fin de turno**
+- `IdentityRepository.terminarTurno()` = `lock(MotivoDeFin.FIN_DE_TURNO)`. `lock()` recibe
+  ahora el motivo (por defecto `CIERRE_DE_SESION`), así que la cámara recibe el motivo
+  verdadero. `FIN_DE_TURNO` ya existía en `BindingPeriferico` y la W1 solo lo registra,
+  así que no hay que tocar BodyCamServer.
+- `AppContainer.alCerrarSesion`, además de desatar la bodycam, hace
+  `EvidenceVault.bloquear()` + `vaultRepository.clearDecrypted()`. Vale para cualquier
+  cierre, también el reintentar de BLOCKED.
+- Profile → Session → End shift, con confirmación. **Desactivado durante un SOS**, con el
+  motivo escrito.
+- `TrustGate`: `onRetry = { identityRepository.lock() }` en lugar de `::lock`, que ahora
+  tiene un parámetro.
+
+**VERIFICADO en el Samsung** (build debug; 32 pruebas JVM en verde):
+1. Un PIN actual incorrecto da `Wrong PIN. 4 attempts left.`
+2. `004471` → `258036` → confirmado → PIN CHANGED.
+3. End shift → diálogo → END SHIFT → pantalla LOCKED.
+4. `004471` da Wrong PIN y `258036` abre.
+5. Cambiado otra vez a **`004471`, que es el PIN que conocen los testers**.
+
+**Sin verificar:**
+- **Que se selle la bóveda:** en el Samsung la bóveda está sin configurar (NOT SET UP).
+- **Que se desate la bodycam con `FIN_DE_TURNO`:** la W1 no estaba conectada, y el Samsung
+  va con identidad simulada, sin clave de agente que firme el fin. Hay que probarlo con el
+  Redmi (alta real) y la W1: es la misma prueba pendiente de los workflows 33 y 34.
+- El bloqueo por intentos agotados desde la pantalla de cambio.
+
+**Visto de paso, sin tocar:** en Profile, la fila de la bóveda monta el texto
+«encrypted» sobre «NOT SET UP» (el subtítulo no deja sitio a la etiqueta de estado). Es
+anterior a hoy.
+
+### Próximo paso
+
+- Probar el fin de turno con el Redmi y la W1: la atadura se deshace con `FIN_DE_TURNO`, y
+  con la bóveda configurada se sella.
+- Workflows 61 + 46: auditoría local.
+- ~~Corregir en `Seguimiento-IAM-AeriaOne.xlsx` las filas del 4, 5 y 30.~~ Hecho el mismo
+  día:
+  - Sin-backend-YA: filas del 4 (quitado «y cambio»), 5 (Hecho) y 30 (Parcial, con lo que
+    falta).
+  - Catalogo-68: filas del 4, 5, 30 (85 %) y 34 (el fin de turno ya existe).
+  - Resumen: 8 hechos y 20 sin empezar.
+
+  Copia previa en el scratchpad de la sesión.
+- **Visto al actualizar, sin tocar:** en Detalle-pasos, los pasos 8 y 12 del workflow 27
+  siguen como «Sin empezar», pero están hechos desde el 06-sep. La hoja no se regeneró
+  entonces.
+
+---
+
 ## 2026-09-15 — El PTT del teléfono pasa a conmutador, y la W1 ya lo oye
 
 ### PTT de pulsar una vez (petición del usuario)

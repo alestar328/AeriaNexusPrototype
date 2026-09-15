@@ -290,7 +290,7 @@ class GafasCommandRepository(private val context: Context) {
         val emparejado = GafasSdkPuente.aparatoEmparejado(context)
         if (emparejado == null) {
             _estado.value = GafasControlState.ERROR
-            _mensajes.tryEmit("Paired device not found")
+            _mensajes.tryEmit("Choose your FalconOne glasses first")
             return
         }
         aparatoEnIntento = emparejado

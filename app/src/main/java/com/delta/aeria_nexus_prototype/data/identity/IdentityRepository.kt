@@ -2,6 +2,10 @@ package com.delta.aeria_nexus_prototype.data.identity
 
 import android.content.Context
 import android.util.Log
+import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
+import java.time.Instant
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,6 +47,9 @@ data class TrustStatus(
 /** Resultado de intentar desbloquear con el PIN. */
 enum class UnlockResult { OK, WRONG_PIN, LOCKED_OUT }
 
+/** Resultado de cambiar el PIN (workflow 5). */
+enum class CambioDePin { OK, PIN_ACTUAL_INCORRECTO, BLOQUEADO, NO_GUARDADO }
+
 /**
  * Con que respaldo se abrio la sesion en curso.
  *
@@ -83,9 +90,18 @@ class IdentityRepository(
     private val pinLocal: PinLocal,
     private val credential: CredentialRepository,
     private val retos: RetoRepository,
+    private val auditoria: AuditoriaLocal,
 ) {
 
     private val prefs = context.getSharedPreferences("aeria_trust", Context.MODE_PRIVATE)
+
+    /**
+     * Identificador de la sesion en curso, para correlar sus eventos de auditoria (§14.1).
+     * Lo pone el desbloqueo y lo quita el cierre. Es local: el id de sesion de verdad lo
+     * emitira el backend con su token (workflow 28), y entonces sustituye a este.
+     */
+    @Volatile var sesionActual: String? = null
+        private set
 
     init {
         // El contador de intentos vivia aqui en claro hasta el workflow 4. Ahora lo
@@ -135,6 +151,7 @@ class IdentityRepository(
                     lockedOutUntil = intentos.bloqueadoHasta,
                 )
             }
+            auditarFallo(intentos, via = "unlock")
             return if (intentos.bloqueadoHasta > 0) UnlockResult.LOCKED_OUT else UnlockResult.WRONG_PIN
         }
 
@@ -144,6 +161,11 @@ class IdentityRepository(
         // partir de aqui.
         credential.autorizarUso()
         val reto = firmarRetoDeEntrada()
+        sesionActual = UUID.randomUUID().toString()
+        auditoria.registrar(
+            TipoEvento.SESION_ABIERTA,
+            listOf("origin" to if (reto != null) "ACCREDITED" else "LOCAL_ONLY", "challenge_issuer" to reto?.emisor),
+        )
 
         _status.update {
             it.copy(
@@ -189,16 +211,85 @@ class IdentityRepository(
     }
 
     /**
+     * Comprueba el PIN actual antes de dejar cambiarlo (workflow 5).
+     *
+     * Cada fallo cuenta contra el mismo limite que el desbloqueo. Si no contase, un
+     * telefono perdido con la sesion abierta dejaria probar PINs sin limite desde
+     * esta pantalla. Y agotar la tanda aqui cierra la sesion: quien no sabe el PIN
+     * no deberia seguir dentro.
+     */
+    fun comprobarPinActual(pin: String): CambioDePin {
+        if (isLockedOut()) return CambioDePin.BLOQUEADO
+        if (pinLocal.verificar(pin)) {
+            pinLocal.reiniciarIntentos()
+            _status.update { it.copy(attemptsLeft = MAX_ATTEMPTS, lockedOutUntil = 0L) }
+            return CambioDePin.OK
+        }
+        val intentos = pinLocal.registrarFallo()
+        _status.update {
+            it.copy(attemptsLeft = intentos.intentosRestantes, lockedOutUntil = intentos.bloqueadoHasta)
+        }
+        auditarFallo(intentos, via = "pin_change")
+        if (intentos.bloqueadoHasta > 0) {
+            lock()
+            return CambioDePin.BLOQUEADO
+        }
+        return CambioDePin.PIN_ACTUAL_INCORRECTO
+    }
+
+    /**
+     * Sustituye el PIN. Vuelve a comprobar el actual aunque la pantalla ya lo haya
+     * hecho: es el unico sitio que escribe el verificador, y no debe fiarse de que
+     * quien lo llama haya pasado por el primer paso.
+     */
+    fun cambiarPin(actual: String, nuevo: String): CambioDePin {
+        val comprobacion = comprobarPinActual(actual)
+        if (comprobacion != CambioDePin.OK) return comprobacion
+        if (!pinLocal.establecer(nuevo)) {
+            auditoria.registrar(TipoEvento.PIN_CAMBIO_FALLIDO)
+            return CambioDePin.NO_GUARDADO
+        }
+        auditoria.registrar(TipoEvento.PIN_CAMBIADO)
+        return CambioDePin.OK
+    }
+
+    /** Un fallo de PIN, y si con el se agoto la tanda, el bloqueo que empieza. */
+    private fun auditarFallo(intentos: EstadoIntentos, via: String) {
+        if (intentos.bloqueadoHasta > 0) {
+            auditoria.registrar(
+                TipoEvento.PIN_BLOQUEO_TEMPORAL,
+                listOf("via" to via, "until" to Instant.ofEpochMilli(intentos.bloqueadoHasta).toString()),
+            )
+        } else {
+            auditoria.registrar(
+                TipoEvento.PIN_INCORRECTO,
+                listOf("via" to via, "attempts_left" to intentos.intentosRestantes.toString()),
+            )
+        }
+    }
+
+    /**
+     * Fin de turno explicito (workflow 30): el mismo cierre que [lock], pero la
+     * camara recibe el motivo verdadero. No es lo mismo que la sesion se cierre
+     * sola que el agente diga que ha terminado.
+     */
+    fun terminarTurno() = lock(BindingPeriferico.MotivoDeFin.FIN_DE_TURNO)
+
+    /**
      * Cierra la sesion y vuelve a bloqueado (workflow 30).
      *
      * Retirar la autorizacion es la mitad importante: si no, la clave del agente
      * seguiria firmando con la pantalla bloqueada.
      */
-    fun lock() {
+    fun lock(motivo: BindingPeriferico.MotivoDeFin = BindingPeriferico.MotivoDeFin.CIERRE_DE_SESION) {
         // El orden importa: primero se deshacen las ataduras, porque para firmar
         // su fin hace falta la clave del agente, y la linea siguiente la retira.
-        alCerrarSesion?.invoke(BindingPeriferico.MotivoDeFin.CIERRE_DE_SESION)
+        alCerrarSesion?.invoke(motivo)
         credential.retirarAutorizacion()
+        // Despues de los avisos, para que desatar y sellar queden en esta sesion, y
+        // antes de olvidarla, para que el propio cierre tambien.
+        auditoria.registrar(TipoEvento.SESION_CERRADA, listOf("reason" to motivo.name))
+        sesionActual = null
         _status.update {
             it.copy(
                 state = TrustState.LOCKED,

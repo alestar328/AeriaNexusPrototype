@@ -33,7 +33,12 @@ import com.delta.aeria_nexus_prototype.feature.map.MapScreen
 import com.delta.aeria_nexus_prototype.feature.map.MapViewModel
 import com.delta.aeria_nexus_prototype.feature.operations.OperationsScreen
 import com.delta.aeria_nexus_prototype.feature.operations.OperationsViewModel
+import com.delta.aeria_nexus_prototype.feature.audit.AuditLogScreen
+import com.delta.aeria_nexus_prototype.feature.audit.AuditLogViewModel
+import com.delta.aeria_nexus_prototype.feature.pinchange.ChangePinScreen
+import com.delta.aeria_nexus_prototype.feature.pinchange.ChangePinViewModel
 import com.delta.aeria_nexus_prototype.feature.profile.ProfileScreen
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.feature.rmsform.RmsFormScreen
 import com.delta.aeria_nexus_prototype.feature.rmsform.RmsFormViewModel
 import com.delta.aeria_nexus_prototype.feature.ptt.PttAvisoOverlay
@@ -61,6 +66,8 @@ object Routes {
     const val PROFILE = "profile"
     // Boveda de evidencia cifrada, protegida por la contrasena del agente.
     const val VAULT = "profile/vault"
+    const val CHANGE_PIN = "profile/change-pin"
+    const val AUDIT_LOG = "profile/audit-log"
     const val INCIDENT_DETAIL = "incidents/{id}"
     const val ACTIVE_INCIDENT = "incidents/{id}/active"
     const val DRAFT_REPORT = "incidents/{id}/report"
@@ -248,9 +255,30 @@ fun AppNavHost() {
         }
 
         composable(Routes.PROFILE) {
+            val sosActivo by AppContainer.agoraRepository.sosActive.collectAsStateWithLifecycle()
             ProfileScreen(
                 profile = repositorio.officerProfile,
                 onOpenVault = { navController.navigate(Routes.VAULT) },
+                onChangePin = { navController.navigate(Routes.CHANGE_PIN) },
+                // TrustGate cambia a la pantalla de bloqueo en cuanto el estado pasa a
+                // LOCKED: no hace falta navegar a ningun sitio.
+                onEndShift = { AppContainer.identityRepository.terminarTurno() },
+                onOpenAuditLog = { navController.navigate(Routes.AUDIT_LOG) },
+                sosActivo = sosActivo,
+            )
+        }
+
+        composable(Routes.AUDIT_LOG) {
+            AuditLogScreen(
+                viewModel = viewModel { AuditLogViewModel(AppContainer.auditoria) },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Routes.CHANGE_PIN) {
+            ChangePinScreen(
+                viewModel = viewModel { ChangePinViewModel(AppContainer.identityRepository) },
+                onBack = { navController.popBackStack() },
             )
         }
 
@@ -261,6 +289,7 @@ fun AppNavHost() {
                         vault = AppContainer.vaultRepository,
                         enBruto = AppContainer.rawEvidenceRepository,
                         incidentes = AppContainer.incidentRepository,
+                        auditoria = AppContainer.auditoria,
                     )
                 },
                 onBack = { navController.popBackStack() },

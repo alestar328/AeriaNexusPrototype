@@ -5,7 +5,6 @@ import android.util.Log
 import com.bleequp.bleequplibrary.BleeqUpDevice
 import com.bleequp.bleequplibrary.BleeqUpDeviceManager
 import com.bleequp.bleequplibrary.BleeqUpWifiManager
-import com.delta.aeria_nexus_prototype.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -272,9 +271,9 @@ object GafasApPrueba {
      * justo donde se atasca el escaneo del SDK.
      */
     fun volcarGatt(context: Context) {
-        val mac = BuildConfig.GAFAS_MAC
-        if (mac.isEmpty()) {
-            Log.e(TAG, "GAFAS_MAC vacia en local.properties")
+        val mac = AppContainer.gafasRepository.macElegida()
+        if (mac == null) {
+            Log.e(TAG, "Todavia no se han elegido las gafas en la pantalla FalconOne")
             return
         }
         val bt = context.getSystemService(android.bluetooth.BluetoothManager::class.java)

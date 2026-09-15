@@ -1,12 +1,14 @@
 package com.delta.aeria_nexus_prototype.data
 
+import android.Manifest
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.ContextWrapper
+import android.os.Build
 import android.util.Log
 import com.bleequp.bleequplibrary.BleeqUpDevice
 import com.bleequp.bleequplibrary.BleeqUpDeviceManager
 import com.bleequp.bleequplibrary.BleeqUpSDK
-import com.delta.aeria_nexus_prototype.BuildConfig
 
 private const val TAG = "AeriaGafasPuente"
 
@@ -61,7 +63,7 @@ object GafasSdkPuente {
     fun iniciarSdk(context: Context) {
         if (sdkIniciado) return
         sdkIniciado = true
-        BleeqUpSDK.init(context.applicationContext, CLAVE_SDK) { codigo, mensaje ->
+        BleeqUpSDK.init(ContextoConPermisosDeAndroid11(context.applicationContext), CLAVE_SDK) { codigo, mensaje ->
             Log.i(TAG, "init del SDK -> codigo=$codigo mensaje=$mensaje")
         }
     }
@@ -84,9 +86,9 @@ object GafasSdkPuente {
      * limpia es pedirles un `connect(mac)` que no pase por el escaneo.
      */
     fun aparatoEmparejado(context: Context): BleeqUpDevice? {
-        val mac = BuildConfig.GAFAS_MAC.uppercase()
-        if (mac.isEmpty()) {
-            Log.e(TAG, "GAFAS_MAC vacia en local.properties")
+        val mac = AppContainer.gafasRepository.macElegida()?.uppercase()
+        if (mac == null) {
+            Log.e(TAG, "Todavia no se han elegido las gafas en la pantalla FalconOne")
             return null
         }
         val bt = context.getSystemService(BluetoothManager::class.java)
@@ -118,6 +120,36 @@ object GafasSdkPuente {
             // Si esto salta, el AAR cambio de nombres internos. No se disimula.
             Log.e(TAG, "El puente por reflexion con el SDK ya no vale: ${e.message}", e)
             null
+        }
+    }
+
+    /**
+     * Context para el SDK que arregla un fallo suyo en Android 11 o anterior.
+     *
+     * Antes de conectar, reconectar, desconectar o tocar el WiFi, el SDK hace
+     * `checkSelfPermission(BLUETOOTH_CONNECT)` y, si no esta concedido, responde
+     * "no conectado" **sin llegar a abrir el GATT** (visto desensamblando
+     * `BleeqUpDeviceManager.connect`). Pero `BLUETOOTH_CONNECT` no existe hasta
+     * Android 12: en Android 11 esa comprobacion devuelve DENIED siempre. Medido el
+     * 2026-09-15 en el Redmi Note 8 Pro (API 30): "The FalconOne is not responding" al
+     * instante, con cero clientes GATT en el sistema. En el Samsung (API 35) funciona.
+     *
+     * En esas versiones el permiso que de verdad protege el Bluetooth es `BLUETOOTH`
+     * (y `BLUETOOTH_ADMIN` para buscar), que se conceden al instalar. Aqui se
+     * contesta por ellos y por nada mas. Desde Android 12 no se toca nada.
+     * La salida limpia es que el fabricante compruebe `SDK_INT` en su AAR.
+     */
+    private class ContextoConPermisosDeAndroid11(base: Context) : ContextWrapper(base) {
+        override fun checkPermission(permission: String, pid: Int, uid: Int): Int {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                val equivalente = when (permission) {
+                    Manifest.permission.BLUETOOTH_CONNECT -> Manifest.permission.BLUETOOTH
+                    Manifest.permission.BLUETOOTH_SCAN -> Manifest.permission.BLUETOOTH_ADMIN
+                    else -> null
+                }
+                if (equivalente != null) return super.checkPermission(equivalente, pid, uid)
+            }
+            return super.checkPermission(permission, pid, uid)
         }
     }
 

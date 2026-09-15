@@ -84,7 +84,7 @@ fun TrustGate() {
                 // Reintentar solo tiene sentido en el corte por falta de cobertura:
                 // devuelve a la pantalla de PIN, que es donde se revalidara todo
                 // cuando exista el backend.
-                onRetry = identityRepository::lock,
+                onRetry = { identityRepository.lock() },
             )
         }
 

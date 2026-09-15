@@ -1,6 +1,9 @@
 package com.delta.aeria_nexus_prototype.data
 
 import android.content.Context
+import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
+import com.delta.aeria_nexus_prototype.data.audit.ContextoDeAuditoria
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
@@ -63,8 +66,12 @@ object AppContainer {
     lateinit var proxyRepository: ProxyRepository
         private set
 
+    /** Diario de auditoria local (workflow 61). Lo primero en crearse: todos registran en el. */
+    lateinit var auditoria: AuditoriaLocal
+
     fun init(context: Context) {
         val appContext = context.applicationContext
+        auditoria = AuditoriaLocal(appContext)
         // La boveda va primero: sin ella cargada, una captura que se cierre antes de
         // abrir la pantalla de evidencia se cifraria solo para el servidor y el
         // agente no podria volver a verla en el telefono.
@@ -121,7 +128,7 @@ object AppContainer {
             mando = gafasCommandRepository,
             bodycam = bodycamRepository,
         )
-        vaultRepository = VaultRepository(appContext)
+        vaultRepository = VaultRepository(appContext, auditoria)
         // Decide si la app llega siquiera a la pantalla de operaciones, asi que
         // tiene que estar lista antes de que se componga nada (ver TrustGate).
         pinLocal = PinLocal(appContext)
@@ -135,7 +142,21 @@ object AppContainer {
             pinLocal = pinLocal,
             credential = credentialRepository,
             retos = retoRepository,
+            auditoria = auditoria,
         )
+        // Quien actua y desde donde, para cada evento. Se lee en el momento de
+        // registrar, asi que siempre es la identidad y la sesion de ese instante.
+        auditoria.contexto = {
+            val identidad = identityRepository.status.value.identity
+            ContextoDeAuditoria(
+                actor = identidad?.userId,
+                tenant = identidad?.tenant,
+                dispositivo = identidad?.deviceId,
+                instancia = identidad?.appInstanceId,
+                release = identidad?.release,
+                sesion = identityRepository.sesionActual,
+            )
+        }
         evidenceUploader = EvidenceUploader(
             context = appContext,
             config = uploadConfig,
@@ -151,7 +172,17 @@ object AppContainer {
         // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin
         // esto, una camara emparejada seguiria operando en nombre de un agente que
         // ya no esta de servicio.
-        identityRepository.alCerrarSesion = { motivo -> bodycamRepository.desatar(motivo) }
+        identityRepository.alCerrarSesion = { motivo ->
+            bodycamRepository.desatar(motivo)
+            // Workflow 30: la boveda se sella con la sesion. Si no, quien coja el
+            // telefono despues de desbloquearlo veria la evidencia abierta del agente
+            // anterior, y sus copias descifradas seguirian en la cache.
+            if (EvidenceVault.desbloqueada.value) {
+                auditoria.registrar(TipoEvento.BOVEDA_CERRADA, listOf("reason" to motivo.name))
+            }
+            EvidenceVault.bloquear()
+            vaultRepository.clearDecrypted()
+        }
     }
 
     /**

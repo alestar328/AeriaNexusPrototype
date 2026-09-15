@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.delta.aeria_nexus_prototype.BuildConfig
+import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.model.EvidenceType
@@ -24,7 +26,10 @@ import kotlinx.coroutines.withContext
  * telefono. El descifrado es a fichero y no en memoria porque un video de 20 min
  * no cabe en el heap de la app.
  */
-class VaultRepository(private val context: Context) {
+class VaultRepository(
+    private val context: Context,
+    private val auditoria: AuditoriaLocal,
+) {
 
     /** Un .fev de la carpeta de evidencia, tal como se lista en la boveda. */
     data class VaultItem(
@@ -67,15 +72,27 @@ class VaultRepository(private val context: Context) {
      * vuelve a descifrar el fichero entero.
      */
     suspend fun open(name: String): Uri? = withContext(Dispatchers.IO) {
-        if (!EvidenceVault.desbloqueada.value) return@withContext null
-        val cifrado = evidenceDir()?.let { File(it, name) }?.takeIf { it.isFile } ?: return@withContext null
-        val carpeta = decryptedDir() ?: return@withContext null
+        val uri = descifrar(name)
+        // Workflow 46: quien mira que evidencia, cada vez, este donde este la vista
+        // previa (boveda, incidente o informe): todas pasan por aqui. Tambien los
+        // intentos que no llegan a mostrar nada, que tambien son un acceso.
+        auditoria.registrar(
+            TipoEvento.EVIDENCIA_VISUALIZADA,
+            listOf("evidence" to name, "result" to if (uri != null) "SHOWN" else "NOT_OPENED"),
+        )
+        uri
+    }
+
+    private fun descifrar(name: String): Uri? {
+        if (!EvidenceVault.desbloqueada.value) return null
+        val cifrado = evidenceDir()?.let { File(it, name) }?.takeIf { it.isFile } ?: return null
+        val carpeta = decryptedDir() ?: return null
 
         // El .fev es "video_agente_fecha.mp4.fev": quitarle el sufijo devuelve el
         // nombre original, y con el la extension que necesita el reproductor.
         val claro = File(carpeta, name.removeSuffix(EvidenceCrypto.EXTENSION))
-        if (!claro.isFile && !EvidenceCrypto.open(cifrado, claro)) return@withContext null
-        try {
+        if (!claro.isFile && !EvidenceCrypto.open(cifrado, claro)) return null
+        return try {
             FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.fileprovider", claro)
         } catch (e: Exception) {
             Log.w(TAG, "no se pudo servir ${claro.name}: ${e.message}")

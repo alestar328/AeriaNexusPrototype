@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.RawEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.VaultRepository
+import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.local.RawEvidenceEntity
 import com.delta.aeria_nexus_prototype.data.model.EvidenceClass
@@ -41,6 +43,7 @@ class VaultViewModel(
     private val vault: VaultRepository,
     private val enBruto: RawEvidenceRepository,
     private val incidentes: IncidentRepository,
+    private val auditoria: AuditoriaLocal,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(VaultUiState())
@@ -121,6 +124,7 @@ class VaultViewModel(
             _uiState.update { it.copy(trabajando = true, mensajeError = null) }
             // Generar el par RSA y derivar la clave bloquean el hilo: fuera del principal.
             val creada = withContext(Dispatchers.Default) { EvidenceVault.configurar(contrasena) }
+            if (creada) auditoria.registrar(TipoEvento.BOVEDA_CREADA)
             _uiState.update {
                 it.copy(
                     trabajando = false,
@@ -135,6 +139,9 @@ class VaultViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(trabajando = true, mensajeError = null) }
             val abierta = withContext(Dispatchers.Default) { EvidenceVault.desbloquear(contrasena) }
+            auditoria.registrar(
+                if (abierta) TipoEvento.BOVEDA_ABIERTA else TipoEvento.BOVEDA_CONTRASENA_INCORRECTA,
+            )
             _uiState.update {
                 it.copy(
                     trabajando = false,
@@ -146,6 +153,9 @@ class VaultViewModel(
 
     /** Cierra la boveda y borra las copias descifradas que quedaron en cache. */
     fun bloquear() {
+        if (EvidenceVault.desbloqueada.value) {
+            auditoria.registrar(TipoEvento.BOVEDA_CERRADA, listOf("reason" to "MANUAL"))
+        }
         EvidenceVault.bloquear()
         viewModelScope.launch {
             withContext(Dispatchers.IO) { vault.clearDecrypted() }

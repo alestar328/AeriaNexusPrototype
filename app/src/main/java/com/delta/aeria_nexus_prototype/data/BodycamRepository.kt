@@ -21,6 +21,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.identity.BindingActivo
 import com.delta.aeria_nexus_prototype.data.identity.BindingPeriferico
 import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
@@ -501,6 +503,10 @@ class BodycamRepository(private val context: Context) {
     private fun marcarEnlace(estado: EnlaceAutenticado, motivo: String) {
         _enlaceAutenticado.value = estado
         _motivoDelEnlace.value = motivo
+        AppContainer.auditoria.registrar(
+            TipoEvento.BODYCAM_ENLACE,
+            listOf("result" to estado.name, "detail" to motivo),
+        )
         when (estado) {
             EnlaceAutenticado.SI -> Log.i(TAG, "Enlace autenticado con $motivo")
             EnlaceAutenticado.RECHAZADO -> Log.e(TAG, "ENLACE NO FIABLE: $motivo")
@@ -572,6 +578,7 @@ class BodycamRepository(private val context: Context) {
             // caducidad y al reconectar no se recrea, asi que el efecto se produce;
             // lo que se pierde es el aviso inmediato a la camara.
             Log.w(TAG, "sesion ya cerrada: la atadura de ${activo.bwcId} caducara sola")
+            auditarDesatado(activo, motivo, firmado = false)
             return
         }
         val declaracion = BindingPeriferico.declaracionDeFin(
@@ -589,6 +596,20 @@ class BodycamRepository(private val context: Context) {
             ).joinToString(":"),
         )
         Log.i(TAG, "atadura de ${activo.bwcId} deshecha: ${motivo.name}")
+        auditarDesatado(activo, motivo, firmado = true)
+    }
+
+    /** Si el fin no va firmado, la camara no se entera hasta que caduque: queda escrito. */
+    private fun auditarDesatado(activo: BindingActivo, motivo: BindingPeriferico.MotivoDeFin, firmado: Boolean) {
+        AppContainer.auditoria.registrar(
+            TipoEvento.ATADURA_DESHECHA,
+            listOf(
+                "binding" to activo.bindingId,
+                "bwc" to activo.bwcId,
+                "reason" to motivo.name,
+                "signed_notice_sent" to firmado.toString(),
+            ),
+        )
     }
 
     private fun atenderRespuestaDeAtadura(linea: String) {
@@ -606,11 +627,23 @@ class BodycamRepository(private val context: Context) {
                     caducaEn = declaracion.caducaEn,
                 )
                 Log.i(TAG, "camara ${declaracion.bwcId} atada a ${declaracion.userId}")
+                AppContainer.auditoria.registrar(
+                    TipoEvento.ATADURA_CREADA,
+                    listOf(
+                        "binding" to declaracion.bindingId,
+                        "bwc" to declaracion.bwcId,
+                        "expires" to Instant.ofEpochMilli(declaracion.caducaEn).toString(),
+                    ),
+                )
             }
 
             linea.startsWith("BIND_FAIL") -> {
                 _binding.value = null
                 Log.e(TAG, "la camara rechazo la atadura: $linea")
+                AppContainer.auditoria.registrar(
+                    TipoEvento.ATADURA_RECHAZADA,
+                    listOf("bwc" to pendienteDeAtar?.bwcId, "detail" to linea.substringAfter(":", "")),
+                )
             }
 
             linea.startsWith("UNBIND_OK") -> Log.i(TAG, "la camara confirmo el desatado")

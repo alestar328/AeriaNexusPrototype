@@ -19,16 +19,25 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Pin
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,12 +60,19 @@ import com.delta.aeria_nexus_prototype.ui.theme.TextoPrincipal
 import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
 import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 
-/** Perfil del agente: datos administrativos, idioma y dispositivos vinculados. */
+/** Perfil del agente: datos administrativos, idioma, dispositivos y la sesion. */
 @Composable
 fun ProfileScreen(
     profile: OfficerProfile,
     onOpenVault: () -> Unit,
+    onChangePin: () -> Unit,
+    onEndShift: () -> Unit,
+    onOpenAuditLog: () -> Unit,
+    /** Durante un SOS no se puede terminar el turno: la emergencia manda. */
+    sosActivo: Boolean,
 ) {
+    var confirmandoFinDeTurno by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -118,8 +134,108 @@ fun ProfileScreen(
             "GPS is enabled by agency policy. Evidence is automatically geotagged. " +
                 "Officer breadcrumb tracking is admin-controlled.",
         )
+
+        // Al final y no arriba: son acciones de una vez por turno, y la de terminar
+        // no debe quedar donde se pulsa buscando otra cosa.
+        SectionLabel("Session")
+        CardSurface {
+            Column {
+                SessionRow(
+                    icon = Icons.Filled.Pin,
+                    title = "Change PIN",
+                    subtitle = "Asks for your current PIN first",
+                    color = TextoPrincipal,
+                    enabled = true,
+                    onClick = onChangePin,
+                )
+                HorizontalDivider(color = BordeMuySutil)
+                SessionRow(
+                    icon = Icons.Filled.History,
+                    title = "Audit log",
+                    subtitle = "Security events recorded on this phone",
+                    color = TextoPrincipal,
+                    enabled = true,
+                    onClick = onOpenAuditLog,
+                )
+                HorizontalDivider(color = BordeMuySutil)
+                SessionRow(
+                    icon = Icons.AutoMirrored.Filled.Logout,
+                    title = "End shift",
+                    subtitle = if (sosActivo) {
+                        "Unavailable during an emergency"
+                    } else {
+                        "Locks the app, seals the vault and releases the bodycam"
+                    },
+                    color = RojoSuave,
+                    enabled = !sosActivo,
+                    onClick = { confirmandoFinDeTurno = true },
+                )
+            }
+        }
     }
 
+    if (confirmandoFinDeTurno) {
+        AlertDialog(
+            onDismissRequest = { confirmandoFinDeTurno = false },
+            title = { Text("End shift?") },
+            text = {
+                Text(
+                    "The app locks and asks for your PIN again. The evidence vault is sealed " +
+                        "and the bodycam stops acting on your behalf.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmandoFinDeTurno = false
+                        onEndShift()
+                    },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text("END SHIFT", color = RojoSuave, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { confirmandoFinDeTurno = false },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text("CANCEL") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SessionRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    color: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val tinte = if (enabled) color else TextoTerciario
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = tinte, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(text = title, color = tinte, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = subtitle, color = TextoTerciario, fontSize = 11.sp)
+        }
+        if (enabled) {
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = TextoTerciario,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
 }
 
 @Composable

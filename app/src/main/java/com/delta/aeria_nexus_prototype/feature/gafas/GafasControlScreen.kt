@@ -1,7 +1,9 @@
 package com.delta.aeria_nexus_prototype.feature.gafas
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -36,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -83,7 +86,7 @@ fun GafasControlScreen(
     // dicho lo que quiere, y pedirle otro toque solo retrasa la grabacion.
     LaunchedEffect(Unit) {
         if (viewModel.tienePermisoBluetooth()) {
-            viewModel.conectar()
+            viewModel.alEntrar()
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
@@ -92,14 +95,27 @@ fun GafasControlScreen(
     GafasControlContent(
         uiState = uiState,
         onBack = onBack,
-        onReintentar = viewModel::conectar,
+        onReintentar = { if (uiState.gafasElegidas == null) viewModel.abrirSelector() else viewModel.conectar() },
         onDesconectar = viewModel::desconectar,
         onAlternarGrabacion = viewModel::alternarGrabacion,
         onHacerFoto = viewModel::hacerFoto,
         onTraerVideos = viewModel::traerVideos,
+        onCambiarGafas = viewModel::abrirSelector,
         modifier = Modifier,
     )
 
+    if (uiState.selectorAbierto) {
+        val context = LocalContext.current
+        SelectorGafasDialog(
+            candidatas = uiState.candidatas,
+            onElegir = viewModel::elegir,
+            onAbrirAjustesBluetooth = {
+                context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            },
+            onReleer = viewModel::releerCandidatas,
+            onDismiss = viewModel::cerrarSelector,
+        )
+    }
 }
 
 @Composable
@@ -111,6 +127,7 @@ private fun GafasControlContent(
     onAlternarGrabacion: () -> Unit,
     onHacerFoto: () -> Unit,
     onTraerVideos: () -> Unit,
+    onCambiarGafas: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -120,7 +137,7 @@ private fun GafasControlContent(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Cabecera(onBack = onBack)
-        TarjetaDeEstado(uiState = uiState)
+        TarjetaDeEstado(uiState = uiState, onCambiarGafas = onCambiarGafas)
 
         if (uiState.aviso != null) {
             BandaDeAviso(texto = uiState.aviso)
@@ -270,7 +287,7 @@ private fun Cabecera(onBack: () -> Unit) {
  * "no las llevo encima" de "las llevo pero no me obedecen".
  */
 @Composable
-private fun TarjetaDeEstado(uiState: GafasControlUiState) {
+private fun TarjetaDeEstado(uiState: GafasControlUiState, onCambiarGafas: () -> Unit) {
     val (colorMando, textoMando) = when (uiState.control) {
         GafasControlState.LISTO -> VerdeOk to "CONTROL READY"
         GafasControlState.CONECTANDO -> AmarilloAviso to "CONNECTING…"
@@ -301,6 +318,34 @@ private fun TarjetaDeEstado(uiState: GafasControlUiState) {
                     tint = if (uiState.enlace == GafasState.CONNECTED) VerdeOk else TextoTerciario,
                     modifier = Modifier.size(18.dp),
                 )
+            }
+            // Que gafas son, y como cambiarlas: un APK sirve para cualquier par.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = uiState.gafasElegidas?.nombre ?: "No glasses chosen",
+                    modifier = Modifier.weight(1f),
+                    color = if (uiState.gafasElegidas != null) TextoSecundario else AmarilloAviso,
+                    fontSize = 14.sp,
+                )
+                Box(
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onCambiarGafas)
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (uiState.gafasElegidas != null) "CHANGE" else "CHOOSE",
+                        color = AzulClaro,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp,
+                    )
+                }
             }
             if (uiState.resolucion != null || uiState.espacioLibre != null) {
                 Spacer(Modifier.height(8.dp))
@@ -352,6 +397,9 @@ private fun PanelSinMando(uiState: GafasControlUiState, onReintentar: () -> Unit
         Text(
             text = when {
                 conectando -> "Opening the control channel with the FalconOne…"
+                uiState.gafasElegidas == null ->
+                    "Choose your FalconOne glasses. They must be paired with this phone in " +
+                        "Android Bluetooth settings first."
                 uiState.enlace != GafasState.CONNECTED ->
                     "The FalconOne glasses are not linked to the phone. Put them on, turn " +
                         "them on and wait for them to connect on their own."
@@ -424,5 +472,6 @@ private fun GafasControlGrabandoPreview() {
         onAlternarGrabacion = {},
         onHacerFoto = {},
         onTraerVideos = {},
+        onCambiarGafas = {},
     )
 }
