@@ -104,6 +104,15 @@ class AgoraRepository(
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
+    // Estado real del canal, el que pinta la barra superior. Hasta el 2026-09-15 la
+    // barra decia ONLINE fija: un telefono que llevaba horas fuera del canal seguia
+    // en verde mientras su PTT y su SOS no llegaban a nadie.
+    private val _estadoCanal = MutableStateFlow(EstadoCanal.CONECTANDO)
+    val estadoCanal: StateFlow<EstadoCanal> = _estadoCanal.asStateFlow()
+
+    // Reentrada en curso tras perder el canal; una sola a la vez.
+    private var reentradaJob: Job? = null
+
     private val _sosActive = MutableStateFlow(false)
     val sosActive: StateFlow<Boolean> = _sosActive.asStateFlow()
 
@@ -194,11 +203,42 @@ class AgoraRepository(
 
         override fun onJoinChannelSuccess(channel: String, uid: Int, elapsed: Int) {
             _isConnected.value = true
+            _estadoCanal.value = EstadoCanal.CONECTADO
             _connectedUsers.value = 1
             sendCurrentLocation()
+            // Tras volver a entrar, el canal nuevo no sabe nada del SOS que seguia
+            // en pie: hay que publicar otra vez la camara y reanunciarlo. Fuera del
+            // hilo de Agora, que no admite llamadas al motor desde sus callbacks.
+            if (_sosActive.value) {
+                scope.launch {
+                    startCameraPublish()
+                    sendSosSignal()
+                }
+            }
+        }
+
+        /**
+         * Los cortes cortos los arregla Agora solo (RECONNECTING y vuelta a
+         * CONNECTED). Lo que no arregla es FAILED: tras unos 20 min sin red da la
+         * conexion por perdida y ya no lo intenta mas. Medido el 2026-09-15 en el
+         * Samsung: fuera del canal desde la 01:44 hasta reiniciar la app.
+         */
+        override fun onConnectionStateChanged(state: Int, reason: Int) {
+            Log.i(TAG, "Canal: estado $state motivo $reason")
+            _isConnected.value = state == Constants.CONNECTION_STATE_CONNECTED
+            _estadoCanal.value = when (state) {
+                Constants.CONNECTION_STATE_CONNECTED -> EstadoCanal.CONECTADO
+                Constants.CONNECTION_STATE_CONNECTING -> EstadoCanal.CONECTANDO
+                Constants.CONNECTION_STATE_RECONNECTING -> EstadoCanal.RECONECTANDO
+                else -> EstadoCanal.DESCONECTADO
+            }
+            if (state == Constants.CONNECTION_STATE_FAILED) alPerderElCanal()
         }
 
         override fun onUserJoined(uid: Int, elapsed: Int) {
+            // Al volver a entrar se reciben de nuevo todos los que ya estaban; a
+            // quien se estuviera viendo en livestream hay que volver a oirle.
+            if (uid in uidsEnEscucha) engine?.muteRemoteAudioStream(uid, false)
             // Una bodycam es un dispositivo, no un agente: no debe inflar el
             // contador de usuarios.
             if (!esBodycam(uid)) _connectedUsers.value++
@@ -335,23 +375,11 @@ class AgoraRepository(
                 },
             )
 
-            val options = ChannelMediaOptions().apply {
-                channelProfile = Constants.CHANNEL_PROFILE_LIVE_BROADCASTING
-                clientRoleType = Constants.CLIENT_ROLE_BROADCASTER
-                // El audio ajeno se escucha solo al aceptar un livestream; con
-                // auto-subscribe cada voz publicada sonaria en todo el canal.
-                // Unica excepcion: las bodycams, que se suscriben a mano en
-                // onUserJoined porque su audio ES el PTT. Ver escucharBodycam().
-                autoSubscribeAudio = false
-                autoSubscribeVideo = true
-                publishMicrophoneTrack = false
-                publishCameraTrack = false
-            }
             // Cada telefono entra con un uid aleatorio, como en Falcon One, pero por
             // encima del rango reservado a servicios (bodycams y grabador en la nube,
             // ver esBodycam): coincidir con el grabador romperia la grabacion.
             miUid = Random.nextInt(PRIMER_UID_TELEFONO, Int.MAX_VALUE)
-            rtcEngine.joinChannel(null, CHANNEL_ID, miUid, options)
+            rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
         } catch (e: Exception) {
             Log.w(TAG, "No se pudo iniciar la red tactica", e)
             engine = null
@@ -361,6 +389,73 @@ class AgoraRepository(
 
         startLocationSharingIfPermitted()
         startLocationHeartbeat()
+    }
+
+    private fun opcionesDelCanal() = ChannelMediaOptions().apply {
+        channelProfile = Constants.CHANNEL_PROFILE_LIVE_BROADCASTING
+        clientRoleType = Constants.CLIENT_ROLE_BROADCASTER
+        // El audio ajeno se escucha solo al aceptar un livestream; con
+        // auto-subscribe cada voz publicada sonaria en todo el canal.
+        // Unica excepcion: las bodycams, que se suscriben a mano en
+        // onUserJoined porque su audio ES el PTT. Ver escucharBodycam().
+        autoSubscribeAudio = false
+        autoSubscribeVideo = true
+        publishMicrophoneTrack = false
+        publishCameraTrack = false
+    }
+
+    /**
+     * Agora ha dado el canal por perdido. Todo lo que dependia de estar dentro se
+     * cae aqui, en vez de quedarse mintiendo, y se empieza a volver a entrar.
+     */
+    private fun alPerderElCanal() {
+        Log.w(TAG, "Canal perdido: se vuelve a entrar")
+        _connectedUsers.value = 0
+        // Un PTT abierto ya no llega a nadie. Se cierra con el zumbido, que es lo
+        // unico que le dice al agente que ha dejado de oirsele. No se manda
+        // ptt_off: no hay canal por donde mandarlo.
+        if (_pttPropioActivo.value) {
+            _pttPropioActivo.value = false
+            if (!_sosActive.value) scope.launch { apagarMicrofono() }
+            PttTones.denegado()
+        }
+        // De los demas no van a llegar ni ptt_off ni onUserOffline: se limpian
+        // las bandas y los SOS de bodycam, o se quedarian puestos para siempre.
+        // Al volver a entrar, quien siga hablando o emitiendo vuelve a avisar.
+        _pttsRemotos.value = emptyMap()
+        bodycamsHablando.clear()
+        _bodycamHablando.value = false
+        _oficialHablando.value = null
+        bodycamsEmitiendo.toList().forEach { onBodycamStreamChanged(it, streaming = false) }
+        reentrar()
+    }
+
+    /**
+     * Sale y vuelve a entrar con el mismo motor y el mismo uid: el backend graba el
+     * SOS por uid, y cambiarlo a mitad de una emergencia partiria la grabacion.
+     */
+    private fun reentrar() {
+        if (reentradaJob?.isActive == true) return
+        reentradaJob = scope.launch {
+            while (isActive && !_isConnected.value) {
+                delay(REENTRADA_MILLIS)
+                val rtcEngine = engine ?: return@launch
+                if (_isConnected.value) return@launch
+                rtcEngine.leaveChannel()
+                val resultado = rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
+                Log.i(TAG, "Reentrando al canal: $resultado")
+                // Un join aceptado sigue su curso solo: si vuelve a fallar, el
+                // callback de FAILED lanza otra reentrada.
+                if (resultado == 0) return@launch
+            }
+        }
+    }
+
+    /** Solo debug: dispara la perdida del canal sin esperar 20 min sin red. */
+    fun simularFalloDelCanalDebug() {
+        _isConnected.value = false
+        _estadoCanal.value = EstadoCanal.DESCONECTADO
+        alPerderElCanal()
     }
 
     /** Llamar cuando el usuario concede el permiso de ubicacion. */
@@ -472,6 +567,12 @@ class AgoraRepository(
         // pantalla mientras habla por radio.
         val rtcEngine = engine ?: run { PttTones.denegado(); return false }
         if (_pttPropioActivo.value) return true
+        // Fuera del canal la voz no llega a nadie: mejor el zumbido que un ON AIR
+        // hablandole al vacio, que es exactamente lo que paso el 2026-09-15.
+        if (!_isConnected.value) {
+            PttTones.denegado()
+            return false
+        }
         if (!tienePermisoMicrofono()) {
             PttTones.denegado()
             return false
@@ -751,7 +852,18 @@ class AgoraRepository(
     private fun sendJson(payload: JSONObject) {
         val rtcEngine = engine ?: return
         if (dataStreamId < 0) return
-        rtcEngine.sendStreamMessage(dataStreamId, payload.toString().toByteArray(Charsets.UTF_8))
+        val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+        if (rtcEngine.sendStreamMessage(dataStreamId, bytes) >= 0) return
+        // Tras volver a entrar al canal el stream puede haber dejado de valer: se
+        // crea otro y se reintenta una vez, o el SOS y los PTT no saldrian.
+        dataStreamId = rtcEngine.createDataStream(
+            DataStreamConfig().apply {
+                syncWithAudio = false
+                ordered = true
+            },
+        )
+        val resultado = rtcEngine.sendStreamMessage(dataStreamId, bytes)
+        if (resultado < 0) Log.w(TAG, "No se pudo enviar por el data stream: $resultado")
     }
 
     /** Decodifica un mensaje JSON de otro participante y actualiza el estado. */
@@ -832,6 +944,9 @@ class AgoraRepository(
     companion object {
         private const val TAG = "AgoraRepository"
 
+        // Espera entre intentos de volver a entrar al canal cuando Agora lo da por perdido.
+        private const val REENTRADA_MILLIS = 5_000L
+
         // Mismo canal que la app Flutter: ambas versiones se ven entre si.
         private const val CHANNEL_ID = "falcon_group_channel"
 
@@ -864,6 +979,9 @@ class AgoraRepository(
         private const val PRIMER_UID_TELEFONO = 100_000
     }
 }
+
+/** Si este telefono esta dentro del canal de Agora, que es lo que decide si se le oye. */
+enum class EstadoCanal { CONECTANDO, CONECTADO, RECONECTANDO, DESCONECTADO }
 
 /** Lee un double opcional del JSON; null si el campo no viene en el mensaje. */
 private fun JSONObject.optDoubleOrNull(key: String): Double? =

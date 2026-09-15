@@ -46,6 +46,7 @@ import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.data.BodycamState
 import com.delta.aeria_nexus_prototype.data.EnlaceAutenticado
+import com.delta.aeria_nexus_prototype.data.EstadoCanal
 import com.delta.aeria_nexus_prototype.data.GafasState
 import com.delta.aeria_nexus_prototype.ui.theme.AmarilloAviso
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
@@ -125,6 +126,7 @@ private fun StatusBar(
     val bodycamState by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
     val enlaceBodycam by AppContainer.bodycamRepository.enlaceAutenticado.collectAsStateWithLifecycle()
     val gafasState by AppContainer.gafasRepository.state.collectAsStateWithLifecycle()
+    val estadoCanal by AppContainer.agoraRepository.estadoCanal.collectAsStateWithLifecycle()
 
     // Releer al componer la barra tapa los dos huecos que tiene observar el
     // enlace de las gafas: el permiso de Bluetooth puede concederse despues del
@@ -150,7 +152,8 @@ private fun StatusBar(
             fontFamily = FontFamily.Monospace,
         )
         Spacer(Modifier.width(12.dp))
-        IndicatorDot(color = VerdeOk, label = "ONLINE")
+        val (colorCanal, textoCanal) = indicadorDelCanal(estadoCanal)
+        IndicatorDot(color = colorCanal, label = textoCanal)
         Spacer(Modifier.weight(1f))
         // Falcon Camera (bodycam): indicador del enlace y, donde se pueda navegar,
         // tambien la entrada a su mando a distancia.
@@ -223,6 +226,17 @@ private fun gafasStateColor(state: GafasState): Color = when (state) {
     GafasState.CONNECTED -> VerdeOk
     GafasState.CONNECTING -> AmarilloAviso
     GafasState.DISCONNECTED -> TextoTerciario
+}
+
+/**
+ * ONLINE solo cuando el telefono esta dentro del canal: es lo que decide si su PTT
+ * y su SOS llegan a alguien. Tener red no basta.
+ */
+private fun indicadorDelCanal(estado: EstadoCanal): Pair<Color, String> = when (estado) {
+    EstadoCanal.CONECTADO -> VerdeOk to "ONLINE"
+    EstadoCanal.CONECTANDO -> AmarilloAviso to "CONNECTING"
+    EstadoCanal.RECONECTANDO -> AmarilloAviso to "RECONNECTING"
+    EstadoCanal.DESCONECTADO -> RojoSuave to "OFFLINE"
 }
 
 /** Lo que se escribe junto al icono, o null si no hay nada que advertir. */

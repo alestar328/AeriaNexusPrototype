@@ -1,8 +1,10 @@
 package com.delta.aeria_nexus_prototype
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -95,6 +97,7 @@ class MainActivity : ComponentActivity() {
             encenderApDeLasGafasDebug(intent)
             sondarEstadoDeLasGafasDebug(intent)
             listarLasGafasDebug(intent)
+            registrarFalloDelCanalDebug()
         }
         enableEdgeToEdge()
         setContent {
@@ -310,6 +313,32 @@ private fun ComponentActivity.encenderApDeLasGafasDebug(intent: Intent) {
     // Con gafas_unir, tras encender el AP el telefono se une a el.
     GafasApPrueba.alcance = if (intent.hasExtra("gafas_unir")) lifecycleScope else null
     GafasApPrueba.encender(this, password)
+}
+
+/**
+ * Simula que Agora da el canal por perdido, sin pasar 20 min sin red:
+ *
+ *     adb shell am broadcast -a com.delta.aeria_nexus_prototype.FALLO_CANAL
+ *
+ * Por broadcast y no por extra del intent para no tener que reiniciar la app, que
+ * vuelve a pedir el PIN. Se registra en el contexto de la aplicacion y una sola
+ * vez por proceso. Solo existe bajo BuildConfig.DEBUG.
+ */
+private var falloDelCanalRegistrado = false
+
+private fun ComponentActivity.registrarFalloDelCanalDebug() {
+    if (falloDelCanalRegistrado) return
+    falloDelCanalRegistrado = true
+    ContextCompat.registerReceiver(
+        applicationContext,
+        object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                AppContainer.agoraRepository.simularFalloDelCanalDebug()
+            }
+        },
+        IntentFilter("com.delta.aeria_nexus_prototype.FALLO_CANAL"),
+        ContextCompat.RECEIVER_EXPORTED,
+    )
 }
 
 /**

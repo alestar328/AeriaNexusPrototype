@@ -42,8 +42,13 @@ class OperationsViewModel(
     fun iniciarPtt(): Boolean =
         agoraRepository.iniciarPtt(repositorio.officerProfile.officerNum)
 
-    /** Cierra el PTT propio al soltar el boton. */
+    /** Cierra el PTT propio. */
     fun terminarPtt() = agoraRepository.terminarPtt()
+
+    /** Una pulsacion abre el canal y la siguiente lo cierra. */
+    fun alternarPtt() {
+        if (pttActivo.value) terminarPtt() else iniciarPtt()
+    }
 
     fun tienePermisoBluetooth(): Boolean = gafasRepository.tienePermisoBluetooth()
 

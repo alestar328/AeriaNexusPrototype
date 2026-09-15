@@ -11,7 +11,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -48,7 +47,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -87,16 +85,14 @@ fun OperationsScreen(
     val sosActive by viewModel.sosActive.collectAsStateWithLifecycle()
     val pttActivo by viewModel.pttActivo.collectAsStateWithLifecycle()
 
-    // El PTT necesita el microfono. Se pide al primer intento de hablar y esa
-    // pulsacion se pierde a proposito: mientras el dialogo esta delante no hay
-    // captura, y abrir el canal al conceder el permiso dejaria el microfono
-    // abierto sin que nadie mantenga el boton.
+    // El PTT necesita el microfono. Se pide al primer intento de hablar y, si se
+    // concede, el canal se abre: el agente ya habia pulsado para hablar.
     val pttPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) {}
+    ) { concedido -> if (concedido) viewModel.iniciarPtt() }
 
-    // Salir de la pantalla con el boton pulsado (una notificacion, el boton atras)
-    // no genera evento de soltar: sin esto el microfono se quedaria abierto.
+    // El ON AIR solo se ve en esta pantalla: salir de ella con el canal abierto
+    // dejaria el microfono transmitiendo sin nada que lo recuerde ni lo cierre.
     DisposableEffect(Unit) {
         onDispose { viewModel.terminarPtt() }
     }
@@ -175,14 +171,13 @@ fun OperationsScreen(
         Spacer(Modifier.height(10.dp))
         PttButton(
             activo = pttActivo,
-            onPress = {
-                if (viewModel.tienePermisoMicrofono()) {
-                    viewModel.iniciarPtt()
+            onClick = {
+                if (pttActivo || viewModel.tienePermisoMicrofono()) {
+                    viewModel.alternarPtt()
                 } else {
                     pttPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                 }
             },
-            onRelease = { viewModel.terminarPtt() },
         )
         Spacer(Modifier.height(10.dp))
         EmergencyButton(
@@ -368,12 +363,12 @@ private fun RadioActionButton(
 }
 
 /**
- * PTT del propio telefono: mantener pulsado para hablar, soltar para cerrar.
+ * PTT del propio telefono: una pulsacion abre el canal y otra lo cierra.
  *
- * Aqui SI es mantener-para-hablar, al reves que en la bodycam, donde el firmware
- * de la W1 solo avisa al SOLTAR la tecla F2 y obliga a un conmutador. En una
- * pantalla no existe esa limitacion, y mantener es lo que evita el fallo clasico
- * de la radio: dejarse el microfono abierto sin darse cuenta.
+ * Es un conmutador desde el 2026-09-15, como el de la bodycam: el agente no
+ * tiene que tener la mano en la pantalla mientras habla. El precio es el fallo
+ * clasico de la radio, dejarse el microfono abierto, y por eso el boton late
+ * mientras transmite y los tonos de abrir y cerrar son distintos.
  *
  * El indicador se enciende con lo que el repositorio confirma haber abierto, no
  * con la pulsacion: un boton que dice ON AIR sin que salga voz es peor que uno
@@ -382,8 +377,7 @@ private fun RadioActionButton(
 @Composable
 private fun PttButton(
     activo: Boolean,
-    onPress: () -> Unit,
-    onRelease: () -> Unit,
+    onClick: () -> Unit,
 ) {
     // Late mientras se transmite, como el SOS: tiene que verse de reojo.
     val latido by rememberInfiniteTransition(label = "pttLatido").animateFloat(
@@ -407,18 +401,7 @@ private fun PttButton(
                 if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
                 RoundedCornerShape(16.dp),
             )
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        onPress()
-                        // tryAwaitRelease vuelve tanto al soltar como al cancelarse
-                        // el gesto (el dedo se sale del boton, un scroll lo roba):
-                        // en los dos casos hay que cerrar el microfono.
-                        tryAwaitRelease()
-                        onRelease()
-                    },
-                )
-            },
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Row(
@@ -433,10 +416,8 @@ private fun PttButton(
                     .size(26.dp)
                     .alpha(if (activo) latido else 1f),
             )
-            // El texto esta siempre puesto, tambien en reposo: si apareciera solo
-            // al transmitir, el boton cambiaria de ancho en mitad de la pulsacion.
             Text(
-                text = if (activo) "ON AIR — RELEASE TO STOP" else "PTT — HOLD TO TALK",
+                text = if (activo) "ON AIR — TAP TO STOP" else "PTT — TAP TO TALK",
                 color = if (activo) AzulClaro else TextoSecundario,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Black,

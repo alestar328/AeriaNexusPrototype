@@ -6,6 +6,91 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-15 — El PTT del teléfono pasa a conmutador, y la W1 ya lo oye
+
+### PTT de pulsar una vez (petición del usuario)
+
+Antes había que mantener pulsado. Ahora un toque abre el canal y otro lo cierra.
+- `OperationsScreen.PttButton`: `clickable` en lugar de `detectTapGestures` con
+  `tryAwaitRelease`. Textos: `PTT — TAP TO TALK` y `ON AIR — TAP TO STOP`.
+- `OperationsViewModel.alternarPtt()`. `AgoraRepository` no cambia: `iniciarPtt` y
+  `terminarPtt` ya estaban separados.
+- **Se mantiene** el cierre del PTT al salir de Operations (`DisposableEffect`). ON AIR
+  solo se ve en esa pantalla, y fuera de ella el micro quedaría abierto sin nada que lo
+  recuerde.
+- Al conceder el permiso de micrófono el canal se abre directamente. Antes esa pulsación
+  se perdía a propósito, para no dejar el micro abierto sin nadie manteniendo el botón.
+
+**VERIFICADO en el Samsung:** primer toque → ON AIR y `muteLocalAudio(mute:0)` a las
+13:03:32. Sin tocar nada sigue abierto. Segundo toque → TAP TO TALK y `mute:1` a las
+13:03:39.
+
+### La W1 escucha el canal (lado BodyCamServer)
+
+Punto 1 del PTT hacia la bodycam, hecho en BodyCamServer (detalle en su DEVLOG): la unidad
+está siempre en el canal como audiencia. **Verificado:** el PTT del Samsung llega a la W1
+(`DECODING`) sin quitarle el micro a la grabación del anillo.
+
+### Fallo encontrado: Nexus no vuelve al canal y sigue diciendo ONLINE
+
+En la prueba, el PTT del Samsung no llegaba a nadie porque **llevaba fuera del canal desde
+la 01:44**. Perdió la red a la 01:24 y Agora reintentó 20 min hasta dar
+`onConnectionFailure` (estado 5, motivo 4). `AgoraRepository` no vuelve a entrar, y la
+barra sigue en ONLINE. El agente pulsa, oye sus tonos, ve ON AIR y no le oye nadie. Afecta
+también al SOS y a la escucha. Solo se arregló reiniciando la app.
+
+Cómo se vio: `agoraapi.log` en `/sdcard/Android/data/com.delta.aeria_nexus_prototype/files/`
+va en texto plano (`agorasdk.log` va cifrado).
+
+**La causa, en tres piezas:**
+1. `eventHandler` no implementaba `onConnectionStateChanged`, así que nadie se enteraba del
+   FAILED.
+2. `ensureStarted()` solo entra la primera vez: `started` se queda en `true` para siempre.
+3. La barra pintaba `IndicatorDot(VerdeOk, "ONLINE")` fijo. `isConnected` existía, pero solo
+   se ponía a `true` y nadie lo leía.
+
+### Arreglado el mismo día
+
+- **`AgoraRepository`:**
+  - `onConnectionStateChanged` alimenta `estadoCanal` (CONECTANDO, CONECTADO, RECONECTANDO,
+    DESCONECTADO) e `isConnected`.
+  - Con FAILED, `alPerderElCanal()` hace cuatro cosas:
+    - Cierra el PTT propio con el zumbido (no se manda `ptt_off`: no hay canal).
+    - Limpia las bandas de PTT ajenas y los SOS de bodycam, que si no se quedarían colgados.
+    - Pone a cero el contador de usuarios.
+    - Llama a `reentrar()`: `leaveChannel` + `joinChannel` cada 5 s, con el **mismo uid**
+      (el backend graba el SOS por uid).
+  - Al volver a entrar, `onJoinChannelSuccess` vuelve a publicar la cámara y a anunciar el
+    SOS si seguía en pie, y `onUserJoined` vuelve a abrir el audio de quien se estuviera
+    viendo en livestream.
+  - `iniciarPtt()` se niega, con zumbido, si el teléfono no está en el canal.
+  - `sendJson()`: si el data stream ha dejado de valer, crea otro y reintenta una vez.
+    **Pasó en la prueba:** justo después de volver a entrar, el stream antiguo ya no valía.
+- **`AppScaffold`:** ONLINE en verde, CONNECTING o RECONNECTING en amarillo y OFFLINE en rojo,
+  según `estadoCanal`.
+- **`MainActivity`** (solo debug): `adb shell am broadcast -a
+  com.delta.aeria_nexus_prototype.FALLO_CANAL` simula el FAILED sin pasar 20 min sin red.
+
+**VERIFICADO en el Samsung:**
+1. PTT abierto, ONLINE.
+2. Simulado el fallo: la barra pasa a OFFLINE y el botón vuelve a TAP TO TALK (mute:1).
+3. A los 5 s: `leaveChannel`, `joinChannel` con el mismo uid 884204180 → estado 3 → ONLINE.
+4. Tras volver, el PTT abre y cierra (mute 0 → 1) sin avisos de envío fallido.
+
+**Sin verificar:**
+- Un FAILED de verdad (20 min sin red).
+- El SOS propio republicado tras volver.
+- Que otro teléfono reciba los mensajes del data stream nuevo. No había un segundo aparato
+  que leyera el data stream: la W1 no lo lee.
+
+### Próximo paso
+
+- Probar el PTT del teléfono con la W1 grabando un incidente y después de un SOS (la W1 se
+  desconectó de adb a mitad de la prueba).
+- Punto 2 del PTT hacia la bodycam: que la W1 reproduzca solo el PTT.
+
+---
+
 ## 2026-09-14 — La bodycam se elige desde la app, y el PTT hacia la W1 no existe
 
 ### Por que
