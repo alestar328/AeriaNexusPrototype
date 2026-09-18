@@ -26,6 +26,8 @@ enum class TipoEvento(val familia: String, val texto: String) {
     AUDITORIA_REINICIADA("security", "Audit log restarted without its key"),
 
     SESION_ABIERTA("session", "Session opened"),
+    SESION_ACREDITADA("session", "Session accredited by AeriaOne"),
+    SESION_NO_ACREDITADA("session", "AeriaOne did not accredit the session"),
     PIN_INCORRECTO("session", "Wrong PIN"),
     PIN_BLOQUEO_TEMPORAL("session", "PIN keypad locked out"),
     PIN_CAMBIADO("session", "PIN changed"),

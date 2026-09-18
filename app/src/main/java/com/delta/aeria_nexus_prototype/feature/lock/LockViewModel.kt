@@ -2,10 +2,9 @@ package com.delta.aeria_nexus_prototype.feature.lock
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
-import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
 import com.delta.aeria_nexus_prototype.data.identity.ProvisionedIdentity
-import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
 import com.delta.aeria_nexus_prototype.data.identity.TrustState
 import com.delta.aeria_nexus_prototype.data.identity.UnlockResult
 import kotlinx.coroutines.Dispatchers
@@ -27,8 +26,8 @@ data class LockUiState(
     val attemptsLeft: Int = IdentityRepository.MAX_ATTEMPTS,
     /** Segundos que faltan para poder volver a intentarlo. 0 = teclado libre. */
     val lockoutSeconds: Int = 0,
-    /** Quien emitio el reto que espera firma, si hay uno. */
-    val emisorDelRetoPendiente: String? = null,
+    /** Hay servidor AeriaOne: el PIN, ademas de abrir, firmara su reto. */
+    val conAeriaOne: Boolean = false,
     val mensajeError: String? = null,
 )
 
@@ -41,13 +40,13 @@ data class LockUiState(
  */
 class LockViewModel(
     private val identity: IdentityRepository,
-    private val retos: RetoRepository,
+    iam: IamClient,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
-        // El reto se mira al construir la pantalla y no en cada recomposicion: es
-        // una lectura de disco y el estado no cambia mientras se teclea el PIN.
-        LockUiState(emisorDelRetoPendiente = retos.pendiente(PropositoDelReto.LOGIN)?.emisor),
+        // Se mira al construir la pantalla y no en cada recomposicion: es una
+        // lectura de disco y no cambia mientras se teclea el PIN.
+        LockUiState(conAeriaOne = iam.configurado()),
     )
     val uiState: StateFlow<LockUiState> = _uiState.asStateFlow()
 

@@ -1,8 +1,11 @@
 package com.delta.aeria_nexus_prototype.feature.operations
 
 import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -109,6 +112,25 @@ fun OperationsScreen(
         onOpenSosLivestream()
     }
 
+    // La ubicacion del incidente se toma al abrirlo. Si falta el permiso se pide en
+    // ese momento, y el incidente se abre aunque se niegue: sin ubicacion se trabaja
+    // igual, y el incidente lo dice en vez de inventarla.
+    val context = LocalContext.current
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { onOpenActiveIncident(viewModel.createIncident()) }
+    val abrirIncidenteNuevo = {
+        val tienePermiso = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (tienePermiso) {
+            onOpenActiveIncident(viewModel.createIncident())
+        } else {
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
     // Los indicadores de bodycam y gafas de la barra superior no valen nada sin
     // el permiso de Bluetooth: sin el, Android no entrega los avisos de conexion
     // y los iconos se quedan en gris con los aparatos puestos y funcionando. Se
@@ -147,7 +169,7 @@ fun OperationsScreen(
             ) {
                 NewIncidentButton(
                     compacto = compacto,
-                    onClick = { onOpenActiveIncident(viewModel.createIncident()) },
+                    onClick = abrirIncidenteNuevo,
                     modifier = Modifier.weight(1f),
                 )
                 ContinueIncidentButton(

@@ -2,6 +2,7 @@ package com.delta.aeria_nexus_prototype.data.upload
 
 import android.content.Context
 import android.util.Log
+import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import java.io.File
 
 private const val TAG = "FalconUploadCfg"
@@ -16,7 +17,6 @@ private const val TAG = "FalconUploadCfg"
  *     /sdcard/Android/data/com.delta.aeria_nexus_prototype/files/upload.conf
  *     base_url=http://192.168.0.14:1080/files/
  *     api_url=http://192.168.0.14:1080/api/
- *     token=stub-token
  *     chunk_bytes=1048576
  *
  * Se pone por adb sin recompilar:
@@ -24,15 +24,16 @@ private const val TAG = "FalconUploadCfg"
  *     adb shell "echo base_url=http://192.168.0.14:1080/files/ > \
  *       /sdcard/Android/data/com.delta.aeria_nexus_prototype/files/upload.conf"
  *
- * [token] es un stub declarado: hoy vale cualquier cosa no vacía porque el servidor de
- * pruebas no valida nada. Existe para que el cliente ejercite el camino de mandar la
- * credencial y para que el día que haya login de agente se sustituya la fuente del token
- * y no el transporte.
+ * La credencial NO esta en el fichero: es el token de la sesion que se abre con el PIN
+ * ([SesionBackend]). Sin sesion no se sube nada, y lo pendiente sale al abrirla.
  *
  * El destino por defecto queda **vacío a propósito**: una app sin `upload.conf` no debe
  * empezar a mandar evidencia a un sitio que nadie ha confirmado.
  */
-class UploadConfig(private val context: Context) {
+class UploadConfig(
+    private val context: Context,
+    private val sesion: SesionBackend,
+) {
 
     private val confFile: File?
         get() = context.getExternalFilesDir(null)?.let { File(it, CONF_NAME) }
@@ -75,7 +76,11 @@ class UploadConfig(private val context: Context) {
         return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
     }
 
-    fun token(): String = conf()["token"]?.takeIf { it.isNotBlank() } ?: DEFAULT_TOKEN
+    /**
+     * El token de la sesion abierta con AeriaOne, o null si no la hay. Ya no sale del
+     * fichero: el backend rechaza cualquier cosa que no haya emitido el mismo.
+     */
+    fun token(): String? = sesion.token()
 
     fun chunkBytes(): Int =
         conf()["chunk_bytes"]?.toIntOrNull()?.takeIf { it in 64 * 1024..64 * 1024 * 1024 }
@@ -97,7 +102,6 @@ class UploadConfig(private val context: Context) {
 
         /** TODO: la URL real de Nexus cuando backend confirme el endpoint. */
         const val DEFAULT_BASE_URL = ""
-        const val DEFAULT_TOKEN = "stub-token"
         const val DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
     }
 }

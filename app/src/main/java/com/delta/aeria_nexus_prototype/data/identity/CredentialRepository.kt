@@ -3,18 +3,15 @@ package com.delta.aeria_nexus_prototype.data.identity
 import android.content.Context
 import java.io.File
 import java.security.cert.X509Certificate
-import java.util.Base64
-import org.json.JSONObject
 
 /**
  * Credencial del agente: certificado propio, distinto del del telefono
  * (workflow 3).
  *
- * De los 16 pasos del catalogo, 5 son nuestros y estan aqui: generar el par de
- * claves del agente (6), construir su peticion de certificado (7), entregarla
- * (8), instalar el certificado que devuelva la CA (11) y demostrar posesion de la
- * clave (14). El paso 13 es el PIN, que es el workflow 4. Los otros 10 son del
- * backend.
+ * Lo que es del telefono esta aqui: generar el par de claves del agente (paso 6),
+ * construir su peticion de certificado (7), hacer que el terminal la firme (8) e
+ * instalar el certificado que devuelve la CA (11). El paso 13 es el PIN, que es el
+ * workflow 4. La entrega y la emision van por [IamClient].
  *
  * POR QUE UN SEGUNDO PAR DE CLAVES, que es la pregunta que va a salir: porque el
  * documento de arquitectura lo pone en sus reglas de no equivalencia, "user
@@ -24,20 +21,13 @@ import org.json.JSONObject
  * prestaria la identidad, y la evidencia no podria decir quien la grabo, solo
  * con que aparato. Con dos claves, cada una se revoca por su lado (IAM-05).
  *
- * QUE FALTA, dicho sin rodeos: no hay backend. Los pasos 1 a 5, 9, 10, 12, 15 y
- * 16 no ocurren. En particular la identidad del agente no la emite ningun IAM,
- * la pone [IdentityRepository] con el ejemplo del documento; el paso 5 (atadura
- * agente-telefono) lo apuntamos en la solicitud pero no lo registra nadie; y el
- * reto de la prueba de posesion se lo inventa el propio telefono, asi que
- * demuestra que las dos mitades del par se corresponden, pero no frescura.
- *
- * Lo que SI es real: la clave del agente vive en el Keystore, no sale de alli, y
- * no es la misma que la del terminal.
+ * QUE FALTA: el agente al que se pide la credencial todavia no lo elige ningun IAM,
+ * lo pone [IdentityRepository] con el ejemplo del documento. Tiene que existir ya en
+ * AeriaOne: el alta entrega credenciales, no crea usuarios.
  */
 class CredentialRepository(private val context: Context) {
 
     private val prefs = context.getSharedPreferences("aeria_credential", Context.MODE_PRIVATE)
-    private val carpeta: File get() = File(context.filesDir, "credential").apply { mkdirs() }
 
     /** Paso 6: par de claves del agente. Sin reto de atestacion, ver [ClaveEnKeystore]. */
     fun generarClave(): NivelClave {
@@ -45,57 +35,25 @@ class CredentialRepository(private val context: Context) {
         return ClaveEnKeystore.agente.nivelDeLaClave()
     }
 
-    /** Paso 7: peticion con el identificador del agente como nombre comun. */
-    fun crearCsr(userId: String, tenant: String): ByteArray =
-        ClaveEnKeystore.agente.crearCsr(
+    /** Paso 7: peticion en PEM con el identificador del agente como nombre comun. */
+    fun crearCsr(userId: String, tenant: String): String {
+        val der = ClaveEnKeystore.agente.crearCsr(
             SujetoCsr(commonName = userId, organizationalUnit = tenant),
         )
-
-    /**
-     * Paso 8: entrega de la peticion, firmada ademas por el terminal.
-     *
-     * Sin canal al backend, "entregar" es dejarla en la carpeta privada de la app
-     * para poder sacarla con `adb`. Pero el paso 8 del catalogo dice que la
-     * peticion viaja "through the authenticated AeriaOne backend together with the
-     * relevant enrollment context", y ese contexto es justo lo que se pierde al
-     * dejar un fichero suelto: cualquiera podria presentar un CSR de agente.
-     *
-     * Por eso el terminal firma el DER del CSR del agente con SU clave, la del
-     * workflow 12. Asi la solicitud lleva dentro la prueba de que salio de un
-     * telefono ya dado de alta, que es la mitad del paso 5 (atadura
-     * agente-dispositivo) que se puede hacer desde este lado.
-     *
-     * ATENCION: el formato de este fichero es PROPUESTA NUESTRA. La
-     * especificacion de API es uno de los diez artefactos de diseno que el propio
-     * documento reconoce pendientes; cuando llegue, esto se sustituye.
-     */
-    fun entregarSolicitud(
-        csrDelAgente: ByteArray,
-        userId: String,
-        tenant: String,
-        deviceId: String,
-    ): File {
-        val firmaDelTerminal = ClaveEnKeystore.terminal.firmarReto(csrDelAgente)
-        val base64 = Base64.getEncoder()
-
-        val solicitud = JSONObject().apply {
-            put("version", 1)
-            put("userId", userId)
-            put("tenant", tenant)
-            put("deviceId", deviceId)
-            put("csr", Pkcs10.aPem(csrDelAgente))
-            put("deviceSignature", base64.encodeToString(firmaDelTerminal))
-            put("signatureAlgorithm", Pkcs10.ALGORITMO_FIRMA)
-        }
-
-        // Ademas del JSON se deja el CSR suelto en PEM: es lo que come `openssl`
-        // sin tener que extraerlo antes de un campo.
-        File(carpeta, FICHERO_CSR).writeText(Pkcs10.aPem(csrDelAgente))
-        return File(carpeta, FICHERO_SOLICITUD).apply { writeText(solicitud.toString(2)) }
+        return Pkcs10.aPem(der)
     }
 
-    fun solicitudGuardada(): String? =
-        File(carpeta, FICHERO_SOLICITUD).takeIf { it.exists() }?.readText()
+    /**
+     * Paso 8: firma del TERMINAL sobre la peticion del agente.
+     *
+     * Es lo que prueba al backend que la solicitud sale de un telefono ya dado de
+     * alta, y la mitad del paso 5 (atadura agente-dispositivo) que se hace desde
+     * este lado. Se firman los bytes UTF-8 del PEM **tal cual se envia**, que es lo
+     * que verifica AeriaOne: firmar el DER, o un PEM reformateado, da una firma
+     * correcta que el backend rechaza.
+     */
+    fun firmarSolicitud(csrPem: String): ByteArray =
+        ClaveEnKeystore.terminal.firmarReto(csrPem.toByteArray(Charsets.UTF_8))
 
     /**
      * Paso 11: instalar el certificado del agente y su cadena.
@@ -113,14 +71,6 @@ class CredentialRepository(private val context: Context) {
         prefs.edit().putString(CLAVE_USER_ID, userIdEsperado).apply()
         return delAgente
     }
-
-    /**
-     * Paso 14: prueba de posesion durante el ALTA, que ocurre antes de que exista
-     * ningun PIN. Por eso es la unica firma con la clave del agente que no pasa por
-     * la autorizacion de abajo: en ese momento no hay nada con que autorizarla.
-     */
-    fun pruebaDePosesionDelAlta(reto: ByteArray): ByteArray =
-        ClaveEnKeystore.agente.firmarReto(reto)
 
     /**
      * Autorizacion de uso de la clave del agente (workflow 27, paso 8).
@@ -172,13 +122,12 @@ class CredentialRepository(private val context: Context) {
     fun borrarCredencial() {
         retirarAutorizacion()
         ClaveEnKeystore.agente.borrar()
-        carpeta.deleteRecursively()
+        // Solicitudes que dejaba el alta por adb en telefonos de antes del backend.
+        File(context.filesDir, "credential").deleteRecursively()
         prefs.edit().clear().apply()
     }
 
     private companion object {
         const val CLAVE_USER_ID = "user_id"
-        const val FICHERO_CSR = "user.csr.pem"
-        const val FICHERO_SOLICITUD = "user.request.json"
     }
 }

@@ -2,12 +2,15 @@ package com.delta.aeria_nexus_prototype.feature.enrollment
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.delta.aeria_nexus_prototype.data.identity.AltaDeTerminal
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
+import com.delta.aeria_nexus_prototype.data.identity.DeviceAttributes
+import com.delta.aeria_nexus_prototype.data.identity.DevicePosture
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
+import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.identity.NivelClave
 import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
-import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,15 +54,11 @@ data class EnrollmentUiState(
     val fase: FaseAlta = FaseAlta.TERMINAL,
     val iniciada: Boolean = false,
     val pasos: List<PasoAlta> = PASOS_TERMINAL,
-    val deviceId: String? = null,
-    val userId: String? = null,
-    /** La fase llego hasta donde puede llegar sin backend. */
-    val esperandoCertificado: Boolean = false,
     val mensajeError: String? = null,
 )
 
 /**
- * Asistente de alta (workflows 12 y 3).
+ * Asistente de alta (workflows 12 y 3) contra el IAM de AeriaOne.
  *
  * Los 21 pasos del alta del terminal y los 16 de la credencial del agente se
  * agrupan en unos pocos que el agente pueda seguir. No es cosmetica: el alta
@@ -70,35 +69,39 @@ class EnrollmentViewModel(
     private val enrollment: EnrollmentRepository,
     private val credential: CredentialRepository,
     private val identity: IdentityRepository,
-    private val retos: RetoRepository,
+    private val iam: IamClient,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(EnrollmentUiState())
     val uiState: StateFlow<EnrollmentUiState> = _uiState.asStateFlow()
 
     init {
-        // El alta se reanuda por la etapa que falte en vez de rehacer una clave que
-        // ya existe: generar otra invalidaria la peticion que la CA esta firmando.
-        when {
-            credential.solicitudGuardada() != null -> mostrarEsperaDeCredencial()
-            enrollment.altaCompleta() -> iniciarFaseDelAgente()
-            enrollment.csrGuardado() != null -> mostrarEsperaDelTerminal()
-        }
+        // Con el telefono ya acreditado solo falta el agente, y se sigue por ahi en
+        // vez de rehacer una clave que AeriaOne ya ha certificado.
+        if (enrollment.altaCompleta()) iniciarFaseDelAgente()
     }
 
+    /** Arranque del alta, y reintento de la fase que fallo. */
     fun iniciar() {
         if (_uiState.value.iniciada) return
-        _uiState.update { it.copy(iniciada = true, mensajeError = null) }
+        if (enrollment.altaCompleta()) {
+            iniciarFaseDelAgente()
+            return
+        }
+        _uiState.update {
+            it.copy(fase = FaseAlta.TERMINAL, iniciada = true, mensajeError = null, pasos = PASOS_TERMINAL)
+        }
         identity.altaEnCurso()
 
         viewModelScope.launch {
             try {
-                recogerDatos()
-                mirarPostura()
-                asignarIdentidad()
+                val atributos = recogerDatos()
+                val postura = mirarPostura()
                 generarClaveDelTerminal()
                 val csr = crearPeticionDelTerminal()
-                entregarPeticionDelTerminal(csr)
+                val alta = entregarPeticionDelTerminal(csr, atributos, postura)
+                instalarIdentidadDelTerminal(alta)
+                iniciarFaseDelAgente()
             } catch (e: Exception) {
                 marcarFalloEnPasoActual(e.message ?: "Unexpected error")
             }
@@ -106,7 +109,7 @@ class EnrollmentViewModel(
     }
 
     /** Workflow 12, paso 3. */
-    private suspend fun recogerDatos() {
+    private suspend fun recogerDatos(): DeviceAttributes {
         enCurso(DATOS)
         val atributos = withContext(Dispatchers.IO) { enrollment.atributos() }
         hecho(
@@ -114,10 +117,11 @@ class EnrollmentViewModel(
             "${atributos.manufacturer} ${atributos.model} · Android ${atributos.androidRelease} · " +
                 "patch ${atributos.securityPatch}",
         )
+        return atributos
     }
 
     /** Pasos 5 y 6: se informa, no se decide. La elegibilidad es del backend (paso 4). */
-    private suspend fun mirarPostura() {
+    private suspend fun mirarPostura(): DevicePosture {
         enCurso(POSTURA)
         val postura = withContext(Dispatchers.IO) { enrollment.postura() }
         when {
@@ -133,52 +137,60 @@ class EnrollmentViewModel(
 
             else -> hecho(POSTURA, "Keystore available · no tampering indicators found")
         }
-    }
-
-    /** Pasos 8 y 9, hoy locales. */
-    private suspend fun asignarIdentidad() {
-        enCurso(IDENTIDAD)
-        val deviceId = enrollment.deviceId()
-        _uiState.update { it.copy(deviceId = deviceId) }
-        hecho(IDENTIDAD, deviceId)
+        return postura
     }
 
     /**
-     * Paso 10.
-     *
-     * El reto de atestacion sale del backend si lo hay. Cuando no lo hay se dice en
-     * la propia pantalla: una cadena de atestacion sin reto ajeno esta bien formada
-     * y no prueba nada de frescura, y esa diferencia no se puede quedar en un log.
+     * Paso 10. El reto de atestacion lo emite AeriaOne y viaja dentro de la cadena
+     * de atestacion: es lo que impide presentar la atestacion de otro terminal o de
+     * otro dia.
      */
     private suspend fun generarClaveDelTerminal() {
         enCurso(CLAVE)
-        val reto = retos.consumir(PropositoDelReto.ATESTACION_TERMINAL)
-        val resultado = withContext(Dispatchers.Default) { enrollment.generarClave(reto?.bytes) }
+        val reto = withContext(Dispatchers.IO) {
+            iam.pedirReto(PropositoDelReto.ATESTACION_TERMINAL, enrollment.deviceId())
+        }
+        val resultado = withContext(Dispatchers.Default) { enrollment.generarClave(reto.nonce) }
         val atestacion = enrollment.certificadosDeAtestacion()
-        val sufijo = when {
-            atestacion <= 1 -> " · no attestation"
-            resultado.conRetoDelBackend ->
-                " · attestation chain of $atestacion, challenged by ${reto?.emisor}"
-            else -> " · attestation chain of $atestacion, SELF-CHALLENGED (proves no freshness)"
+        val sufijo = if (atestacion <= 1) {
+            " · no attestation"
+        } else {
+            " · attestation chain of $atestacion, challenged by ${reto.emisor}"
         }
         describirNivelDeClave(CLAVE, resultado.nivel, sufijo)
     }
 
-    /** Paso 11. */
+    /** Paso 11. El Device ID que va dentro es una propuesta: lo decide AeriaOne. */
     private suspend fun crearPeticionDelTerminal(): String {
         enCurso(PETICION)
-        val deviceId = requireNotNull(_uiState.value.deviceId)
-        val csr = withContext(Dispatchers.Default) { enrollment.crearCsr(deviceId, TENANT) }
+        val csr = withContext(Dispatchers.Default) { enrollment.crearCsr(enrollment.deviceId(), TENANT) }
         hecho(PETICION, ALGORITMO_VISIBLE)
         return csr
     }
 
-    /** Paso 12. */
-    private suspend fun entregarPeticionDelTerminal(csr: String) {
+    /** Pasos 12 a 14: AeriaOne registra el terminal y firma su certificado. */
+    private suspend fun entregarPeticionDelTerminal(
+        csr: String,
+        atributos: DeviceAttributes,
+        postura: DevicePosture,
+    ): AltaDeTerminal {
         enCurso(ENTREGA)
-        withContext(Dispatchers.IO) { enrollment.guardarCsr(csr) }
-        aviso(ENTREGA, "Held on device — no AeriaOne backend yet")
-        mostrarEsperaDelTerminal()
+        val alta = withContext(Dispatchers.IO) { iam.enrolarTerminal(csr, atributos, postura) }
+        hecho(ENTREGA, "Certificate issued by AeriaOne")
+        return alta
+    }
+
+    /** Pasos 8 y 15: se adopta el Device ID asignado y se instala el certificado. */
+    private suspend fun instalarIdentidadDelTerminal(alta: AltaDeTerminal) {
+        enCurso(IDENTIDAD)
+        withContext(Dispatchers.IO) {
+            enrollment.adoptarDeviceId(alta.deviceId)
+            enrollment.instalarCertificado(alta.cadenaPem)
+        }
+        // El telefono queda acreditado, pero el alta NO ha terminado: falta la
+        // credencial del agente, que es el workflow 3.
+        identity.altaDeTerminalCompletada(alta.deviceId)
+        hecho(IDENTIDAD, "${alta.deviceId} · assigned by AeriaOne")
     }
 
     /**
@@ -192,15 +204,7 @@ class EnrollmentViewModel(
     private fun iniciarFaseDelAgente() {
         val userId = identity.status.value.identity?.userId ?: return
         _uiState.update {
-            it.copy(
-                fase = FaseAlta.AGENTE,
-                iniciada = true,
-                esperandoCertificado = false,
-                mensajeError = null,
-                pasos = PASOS_AGENTE,
-                deviceId = enrollment.deviceId(),
-                userId = userId,
-            )
+            it.copy(fase = FaseAlta.AGENTE, iniciada = true, mensajeError = null, pasos = PASOS_AGENTE)
         }
 
         viewModelScope.launch {
@@ -215,10 +219,10 @@ class EnrollmentViewModel(
         }
     }
 
-    /** Pasos 1 y 2: hoy no hay IAM que valide nada, y se dice. */
+    /** Pasos 1 y 2: el agente todavia lo pone la app, y AeriaOne comprueba que existe. */
     private suspend fun presentarAlAgente(userId: String) {
         enCurso(AGENTE_IDENTIDAD)
-        aviso(AGENTE_IDENTIDAD, "$userId · provided locally, no AeriaOne IAM yet")
+        aviso(AGENTE_IDENTIDAD, "$userId · provided locally, must exist in AeriaOne")
     }
 
     /** Paso 6: el segundo par, que nunca es el del telefono. */
@@ -229,27 +233,27 @@ class EnrollmentViewModel(
     }
 
     /** Paso 7. */
-    private suspend fun crearPeticionDelAgente(userId: String): ByteArray {
+    private suspend fun crearPeticionDelAgente(userId: String): String {
         enCurso(AGENTE_PETICION)
         val csr = withContext(Dispatchers.Default) { credential.crearCsr(userId, TENANT) }
         hecho(AGENTE_PETICION, ALGORITMO_VISIBLE)
         return csr
     }
 
-    /** Paso 8, con la firma del terminal dentro. Ver [CredentialRepository]. */
-    private suspend fun entregarPeticionDelAgente(csr: ByteArray, userId: String) {
+    /**
+     * Pasos 8 a 11: el terminal firma la peticion, AeriaOne emite el certificado y
+     * declara la relacion agente-telefono, y se instala. A partir de aqui falta el PIN.
+     */
+    private suspend fun entregarPeticionDelAgente(csr: String, userId: String) {
         enCurso(AGENTE_ENTREGA)
         val deviceId = enrollment.deviceId()
         withContext(Dispatchers.IO) {
-            credential.entregarSolicitud(
-                csrDelAgente = csr,
-                userId = userId,
-                tenant = TENANT,
-                deviceId = deviceId,
-            )
+            val firma = credential.firmarSolicitud(csr)
+            val cadena = iam.enrolarAgente(csr, userId, deviceId, firma)
+            credential.instalarCertificado(cadena, userId)
         }
-        aviso(AGENTE_ENTREGA, "Held on device · countersigned by $deviceId")
-        mostrarEsperaDeCredencial()
+        hecho(AGENTE_ENTREGA, "Issued by AeriaOne · bound to $deviceId")
+        identity.credencialCompletada(userId)
     }
 
     private fun describirNivelDeClave(indice: Int, nivel: NivelClave, sufijo: String) {
@@ -261,39 +265,6 @@ class EnrollmentViewModel(
             // no es politica del backend, no nuestra.
             NivelClave.SOFTWARE -> aviso(indice, "Software only — reported to AeriaOne$sufijo")
             NivelClave.DESCONOCIDO -> aviso(indice, "Protection level unknown$sufijo")
-        }
-    }
-
-    private fun mostrarEsperaDelTerminal() {
-        _uiState.update {
-            it.copy(
-                fase = FaseAlta.TERMINAL,
-                iniciada = true,
-                esperandoCertificado = true,
-                deviceId = enrollment.deviceId(),
-                pasos = if (it.fase == FaseAlta.TERMINAL && it.iniciada) {
-                    it.pasos
-                } else {
-                    PASOS_TERMINAL.map { paso -> paso.copy(estado = PasoEstado.HECHO) }
-                },
-            )
-        }
-    }
-
-    private fun mostrarEsperaDeCredencial() {
-        _uiState.update {
-            it.copy(
-                fase = FaseAlta.AGENTE,
-                iniciada = true,
-                esperandoCertificado = true,
-                deviceId = enrollment.deviceId(),
-                userId = identity.status.value.identity?.userId,
-                pasos = if (it.fase == FaseAlta.AGENTE && it.iniciada) {
-                    it.pasos
-                } else {
-                    PASOS_AGENTE.map { paso -> paso.copy(estado = PasoEstado.HECHO) }
-                },
-            )
         }
     }
 
@@ -331,10 +302,10 @@ class EnrollmentViewModel(
     private companion object {
         const val DATOS = 0
         const val POSTURA = 1
-        const val IDENTIDAD = 2
-        const val CLAVE = 3
-        const val PETICION = 4
-        const val ENTREGA = 5
+        const val CLAVE = 2
+        const val PETICION = 3
+        const val ENTREGA = 4
+        const val IDENTIDAD = 5
 
         const val AGENTE_IDENTIDAD = 0
         const val AGENTE_CLAVE = 1
@@ -354,10 +325,10 @@ class EnrollmentViewModel(
 private val PASOS_TERMINAL = listOf(
     PasoAlta("Device information"),
     PasoAlta("Security posture"),
-    PasoAlta("Device identity"),
     PasoAlta("Key pair in secure hardware"),
     PasoAlta("Certificate request"),
     PasoAlta("Submit to AeriaOne"),
+    PasoAlta("Device identity"),
 )
 
 private val PASOS_AGENTE = listOf(

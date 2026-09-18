@@ -98,7 +98,9 @@ class SosNotifier(
             conexion.readTimeout = TIMEOUT_MILLIS
             conexion.doOutput = true
             conexion.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conexion.setRequestProperty("Authorization", "Bearer ${config.token()}")
+            // Sin sesion el aviso sale igual: que el backend lo rechace queda en su
+            // log, y retenerlo aqui retrasaria la grabacion de una emergencia.
+            config.token()?.let { conexion.setRequestProperty("Authorization", "Bearer $it") }
             conexion.outputStream.use { it.write(cuerpo.toString().toByteArray(Charsets.UTF_8)) }
             conexion.responseCode in 200..299
         } catch (e: IOException) {

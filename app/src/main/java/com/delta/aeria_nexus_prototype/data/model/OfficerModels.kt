@@ -65,6 +65,9 @@ data class OfficerIncident(
     val narrative: String? = null,
     val timeline: List<TimelineEntry> = emptyList(),
     val evidence: List<EvidenceRecord> = emptyList(),
+    // Donde se abrio el incidente. Null si no hubo permiso o no llego un fix.
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 )
 
 /** Incidente en curso: existe uno como maximo y vive solo en memoria. */
@@ -73,6 +76,8 @@ data class ActiveIncident(
     val type: String,
     val location: String,
     val startedAtMillis: Long,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
     val evidenceCount: Int = 0,
     val witnessCount: Int = 0,
     val isRecording: Boolean = false,

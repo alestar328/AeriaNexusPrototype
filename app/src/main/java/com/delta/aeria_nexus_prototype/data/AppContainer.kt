@@ -7,11 +7,13 @@ import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
+import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.identity.PinLocal
-import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
+import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
+import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import com.delta.aeria_nexus_prototype.data.upload.UploadSessions
 import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
@@ -59,9 +61,11 @@ object AppContainer {
         private set
     lateinit var pinLocal: PinLocal
         private set
-    lateinit var retoRepository: RetoRepository
+    lateinit var iamClient: IamClient
         private set
     lateinit var evidenceUploader: EvidenceUploader
+        private set
+    lateinit var manifestUploader: ManifestUploader
         private set
     lateinit var proxyRepository: ProxyRepository
         private set
@@ -81,12 +85,15 @@ object AppContainer {
         // invalidacion peleandose por el mismo WAL.
         val db = IncidentDatabase.build(appContext)
         val dao = db.incidentDao()
-        // Un solo upload.conf para la subida y para los avisos del SOS al backend.
-        val uploadConfig = UploadConfig(appContext)
-        incidentRepository = IncidentRepository(dao)
+        // Un solo upload.conf para la subida, los avisos del SOS y el IAM. El token con
+        // el que se sube lo pone la sesion que se abre con el PIN.
+        val sesionBackend = SesionBackend()
+        val uploadConfig = UploadConfig(appContext, sesionBackend)
+        iamClient = IamClient(uploadConfig)
+        locationRepository = LocationRepository(appContext)
+        incidentRepository = IncidentRepository(dao, locationRepository)
         // Material que entra de un periferico y todavia no es de ningun incidente.
         rawEvidenceRepository = RawEvidenceRepository(db.rawEvidenceDao(), incidentRepository)
-        locationRepository = LocationRepository(appContext)
         batteryRepository = BatteryRepository(appContext)
         agoraRepository = AgoraRepository(
             context = appContext,
@@ -134,14 +141,14 @@ object AppContainer {
         pinLocal = PinLocal(appContext)
         enrollmentRepository = EnrollmentRepository(appContext)
         credentialRepository = CredentialRepository(appContext)
-        retoRepository = RetoRepository(appContext)
-        // Va detras de los tres anteriores: el desbloqueo autoriza la clave del
-        // agente y firma el reto del backend, asi que los necesita ya construidos.
+        // Va detras de los anteriores: el desbloqueo autoriza la clave del agente y
+        // firma el reto del backend, asi que los necesita ya construidos.
         identityRepository = IdentityRepository(
             context = appContext,
             pinLocal = pinLocal,
             credential = credentialRepository,
-            retos = retoRepository,
+            iam = iamClient,
+            sesionBackend = sesionBackend,
             auditoria = auditoria,
         )
         // Quien actua y desde donde, para cada evento. Se lee en el momento de
@@ -157,18 +164,30 @@ object AppContainer {
                 sesion = identityRepository.sesionActual,
             )
         }
+        // Una sola instancia de UploadSessions para los dos: sincroniza por
+        // instancia y guarda en un unico fichero.
+        val uploadSessions = UploadSessions(appContext)
         evidenceUploader = EvidenceUploader(
             context = appContext,
             config = uploadConfig,
-            sessions = UploadSessions(appContext),
+            sessions = uploadSessions,
             dao = dao,
         )
+        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions)
         proxyRepository = ProxyRepository(
             evidencia = localEvidenceRepository,
             encoder = ProxyEncoder(appContext),
             uploader = evidenceUploader,
         )
-        incidentRepository.onIncidentSaved = { evidenceUploader.reconcile() }
+        incidentRepository.onIncidentSaved = { incidente ->
+            evidenceUploader.reconcile()
+            // El expediente sale cada vez que el incidente se guarda: al cerrarlo y
+            // al anadirle evidencia despues (manifest-schema.md §5).
+            manifestUploader.enqueue(incidente)
+        }
+        // Lo capturado sin sesion con AeriaOne —sin cobertura al desbloquear, o antes
+        // de que llegase el token— sale en cuanto hay token.
+        identityRepository.alAcreditarSesion = ::reanudarSubidas
         // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin
         // esto, una camara emparejada seguiria operando en nombre de un agente que
         // ya no esta de servicio.
@@ -185,6 +204,12 @@ object AppContainer {
         }
     }
 
+    /** Reintenta la evidencia y los manifiestos que quedaron sin entregar. */
+    fun reanudarSubidas() {
+        evidenceUploader.resumePending()
+        manifestUploader.resumePending()
+    }
+
     /**
      * Destruye TODA la identidad local: la del terminal y la del agente.
      *
@@ -197,7 +222,6 @@ object AppContainer {
         enrollmentRepository.deshacerAlta()
         credentialRepository.borrarCredencial()
         pinLocal.borrar()
-        retoRepository.borrar()
         // Tambien los identificadores: si se quedasen, un volcado de las
         // preferencias seguiria mostrando a que agente y a que terminal pertenecio
         // este telefono despues de haber destruido su identidad.

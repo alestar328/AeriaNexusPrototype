@@ -109,7 +109,7 @@ private fun LockContent(
                 verticalArrangement = Arrangement.Center,
             ) {
                 Cabecera(sessionExpired = uiState.sessionExpired, apretado = apretado)
-                uiState.emisorDelRetoPendiente?.let { AvisoDeReto(it) }
+                if (uiState.conAeriaOne) AvisoDeReto()
                 Spacer(Modifier.height(hueco))
                 uiState.identity?.let { TarjetaIdentidad(identity = it, apretado = apretado) }
             }
@@ -182,10 +182,10 @@ private fun Cabecera(sessionExpired: Boolean, apretado: Boolean) {
  * detalle: significa que nadie del otro lado ha comprobado nada.
  */
 @Composable
-private fun AvisoDeReto(emisor: String) {
+private fun AvisoDeReto() {
     Spacer(Modifier.height(14.dp))
     Text(
-        text = "AERIAONE CHALLENGE PENDING",
+        text = "AERIAONE SIGN-IN",
         color = AzulClaro,
         fontSize = 10.sp,
         fontWeight = FontWeight.Bold,
@@ -193,7 +193,7 @@ private fun AvisoDeReto(emisor: String) {
     )
     Spacer(Modifier.height(4.dp))
     Text(
-        text = "Your PIN will sign it with your credential · $emisor",
+        text = "Your PIN will sign an AeriaOne challenge with your credential",
         color = TextoSecundario,
         fontSize = 13.sp,
     )
@@ -322,14 +322,14 @@ private fun LockScreenPreview() {
     }
 }
 
-@Preview(name = "Con reto pendiente", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
+@Preview(name = "Con AeriaOne", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
 @Composable
 private fun LockScreenConRetoPreview() {
     AeriaNexusPrototypeTheme {
         LockContent(
             uiState = LockUiState(
                 identity = IDENTIDAD_PREVIEW,
-                emisorDelRetoPendiente = "AeriaOne-challenge-service-test",
+                conAeriaOne = true,
             ),
             onDigito = {},
             onBorrar = {},

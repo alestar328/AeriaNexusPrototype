@@ -6,6 +6,91 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-18 — La app habla con el backend de verdad: alta, sesión, subida autenticada, manifiesto y ubicación
+
+Rama nueva **`dev_back_connection`** (la creó el usuario) para todo lo que conecta la app con
+`aeria-nexus`. Backend en `D:\AeriaOne\aeria-nexus`, contratos en `D:\AeriaOne\aeria-contracts`.
+
+### Por qué (petición del usuario)
+
+"Estoy creando incidentes pero no suben al backend." El diagnóstico dio tres causas:
+1. No había `upload.conf` en el teléfono: la subida estaba desactivada a propósito.
+2. La app mandaba `Authorization: Bearer stub-token` y el backend exige un JWT de sesión con
+   alcance `video.upload` → `401 Token no valido: Not enough segments`.
+3. El incidente solo vivía en Room: al backend llegaban ficheros sueltos, sin tipo, ubicación
+   ni línea de tiempo, y un incidente sin evidencia no llegaba nunca.
+
+### Hecho
+
+- **Entorno de pruebas sin tocar el backend:** `adb reverse tcp:8000 tcp:8000` y `upload.conf` con
+  `base_url=http://127.0.0.1:8000/files/` y `api_url=http://127.0.0.1:8000/api/`. El túnel se pierde
+  al desconectar el cable.
+- **`IamClient` (nuevo):** `iam/devices/enroll`, `iam/users/enroll`, `iam/challenge`, `iam/session` y
+  `iam/session/logout`, contrato `aeria-contracts/iam-session.md`.
+- **Alta contra el IAM real (se SUSTITUYE el alta por adb, decisión del usuario):**
+  - `EnrollmentViewModel`: el reto de atestación lo emite AeriaOne; el teléfono **adopta el
+    `device_id` que asigna el backend** (`EnrollmentRepository.adoptarDeviceId`) y encadena solo
+    la fase del agente. Si falla, el paso queda en rojo con el motivo del backend y botón TRY AGAIN.
+  - `CredentialRepository.firmarSolicitud`: el terminal firma **los bytes UTF-8 del PEM tal cual se
+    envía**. Antes firmaba el DER, que es una firma correcta que el backend rechaza.
+  - Fuera: `RetoRepository`, los intents `device_cert`/`user_cert`/`challenge` de `MainActivity` y
+    `registrarPosesion`. Se queda `peripheral_anchor` (bodycam). `PropositoDelReto` pasa a su fichero.
+  - Obsoletos pero NO borrados: `tools/alta-terminal.sh`, `alta-agente.sh` y `reto.sh`
+    (`alta-bodycam.sh` sigue usando `tools/ca-pruebas`).
+- **Sesión:** `IdentityRepository.unlock` abre al instante como `SOLO_LOCAL` y en segundo plano pide
+  el reto, lo firma con la clave del agente y guarda el token en **`SesionBackend`** (solo memoria).
+  Pasa a `ACREDITADA` y avisa (`alAcreditarSesion`). Al bloquear, el token se invalida también en el
+  backend. Eventos de auditoría nuevos: `SESION_ACREDITADA` y `SESION_NO_ACREDITADA`.
+- **Subida y SOS con el token:** `UploadConfig.token()` sale de la sesión (la línea `token=` del
+  `upload.conf` ya no se usa). Sin sesión no se intenta subir; lo pendiente sale al acreditarse.
+- **`media_type`** (`photo`/`video`/`audio`) en cada subida `kind=evidence`.
+- **Manifiesto del incidente** (`ManifiestoDelTelefono` + `ManifestUploader`, nuevos): esquema
+  `phone-incident/1` de `manifest-schema.md` §5. Se sube, en claro, cada vez que el incidente se
+  guarda: al cerrarlo, al crearlo desde una importación y al añadirle evidencia.
+  `IncidentRepository.onIncidentSaved` pasa a recibir el incidente.
+- **Ubicación real:** `LocationRepository.posicionActual()` (fix de hasta 10 s, si no la última
+  conocida) y `direccionDe()` (Geocoder, 5 s). El incidente abre al momento con "Locating…" y se
+  completa después; sin dirección se guardan coordenadas y sin fix se dice por qué. **Room v3**
+  (`latitude`/`longitude`, migración de verdad). En Operations se pide el permiso de ubicación al
+  pulsar nuevo incidente, y se abre aunque se niegue. `updateActiveIncident` ahora es atómico.
+
+### Decisiones
+
+- **El PIN no espera a la red:** sin cobertura el agente trabaja, y la sesión dice que es local.
+- **Un token que llega tarde** (el agente bloqueó mientras iba el reto) se invalida, no se guarda.
+- **El manifiesto va aparte de la evidencia:** no está cifrado, se reemplaza entero y el backend
+  aplica el último.
+
+### Verificado en el Samsung contra el backend local
+
+- Alta completa: `DEV-6B85FB5C` enrolado y relación `cmendez.aeriaone.com ↔ DEV-6B85FB5C`.
+- PIN → sesión acreditada → las 4 subidas pendientes entregadas con hash confirmado.
+- Incidente con foto: un solo incidente en el backend con tipo, prioridad, línea de tiempo y la
+  foto con su clasificación (VEHICLE).
+- Incidente con vídeo: proxy + original + manifiesto; ubicación real ("Carrer de París, 50,
+  Sabadell") y coordenadas en `gps_location`.
+
+### Pendiente
+
+- **Lo que se reintenta al abrir sesión pierde `incident_id`, `sha256_plain` y `media_type`**
+  (`resumePending` llama a `deliver` con nulos). Así se partió en 3 incidentes lo de esta mañana.
+  Guardar esos datos junto al `.fev`, como ya hace el proxy.
+- `appInstanceId` es la constante de demo `APPINST-8F27A91C` para todos los teléfonos.
+- El agente sigue siendo el de demo (`cmendez.aeriaone.com`, `OfficerSampleData`); tiene que
+  existir en el backend (`seed_identities`).
+- El ancla de periféricos sigue siendo la CA de pruebas por adb; el backend ya devuelve la suya.
+
+### Bodycam, el mismo día
+
+Modo noche automático en BodyCamServer (IR, filtro IR-CUT y blanco y negro). Se cuenta en el DEVLOG
+de BodyCamServer; **falta probar el SOS en monocromo**.
+
+### Próximo paso
+
+Arreglar la pérdida de `incident_id` en los reintentos.
+
+---
+
 ## 2026-09-15 (5) — PTT pisado: tono y aviso cuando dos agentes hablan a la vez
 
 ### Por qué (petición del usuario)

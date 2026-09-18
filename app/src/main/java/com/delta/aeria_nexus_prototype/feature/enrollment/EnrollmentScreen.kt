@@ -80,14 +80,17 @@ private fun EnrollmentContent(uiState: EnrollmentUiState, onIniciar: () -> Unit)
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(24.dp))
-            if (uiState.iniciada || uiState.esperandoCertificado) {
+            // Tras un fallo se sigue viendo la lista: el paso en rojo dice que fallo
+            // y por que, y eso es lo que hay que dictar por radio a soporte.
+            val hayProgreso = uiState.pasos.any { it.estado != PasoEstado.PENDIENTE }
+            if (uiState.iniciada || hayProgreso) {
                 ListaDePasos(uiState)
             } else {
                 Presentacion(mensajeError = uiState.mensajeError)
             }
         }
 
-        if (!uiState.iniciada && !uiState.esperandoCertificado) {
+        if (!uiState.iniciada) {
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onIniciar,
@@ -98,7 +101,7 @@ private fun EnrollmentContent(uiState: EnrollmentUiState, onIniciar: () -> Unit)
                 colors = ButtonDefaults.buttonColors(containerColor = AzulPrimario),
             ) {
                 Text(
-                    text = "ENROLL THIS PHONE",
+                    text = if (uiState.mensajeError != null) "TRY AGAIN" else "ENROLL THIS PHONE",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,
@@ -170,18 +173,12 @@ private fun ListaDePasos(uiState: EnrollmentUiState) {
         Spacer(Modifier.height(16.dp))
 
         uiState.pasos.forEach { paso -> FilaPaso(paso) }
-
-        if (uiState.esperandoCertificado) {
-            Spacer(Modifier.height(24.dp))
-            PanelEspera(uiState)
-        }
     }
 }
 
 private fun tituloDe(uiState: EnrollmentUiState): String = when {
-    uiState.fase == FaseAlta.TERMINAL && uiState.esperandoCertificado -> "ENROLLMENT SUBMITTED"
+    uiState.mensajeError != null -> "ENROLLMENT FAILED"
     uiState.fase == FaseAlta.TERMINAL -> "ENROLLING DEVICE"
-    uiState.esperandoCertificado -> "CREDENTIAL SUBMITTED"
     else -> "ENROLLING OFFICER"
 }
 
@@ -193,22 +190,20 @@ private fun EnrollmentInicioPreview() {
     }
 }
 
-@Preview(name = "Alta terminada", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 900)
+@Preview(name = "Alta del terminal", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 900)
 @Composable
-private fun EnrollmentEsperaPreview() {
+private fun EnrollmentTerminalPreview() {
     AeriaNexusPrototypeTheme {
         EnrollmentContent(
             uiState = EnrollmentUiState(
                 iniciada = true,
-                esperandoCertificado = true,
-                deviceId = "DEV-92A71C",
                 pasos = listOf(
                     PasoAlta("Device information", PasoEstado.HECHO, "Xiaomi Redmi Note 8 Pro · Android 11"),
                     PasoAlta("Security posture", PasoEstado.HECHO, "Keystore available · no tampering indicators found"),
-                    PasoAlta("Device identity", PasoEstado.HECHO, "DEV-92A71C"),
-                    PasoAlta("Key pair in secure hardware", PasoEstado.HECHO, "Trusted execution environment · attestation chain of 4"),
+                    PasoAlta("Key pair in secure hardware", PasoEstado.HECHO, "Trusted execution environment · attestation chain of 4, challenged by AeriaOne-challenge-service"),
                     PasoAlta("Certificate request", PasoEstado.HECHO, "PKCS#10 · ECDSA P-256 · SHA-256"),
-                    PasoAlta("Submit to AeriaOne", PasoEstado.AVISO, "Held on device — no AeriaOne backend yet"),
+                    PasoAlta("Submit to AeriaOne", PasoEstado.EN_CURSO),
+                    PasoAlta("Device identity"),
                 ),
             ),
             onIniciar = {},
@@ -216,22 +211,19 @@ private fun EnrollmentEsperaPreview() {
     }
 }
 
-@Preview(name = "Credencial del agente", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
+@Preview(name = "Alta rechazada", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
 @Composable
-private fun EnrollmentCredencialPreview() {
+private fun EnrollmentFalloPreview() {
     AeriaNexusPrototypeTheme {
         EnrollmentContent(
             uiState = EnrollmentUiState(
                 fase = FaseAlta.AGENTE,
-                iniciada = true,
-                esperandoCertificado = true,
-                deviceId = "DEV-92A71C",
-                userId = "cmendez.aeriaone.com",
+                mensajeError = "AeriaOne answered 404: No hay ningun perfil dado de alta",
                 pasos = listOf(
-                    PasoAlta("Officer identity", PasoEstado.AVISO, "cmendez.aeriaone.com · provided locally, no AeriaOne IAM yet"),
+                    PasoAlta("Officer identity", PasoEstado.AVISO, "cmendez.aeriaone.com · provided locally, must exist in AeriaOne"),
                     PasoAlta("Officer key pair in secure hardware", PasoEstado.HECHO, "Trusted execution environment · separate from the device key"),
                     PasoAlta("Certificate request", PasoEstado.HECHO, "PKCS#10 · ECDSA P-256 · SHA-256"),
-                    PasoAlta("Submit to AeriaOne", PasoEstado.AVISO, "Held on device · countersigned by DEV-92A71C"),
+                    PasoAlta("Submit to AeriaOne", PasoEstado.FALLIDO, "AeriaOne answered 404: No hay ningun perfil dado de alta"),
                 ),
             ),
             onIniciar = {},

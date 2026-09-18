@@ -19,7 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         EvidenceEntity::class,
         RawEvidenceEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class IncidentDatabase : RoomDatabase() {
@@ -61,9 +61,17 @@ abstract class IncidentDatabase : RoomDatabase() {
             }
         }
 
+        /** v3: coordenadas del incidente. Los que ya existen se quedan sin ellas. */
+        private val MIGRACION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `incidents` ADD COLUMN `latitude` REAL")
+                db.execSQL("ALTER TABLE `incidents` ADD COLUMN `longitude` REAL")
+            }
+        }
+
         fun build(context: Context): IncidentDatabase =
             Room.databaseBuilder(context, IncidentDatabase::class.java, "aeria_nexus.db")
-                .addMigrations(MIGRACION_1_2)
+                .addMigrations(MIGRACION_1_2, MIGRACION_2_3)
                 .build()
     }
 }

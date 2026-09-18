@@ -6,6 +6,7 @@ import android.util.Log
 import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.local.IncidentDao
+import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.data.model.SyncState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -94,7 +95,7 @@ class EvidenceUploader(
         }
         scope.launch {
             proxy?.let { deliverProxy(it.sealed.file, it.sealed.cipherSha256) }
-            deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label)
+            deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label, EvidenceType.VIDEO)
         }
     }
 
@@ -114,20 +115,26 @@ class EvidenceUploader(
         evidenceId: String?,
         incidentId: String?,
         label: String?,
+        type: EvidenceType,
     ) {
         if (!config.enabled()) {
             Log.d(TAG, "subida no configurada — ${sealed.file.name} se queda en el teléfono")
             return
         }
-        scope.launch { deliver(sealed.file, sealed.cipherSha256, sealed.plainSha256, evidenceId, incidentId, label) }
+        scope.launch { deliver(sealed.file, sealed.cipherSha256, sealed.plainSha256, evidenceId, incidentId, label, type) }
     }
 
     /**
      * Reintenta lo que quedó sin entregar. Se llama al arrancar la app, que es cuando se
-     * recupera de un proceso muerto a mitad de subida.
+     * recupera de un proceso muerto a mitad de subida, y cada vez que se abre sesión con
+     * AeriaOne, que es cuando hay token con el que subir.
      */
     fun resumePending() {
         if (!config.enabled()) return
+        if (config.token() == null) {
+            Log.d(TAG, "sin sesión con AeriaOne — lo pendiente sale al abrirla")
+            return
+        }
         scope.launch {
             // Los proxies primero, por lo mismo que en enqueueVideo.
             proxiesDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
@@ -145,7 +152,8 @@ class EvidenceUploader(
                 // —si el fichero nunca llegó a subirse no hay recibo—, así que se recalcula.
                 // Cuesta una lectura y solo pasa al reanudar.
                 val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
-                deliver(fev, sha, null, null, null, null)
+                // Sin tipo: el backend lo deduce de la extension que hay bajo el .fev.
+                deliver(fev, sha, null, null, null, null, type = null)
             }
         }
     }
@@ -157,6 +165,7 @@ class EvidenceUploader(
         evidenceId: String?,
         incidentId: String?,
         label: String?,
+        type: EvidenceType?,
     ) = withContext(Dispatchers.IO) {
         if (isDelivered(fev)) return@withContext
 
@@ -165,6 +174,9 @@ class EvidenceUploader(
         val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId) + buildMap {
             put("kind", "evidence")
             label?.let { put("label", it) }
+            // Un incidente del telefono mezcla fotos, videos y audios, y el backend
+            // solo manda al analisis de video lo que es video (upload-protocol.md §5).
+            type?.let { mediaTypeDe(it) }?.let { put("media_type", it) }
         }
 
         val outcome = uploader.upload(fev, cipherSha256, metadata)
@@ -256,6 +268,14 @@ class EvidenceUploader(
     }
 
     private fun datosDeProxy(fev: File) = File(fev.parentFile, fev.name + PROXY_DATA_SUFFIX)
+
+    /** Valor de `media_type`. Lo que subio un testigo no es de este camino. */
+    private fun mediaTypeDe(type: EvidenceType): String? = when (type) {
+        EvidenceType.PHOTO -> "photo"
+        EvidenceType.VIDEO -> "video"
+        EvidenceType.AUDIO -> "audio"
+        EvidenceType.WITNESS_UPLOAD -> null
+    }
 
     /** Metadata que llevan igual la evidencia y el proxy (UPLOAD-PROTOCOL.md §5). */
     private fun metadataComun(

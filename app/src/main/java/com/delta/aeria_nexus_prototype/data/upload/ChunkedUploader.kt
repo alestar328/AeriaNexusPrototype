@@ -75,6 +75,7 @@ class ChunkedUploader(
     ): Outcome {
         if (!file.isFile) return Outcome(false, null, null, 0, "no existe ${file.name}")
         if (!config.enabled()) return Outcome(false, null, null, 0, "subida no configurada")
+        if (config.token() == null) return Outcome(false, null, null, 0, SIN_SESION)
 
         val total = file.length()
         val chunk = config.chunkBytes()
@@ -271,7 +272,9 @@ class ChunkedUploader(
             connectTimeout = CONNECT_TIMEOUT
             readTimeout = READ_TIMEOUT
             setRequestProperty("Tus-Resumable", TUS_VERSION)
-            setRequestProperty("Authorization", "Bearer ${config.token()}")
+            // Si la sesion se cierra a mitad de subida el token desaparece, el backend
+            // contesta 401 y la subida se retoma en la sesion siguiente.
+            setRequestProperty("Authorization", "Bearer ${config.token().orEmpty()}")
         }
 
     /** `Upload-Metadata: clave <valor en base64>, clave <valor en base64>` */
@@ -316,6 +319,8 @@ class ChunkedUploader(
 
         const val CONNECT_TIMEOUT = 15_000
         const val READ_TIMEOUT = 120_000
+
+        const val SIN_SESION = "sin sesion con AeriaOne: se sube al abrirla"
 
         const val TUS_VERSION = "1.0.0"
         const val OFFSET_CONTENT_TYPE = "application/offset+octet-stream"

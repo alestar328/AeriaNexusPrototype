@@ -2,10 +2,15 @@ package com.delta.aeria_nexus_prototype.data.identity
 
 import android.content.Context
 import android.util.Log
+import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -82,18 +87,23 @@ enum class OrigenDeSesion {
  * abrirla: sin el PIN correcto no hay verificador que pase, y sin las claves del
  * Keystore no hay identidad que presentar.
  *
- * Lo que sigue faltando y es del backend: la decision de autenticacion. En el
- * modelo, "authentication decision made" es un paso del servidor, no del APK.
+ * La decision de autenticacion es del backend ("authentication decision made" es un
+ * paso del servidor, no del APK): aqui se pide y se guarda su respuesta, el token de
+ * [SesionBackend].
  */
 class IdentityRepository(
     context: Context,
     private val pinLocal: PinLocal,
     private val credential: CredentialRepository,
-    private val retos: RetoRepository,
+    private val iam: IamClient,
+    private val sesionBackend: SesionBackend,
     private val auditoria: AuditoriaLocal,
 ) {
 
     private val prefs = context.getSharedPreferences("aeria_trust", Context.MODE_PRIVATE)
+
+    // Vive lo mismo que la app. Solo lo usa la acreditacion, que es red.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Identificador de la sesion en curso, para correlar sus eventos de auditoria (§14.1).
@@ -129,16 +139,20 @@ class IdentityRepository(
     var alCerrarSesion: ((BindingPeriferico.MotivoDeFin) -> Unit)? = null
 
     /**
+     * Aviso de que AeriaOne ha acreditado la sesion y ya hay token. Lo cablea
+     * AppContainer para soltar la evidencia que esperaba sin poder subirse.
+     */
+    var alAcreditarSesion: (() -> Unit)? = null
+
+    /**
      * Comprueba el PIN y abre la sesion (workflow 27, pasos 6 a 12).
      *
-     * El recorrido completo de este lado: verificar el PIN contra [PinLocal], que
-     * no lo guarda; aplicar el limite de intentos; autorizar el uso de la clave del
-     * agente, y firmar con ella el reto que haya dejado el backend.
-     *
-     * Lo que sigue faltando y es del servidor son los pasos 13 a 21: validar el
-     * certificado, comprobar que el agente sigue de alta, evaluar los permisos y
-     * emitir el token de sesion. Por eso una sesion abierta aqui puede ser
-     * [OrigenDeSesion.SOLO_LOCAL], y eso hay que enseñarlo, no esconderlo.
+     * El recorrido de este lado: verificar el PIN contra [PinLocal], que no lo
+     * guarda; aplicar el limite de intentos, y autorizar el uso de la clave del
+     * agente. La sesion se abre en el acto como [OrigenDeSesion.SOLO_LOCAL] y pasa a
+     * [OrigenDeSesion.ACREDITADA] cuando AeriaOne acepta la firma de su reto (ver
+     * [acreditar]). Se hace en dos tiempos a proposito: sin cobertura el agente tiene
+     * que poder trabajar, y esperar a la red dejaria el teclado colgado.
      */
     fun unlock(pin: String): UnlockResult {
         if (isLockedOut()) return UnlockResult.LOCKED_OUT
@@ -160,54 +174,71 @@ class IdentityRepository(
         // Paso 8: a partir de aqui la clave del agente puede firmar, y solo a
         // partir de aqui.
         credential.autorizarUso()
-        val reto = firmarRetoDeEntrada()
-        sesionActual = UUID.randomUUID().toString()
-        auditoria.registrar(
-            TipoEvento.SESION_ABIERTA,
-            listOf("origin" to if (reto != null) "ACCREDITED" else "LOCAL_ONLY", "challenge_issuer" to reto?.emisor),
-        )
+        val sesion = UUID.randomUUID().toString()
+        sesionActual = sesion
+        auditoria.registrar(TipoEvento.SESION_ABIERTA)
 
         _status.update {
             it.copy(
                 state = TrustState.ACTIVE,
                 attemptsLeft = MAX_ATTEMPTS,
                 lockedOutUntil = 0L,
-                origenDeSesion = if (reto != null) {
-                    OrigenDeSesion.ACREDITADA
-                } else {
-                    OrigenDeSesion.SOLO_LOCAL
-                },
-                emisorDelReto = reto?.emisor,
+                origenDeSesion = OrigenDeSesion.SOLO_LOCAL,
+                emisorDelReto = null,
             )
         }
+        acreditar(sesion)
         return UnlockResult.OK
     }
 
     /**
-     * Pasos 11 a 14: si el backend dejo un reto, se firma con la clave del agente
-     * recien autorizada y la respuesta queda donde el backend pueda verificarla.
+     * Pasos 11 a 21: pedir un reto a AeriaOne, firmarlo con la clave del agente recien
+     * autorizada y cambiar la firma por el token de la sesion.
      *
-     * Si no hay reto, el desbloqueo sigue adelante pero la sesion queda marcada
-     * como SOLO_LOCAL. Es deliberado: sin backend el agente tiene que poder
-     * trabajar, pero nadie debe poder confundir eso con haberse autenticado.
+     * Si falla —sin red, agente dado de baja, terminal revocado— el agente sigue
+     * dentro con la sesion SOLO_LOCAL: nadie debe poder confundir eso con haberse
+     * autenticado, pero tampoco dejarle sin terminal en mitad de la calle.
      */
-    private fun firmarRetoDeEntrada(): Reto? {
-        val reto = retos.consumir(PropositoDelReto.LOGIN) ?: run {
-            Log.w(TAG, "desbloqueo sin reto del backend: la sesion es SOLO local")
-            return null
+    private fun acreditar(sesion: String) {
+        val identidad = _status.value.identity ?: return
+        if (!iam.configurado()) {
+            Log.w(TAG, "sin servidor AeriaOne configurado: la sesion es SOLO local")
+            return
         }
-        return try {
-            val firma = credential.firmarRetoDeSesion(reto.bytes)
-            val agente = credential.agenteProvisionado() ?: "desconocido"
-            retos.responder(reto, firma, agente)
-            Log.i(TAG, "reto de ${reto.emisor} firmado como $agente: sesion acreditada")
-            reto
-        } catch (e: Exception) {
-            // Que falle la firma no puede dejar al agente fuera del terminal: se
-            // entra igual y se marca la sesion como local, que es la verdad.
-            Log.e(TAG, "no se pudo firmar el reto de entrada", e)
-            null
+        scope.launch {
+            try {
+                val reto = iam.pedirReto(PropositoDelReto.LOGIN, identidad.userId)
+                val firma = credential.firmarRetoDeSesion(reto.nonce)
+                val emitida = iam.abrirSesion(
+                    reto = reto,
+                    firma = firma,
+                    deviceId = identidad.deviceId,
+                    appInstanceId = identidad.appInstanceId,
+                    appVersion = BuildConfig.VERSION_NAME,
+                )
+                guardarSiSigueAbierta(sesion, emitida, reto.emisor)
+            } catch (e: Exception) {
+                Log.e(TAG, "AeriaOne no ha acreditado la sesion: ${e.message}")
+                auditoria.registrar(TipoEvento.SESION_NO_ACREDITADA, listOf("reason" to e.message))
+            }
         }
+    }
+
+    /**
+     * El agente pudo bloquear mientras el reto iba y volvia. Un token que llega tarde
+     * se invalida en el backend en vez de guardarse: si no, la subida seguiria
+     * funcionando con la pantalla bloqueada.
+     */
+    private fun guardarSiSigueAbierta(sesion: String, emitida: SesionEmitida, emisor: String) {
+        if (sesionActual != sesion) {
+            runCatching { iam.cerrarSesion(emitida.token) }
+            return
+        }
+        sesionBackend.guardar(emitida)
+        auditoria.registrar(TipoEvento.SESION_ACREDITADA, listOf("challenge_issuer" to emisor))
+        _status.update { it.copy(origenDeSesion = OrigenDeSesion.ACREDITADA, emisorDelReto = emisor) }
+        Log.i(TAG, "sesion acreditada por $emisor")
+        alAcreditarSesion?.invoke()
     }
 
     /**
@@ -286,6 +317,14 @@ class IdentityRepository(
         // su fin hace falta la clave del agente, y la linea siguiente la retira.
         alCerrarSesion?.invoke(motivo)
         credential.retirarAutorizacion()
+        // El token caducaria solo, pero hasta entonces serviria para subir en nombre
+        // de un agente que ya no esta de servicio.
+        sesionBackend.olvidar()?.let { token ->
+            scope.launch {
+                runCatching { iam.cerrarSesion(token) }
+                    .onFailure { Log.w(TAG, "no se pudo cerrar la sesion en AeriaOne: ${it.message}") }
+            }
+        }
         // Despues de los avisos, para que desatar y sellar queden en esta sesion, y
         // antes de olvidarla, para que el propio cierre tambien.
         auditoria.registrar(TipoEvento.SESION_CERRADA, listOf("reason" to motivo.name))

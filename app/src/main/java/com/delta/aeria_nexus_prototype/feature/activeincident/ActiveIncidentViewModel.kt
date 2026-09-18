@@ -70,9 +70,9 @@ class ActiveIncidentViewModel(
      * corre en el scope de la aplicacion, no en el del ViewModel, porque salir de la
      * pantalla no debe cortar una subida de 40 MB. Sube el .fev, nunca el original.
      */
-    private fun entregar(sellada: EvidenceCrypto.Sealed?, evidenceId: String, label: String) {
+    private fun entregar(sellada: EvidenceCrypto.Sealed?, evidencia: EvidenceRecord) {
         val s = sellada ?: return   // sin cifrar no hay nada que entregar
-        uploader.enqueue(s, evidenceId, activeIncident.value?.id, label)
+        uploader.enqueue(s, evidencia.id, activeIncident.value?.id, evidencia.label, evidencia.type)
     }
 
     /** True cuando no hay bodycam: video y foto se capturan con el telefono. */
@@ -327,7 +327,7 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Photo captured", TimelineEntryType.PHOTO)
         _uiState.update { it.copy(pendingEvidence = foto) }
-        entregar(sellada, foto.id, foto.label)
+        entregar(sellada, foto)
     }
 
     /**
@@ -368,7 +368,7 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Audio note added — $duracion", TimelineEntryType.AUDIO)
         // La entrega a Nexus no espera a la clasificacion, igual que en foto y video.
-        entregar(capturada.sealed, nota.id, nota.label)
+        entregar(capturada.sealed, nota)
         _uiState.update { it.copy(pendingEvidence = nota) }
     }
 

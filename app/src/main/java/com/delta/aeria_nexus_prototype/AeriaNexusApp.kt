@@ -24,10 +24,11 @@ class AeriaNexusApp : Application() {
         // la app solo mira ese enlace, y tiene que mirarlo desde el arranque
         // para que el estado sea correcto la primera vez que se ve la barra.
         AppContainer.gafasRepository.vigilar()
-        // Una subida que se corto porque el sistema mato el proceso se retoma aqui,
-        // por el offset guardado. Es el equivalente movil de lo que en la bodycam
-        // hace BootReceiver.
-        AppContainer.evidenceUploader.resumePending()
+        // Una subida que se corto porque el sistema mato el proceso se retoma por el
+        // offset guardado. Al arrancar todavia no hay sesion con AeriaOne, asi que lo
+        // normal es que esto no haga nada y salga al acreditarse la sesion; se deja
+        // por si algun dia el token sobrevive al proceso.
+        AppContainer.reanudarSubidas()
         AppContainer.evidenceUploader.reconcile()
         // Lo mismo para la copia ligera de los videos: si el proceso murio mientras se
         // hacia, el original sigue en claro esperandola y hay que terminarla.

@@ -11,21 +11,13 @@ data class ResultadoDeClave(val nivel: NivelClave, val conRetoDelBackend: Boolea
 /**
  * Alta del telefono como dispositivo BYOD de AeriaOne (workflow 12).
  *
- * De los 21 pasos del catalogo, 9 son nuestros y estan aqui: recoger los datos
- * del terminal (3), mirar su estado de seguridad (5 y 6), generar el par de
- * claves (10), construir la peticion de certificado (11), entregarla (12),
- * instalar el certificado que devuelva la CA (15) y demostrar posesion de la
- * clave (16). Los otros 12 son del backend.
+ * Lo que es del telefono esta aqui: recoger los datos del terminal (paso 3), mirar
+ * su estado de seguridad (5 y 6), generar el par de claves (10), construir la
+ * peticion de certificado (11) e instalar el certificado que devuelve la CA (15).
+ * La entrega y la emision son del backend y van por [IamClient].
  *
- * QUE FALTA, dicho sin rodeos: no hay backend. Los pasos 2, 4, 7, 13, 14, 17 y 18
- * no ocurren, y el Device ID se lo inventa este fichero cuando en realidad lo
- * asigna el registro de dispositivos (paso 8). Lo que SI es real y no una maqueta:
- * la clave vive en el Keystore y no sale de alli, el CSR esta bien formado
- * (validado con `openssl req -verify`) y, cuando hay un reto emitido de fuera
- * ([RetoRepository]), la atestacion y la prueba de posesion acreditan frescura.
- *
- * Mientras no exista el canal, la CA y los retos entran por `tools/`; ver
- * `MainActivity`.
+ * El Device ID lo asigna AeriaOne (paso 8). El que se propone en el CSR es solo
+ * una propuesta: el definitivo es el que vuelve en la respuesta del alta.
  */
 class EnrollmentRepository(private val context: Context) {
 
@@ -39,14 +31,18 @@ class EnrollmentRepository(private val context: Context) {
     fun postura(): DevicePosture = DeviceInspector.postura(context)
 
     /**
-     * Pasos 8 y 9, simulados. En el modelo real este identificador lo emite el
-     * registro de dispositivos y llega por la red; que lo genere el propio
-     * telefono es exactamente lo que el backend vendra a corregir.
+     * Device ID de este telefono. Antes del alta es la propuesta que va en el CSR;
+     * despues, el que asigno AeriaOne (ver [adoptarDeviceId]).
      */
     fun deviceId(): String = prefs.getString(CLAVE_DEVICE_ID, null) ?: run {
         val sufijo = ByteArray(4).also { SecureRandom().nextBytes(it) }
             .joinToString("") { "%02X".format(it) }
         "DEV-$sufijo".also { prefs.edit().putString(CLAVE_DEVICE_ID, it).apply() }
+    }
+
+    /** Paso 8: el backend manda sobre el sujeto del certificado, y con el sobre el Device ID. */
+    fun adoptarDeviceId(asignado: String) {
+        prefs.edit().putString(CLAVE_DEVICE_ID, asignado).apply()
     }
 
     /**
@@ -75,17 +71,6 @@ class EnrollmentRepository(private val context: Context) {
         )
         return Pkcs10.aPem(der)
     }
-
-    /**
-     * Paso 12: entrega de la peticion.
-     *
-     * Sin canal al backend, "entregar" es dejarla en la carpeta privada de la app.
-     * Es lo que permite sacarla con `adb` y firmarla con una CA de pruebas.
-     */
-    fun guardarCsr(pem: String): File =
-        File(carpeta, "device.csr.pem").apply { writeText(pem) }
-
-    fun csrGuardado(): String? = File(carpeta, "device.csr.pem").takeIf { it.exists() }?.readText()
 
     /**
      * Ancla con la que se valida a los perifericos que se emparejan (workflow 31).
@@ -121,12 +106,6 @@ class EnrollmentRepository(private val context: Context) {
         prefs.edit().putBoolean(CLAVE_ALTA_COMPLETA, true).apply()
         return delTerminal
     }
-
-    /**
-     * Paso 16: prueba de posesion. Firma el reto con la clave privada, que sigue
-     * sin salir del Keystore.
-     */
-    fun pruebaDePosesion(reto: ByteArray): ByteArray = ClaveEnKeystore.terminal.firmarReto(reto)
 
     fun altaCompleta(): Boolean = prefs.getBoolean(CLAVE_ALTA_COMPLETA, false)
 
