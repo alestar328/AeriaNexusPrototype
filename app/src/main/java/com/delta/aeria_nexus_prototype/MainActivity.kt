@@ -320,6 +320,12 @@ private fun ComponentActivity.encenderApDeLasGafasDebug(intent: Intent) {
  *
  *     adb shell am broadcast -a com.delta.aeria_nexus_prototype.FALLO_CANAL
  *
+ * Y que otro agente abre o cierra su PTT, para probar el aviso de PTT pisado sin un
+ * segundo telefono:
+ *
+ *     adb shell am broadcast -a com.delta.aeria_nexus_prototype.PTT_REMOTO \
+ *         --ez abierto true --es officer 7777
+ *
  * Por broadcast y no por extra del intent para no tener que reiniciar la app, que
  * vuelve a pedir el PIN. Se registra en el contexto de la aplicacion y una sola
  * vez por proceso. Solo existe bajo BuildConfig.DEBUG.
@@ -337,6 +343,19 @@ private fun ComponentActivity.registrarFalloDelCanalDebug() {
             }
         },
         IntentFilter("com.delta.aeria_nexus_prototype.FALLO_CANAL"),
+        ContextCompat.RECEIVER_EXPORTED,
+    )
+    ContextCompat.registerReceiver(
+        applicationContext,
+        object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                AppContainer.agoraRepository.simularPttRemotoDebug(
+                    abierto = intent.getBooleanExtra("abierto", true),
+                    officer = intent.getStringExtra("officer") ?: "7777",
+                )
+            }
+        },
+        IntentFilter("com.delta.aeria_nexus_prototype.PTT_REMOTO"),
         ContextCompat.RECEIVER_EXPORTED,
     )
 }

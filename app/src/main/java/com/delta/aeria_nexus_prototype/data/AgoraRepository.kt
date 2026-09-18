@@ -26,9 +26,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -172,6 +175,20 @@ class AgoraRepository(
     // (bodycamHablando), porque no publican nada en el data stream.
     private val _pttsRemotos = MutableStateFlow<Map<Int, String>>(emptyMap())
     val pttsRemotos: StateFlow<Map<Int, String>> = _pttsRemotos.asStateFlow()
+
+    // Quien esta hablando A LA VEZ que este telefono, para el aviso del boton de
+    // Operations; null si el PTT propio esta cerrado o nadie mas habla. Cuenta
+    // tambien la bodycam del propio agente: dos microfonos suyos abiertos meten
+    // su voz dos veces en el canal, y eso tambien hay que decirselo.
+    val pttPisadoPor: StateFlow<String?> =
+        combine(_pttPropioActivo, _pttsRemotos, _bodycamHablando) { propio, remotos, bodycam ->
+            when {
+                !propio -> null
+                remotos.isNotEmpty() -> remotos.values.first()
+                bodycam -> BODYCAM_OFFICER
+                else -> null
+            }
+        }.stateIn(scope, SharingStarted.Eagerly, null)
 
     // Uids cuyo audio esta abierto porque se esta viendo su livestream. Hay que
     // llevar la cuenta: sin ella, el "ptt_off" de un agente al que ademas se le
@@ -458,6 +475,19 @@ class AgoraRepository(
         alPerderElCanal()
     }
 
+    /**
+     * Solo debug: hace llegar un ptt_on/ptt_off de un agente inventado por el mismo
+     * camino que uno de verdad, para probar el aviso de PTT pisado con un solo
+     * telefono enchufado.
+     */
+    fun simularPttRemotoDebug(abierto: Boolean, officer: String) {
+        val mensaje = JSONObject()
+            .put("type", if (abierto) "ptt_on" else "ptt_off")
+            .put("officer", officer)
+            .put("ts", System.currentTimeMillis())
+        handleStreamMessage(UID_SIMULADO_DEBUG, mensaje.toString().toByteArray(Charsets.UTF_8))
+    }
+
     /** Llamar cuando el usuario concede el permiso de ubicacion. */
     fun onLocationPermissionGranted() {
         startLocationSharingIfPermitted()
@@ -582,6 +612,9 @@ class AgoraRepository(
         // en el telefono del que habla y no sale al canal; del solape que quede se
         // encarga el cancelador de eco de Agora.
         PttTones.abrir()
+        // Abrir encima de alguien que ya habla: el agente tiene que saberlo antes
+        // de soltar la primera palabra, no descubrirlo cuando nadie le conteste.
+        if (_pttsRemotos.value.isNotEmpty() || _bodycamHablando.value) PttTones.pisando()
 
         // El telefono es receptor estricto: fuera del SOS la captura esta apagada
         // y el volumen de grabacion a cero. Hay que deshacer las tres cosas.
@@ -649,7 +682,16 @@ class AgoraRepository(
         val cambio = if (hablando) bodycamsHablando.add(uid) else bodycamsHablando.remove(uid)
         if (!cambio) return
         _bodycamHablando.value = bodycamsHablando.isNotEmpty()
-        if (hablando) PttTones.entra() else PttTones.sale()
+        if (hablando) avisarDeQueEntraOtro() else PttTones.sale()
+    }
+
+    /**
+     * Otro agente abre su PTT. Si este telefono ya esta transmitiendo, el pitido
+     * normal de recepcion no basta: es suave a proposito y queda tapado por la
+     * propia voz, asi que el agente seguiria hablando sin saber que le pisan.
+     */
+    private fun avisarDeQueEntraOtro() {
+        if (_pttPropioActivo.value) PttTones.pisando() else PttTones.entra()
     }
 
     /**
@@ -920,7 +962,7 @@ class AgoraRepository(
                 engine?.muteRemoteAudioStream(remoteUid, false)
                 // El tono va antes de apuntarlo, para no sonar dos veces si
                 // llegase un "ptt_on" repetido del mismo agente.
-                if (remoteUid !in _pttsRemotos.value) PttTones.entra()
+                if (remoteUid !in _pttsRemotos.value) avisarDeQueEntraOtro()
                 _pttsRemotos.update { it + (remoteUid to mensaje.optString("officer")) }
             }
 
@@ -977,6 +1019,9 @@ class AgoraRepository(
         // Por debajo quedan los uids de servicios: las bodycams (ver esBodycam) y
         // 90000-99999 el grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
         private const val PRIMER_UID_TELEFONO = 100_000
+
+        // Uid del agente inventado de simularPttRemotoDebug: en el rango de telefonos.
+        private const val UID_SIMULADO_DEBUG = 123_456
     }
 }
 

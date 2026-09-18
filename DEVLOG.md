@@ -6,6 +6,55 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-15 (5) — PTT pisado: tono y aviso cuando dos agentes hablan a la vez
+
+### Por qué (petición del usuario)
+
+Si un agente está hablando con el PTT abierto y otro abre el suyo encima, el primero no se
+enteraba. Técnicamente ya sonaba `entra()`, pero es un pitido suave a propósito (para no tapar
+la primera palabra del otro) y la propia voz lo tapaba. Con el PTT de un toque para abrir y otro
+para cerrar, pisarse es más fácil.
+
+### Hecho
+
+- **`PttTones.pisando()`, tono nuevo:** tres pitidos agudos (1760 Hz, 60 ms) a volumen pleno. La
+  regla pasa a ser *dos notas son tuyas, una es de otro, tres sois los dos*.
+  **Copiado igual en BodyCamServer**, que todavía no lo usa, igual que `entra()`/`sale()`.
+- **`AgoraRepository`:**
+  - `avisarDeQueEntraOtro()` elige `pisando()` si el PTT propio está abierto, o `entra()` si no.
+    La usan `ptt_on` y `marcarBodycamHablando()`.
+  - `iniciarPtt()` también suena `pisando()` después de `abrir()` si ya hay alguien hablando
+    (el caso al revés: abrir encima de otro).
+  - `pttPisadoPor: StateFlow<String?>` da el número de oficial de quien pisa, `BODYCAM` si es una
+    bodycam, o null.
+- **`OperationsScreen.PttButton`:** si hay pisado, el botón pasa a ámbar (`AmbarRevision`), con
+  borde de 2 dp, icono `Warning` y una segunda línea `<oficial> ALSO ON AIR`. El color va
+  acompañado de icono y texto. La altura pasa de `height(72)` a `heightIn(min = 72)`.
+- **Debug:** `adb shell am broadcast -a com.delta.aeria_nexus_prototype.PTT_REMOTO --ez abierto
+  true --es officer 7777` hace llegar un `ptt_on`/`ptt_off` por `handleStreamMessage`, el mismo
+  camino que uno real, con el uid 123456.
+
+### Decisiones
+
+- **La bodycam del propio agente también cuenta como pisado.** Dos micros suyos abiertos meten su
+  voz dos veces en el canal: también hay que decírselo.
+
+**VERIFICADO en el Samsung** con el broadcast de debug (no había segundo teléfono). Se contaron
+los `AudioTrack` con `USAGE_VOICE_COMMUNICATION_SIGNALLING` en `dumpsys audio`:
+1. PTT abierto + `ptt_on` remoto → botón ámbar, "7777 ALSO ON AIR" y banda superior.
+2. `ptt_off` remoto → vuelve a azul ON AIR (1 tono: `sale`).
+3. PTT cerrado + `ptt_on` remoto → solo la banda superior (1 tono: `entra`, no `pisando`).
+4. Abrir PTT con 7777 hablando → ámbar al momento (2 tonos: `abrir` + `pisando`).
+
+**Sin verificar:** oírlo de verdad (el recuento de tonos no dice cuál sonó), con dos teléfonos
+reales por Agora y con la W1 pisando por su F2. BodyCamServer compila, pero no se ha instalado.
+
+### Próximo paso
+
+Probar con el Samsung y el Redmi a la vez, escuchando los tres pitidos por encima de la propia voz.
+
+---
+
 ## 2026-09-15 (4) — Las gafas no conectaban en el teléfono del manager: MAC compilada y un fallo del SDK con Android 11
 
 ### Por qué

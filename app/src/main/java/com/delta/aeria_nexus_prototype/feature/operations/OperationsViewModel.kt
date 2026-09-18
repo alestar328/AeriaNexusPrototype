@@ -33,6 +33,9 @@ class OperationsViewModel(
     /** True mientras este telefono tiene el PTT abierto y su voz sale al canal. */
     val pttActivo: StateFlow<Boolean> = agoraRepository.pttPropioActivo
 
+    /** Quien habla a la vez que este telefono mientras transmite; null si nadie. */
+    val pttPisadoPor: StateFlow<String?> = agoraRepository.pttPisadoPor
+
     fun tienePermisoMicrofono(): Boolean = agoraRepository.tienePermisoMicrofono()
 
     /**

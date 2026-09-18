@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
+import com.delta.aeria_nexus_prototype.ui.theme.AmbarRevision
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteFin
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteInicio
@@ -84,6 +86,7 @@ fun OperationsScreen(
     val activeIncident by viewModel.activeIncident.collectAsStateWithLifecycle()
     val sosActive by viewModel.sosActive.collectAsStateWithLifecycle()
     val pttActivo by viewModel.pttActivo.collectAsStateWithLifecycle()
+    val pttPisadoPor by viewModel.pttPisadoPor.collectAsStateWithLifecycle()
 
     // El PTT necesita el microfono. Se pide al primer intento de hablar y, si se
     // concede, el canal se abre: el agente ya habia pulsado para hablar.
@@ -171,6 +174,7 @@ fun OperationsScreen(
         Spacer(Modifier.height(10.dp))
         PttButton(
             activo = pttActivo,
+            pisadoPor = pttPisadoPor,
             onClick = {
                 if (pttActivo || viewModel.tienePermisoMicrofono()) {
                     viewModel.alternarPtt()
@@ -373,12 +377,29 @@ private fun RadioActionButton(
  * El indicador se enciende con lo que el repositorio confirma haber abierto, no
  * con la pulsacion: un boton que dice ON AIR sin que salga voz es peor que uno
  * que no responde, porque el agente cree que le estan oyendo.
+ *
+ * [pisadoPor] no es null cuando otro agente habla a la vez: el boton pasa a ambar,
+ * con icono de aviso y el nombre de quien pisa. Acompana al triple pitido de
+ * PttTones.pisando(); el color solo no bastaria con sol en la pantalla.
  */
 @Composable
 private fun PttButton(
     activo: Boolean,
+    pisadoPor: String?,
     onClick: () -> Unit,
 ) {
+    val pisado = activo && pisadoPor != null
+    val colorAcento = when {
+        pisado -> AmbarRevision
+        activo -> AzulClaro
+        else -> AzulPrimario.copy(alpha = 0.2f)
+    }
+    val colorFondo = when {
+        pisado -> AmbarRevision.copy(alpha = 0.18f)
+        activo -> AzulPrimario.copy(alpha = 0.35f)
+        else -> AzulOscuroPanel
+    }
+
     // Late mientras se transmite, como el SOS: tiene que verse de reojo.
     val latido by rememberInfiniteTransition(label = "pttLatido").animateFloat(
         initialValue = 1f,
@@ -393,14 +414,10 @@ private fun PttButton(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(72.dp)
+            .heightIn(min = 72.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(if (activo) AzulPrimario.copy(alpha = 0.35f) else AzulOscuroPanel)
-            .border(
-                1.dp,
-                if (activo) AzulClaro else AzulPrimario.copy(alpha = 0.2f),
-                RoundedCornerShape(16.dp),
-            )
+            .background(colorFondo)
+            .border(if (pisado) 2.dp else 1.dp, colorAcento, RoundedCornerShape(16.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -409,20 +426,30 @@ private fun PttButton(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Icon(
-                Icons.Filled.Mic,
-                contentDescription = "Push to talk",
-                tint = AzulClaro,
+                if (pisado) Icons.Filled.Warning else Icons.Filled.Mic,
+                contentDescription = if (pisado) "Another officer is talking" else "Push to talk",
+                tint = if (pisado) AmbarRevision else AzulClaro,
                 modifier = Modifier
                     .size(26.dp)
                     .alpha(if (activo) latido else 1f),
             )
-            Text(
-                text = if (activo) "ON AIR — TAP TO STOP" else "PTT — TAP TO TALK",
-                color = if (activo) AzulClaro else TextoSecundario,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = 1.sp,
-            )
+            Column {
+                Text(
+                    text = if (activo) "ON AIR — TAP TO STOP" else "PTT — TAP TO TALK",
+                    color = if (activo) colorAcento else TextoSecundario,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.sp,
+                )
+                if (pisado) {
+                    Text(
+                        text = "$pisadoPor ALSO ON AIR",
+                        color = AmbarRevision,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
     }
 }

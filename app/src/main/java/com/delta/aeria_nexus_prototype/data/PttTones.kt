@@ -24,11 +24,13 @@ private const val TAG = "NexusTone"
  *   • [denegado]  zumbido grave doble      "NO se abrio — no te estan oyendo"
  *   • [entra]     pitido agudo suelto      "otro ha abierto el canal"
  *   • [sale]      pitido medio suelto      "el otro ha soltado, canal libre"
+ *   • [pisando]   tres pitidos agudos      "hay dos microfonos abiertos a la vez"
  *
  * La regla que separa unos de otros sin pensar: **dos notas son tuyas, una nota
- * es de otro.** [entra] y [sale] los dispara AgoraRepository al abrirse o
- * cerrarse el PTT de un companero, venga de su telefono (data stream) o de una
- * bodycam (su audio en el canal).
+ * es de otro, tres notas sois los dos.** [entra] y [sale] los dispara
+ * AgoraRepository al abrirse o cerrarse el PTT de un companero, venga de su
+ * telefono (data stream) o de una bodycam (su audio en el canal). [pisando]
+ * sustituye a [entra] cuando el propio PTT ya esta abierto.
  *
  * Aqui el boton es de mantener-para-hablar, asi que el tono confirma algo que en
  * la bodycam no hace falta confirmar: que el dedo llego a agarrar el boton y que
@@ -70,6 +72,14 @@ object PttTones {
 
     /** El que hablaba ha soltado: el canal queda libre. */
     fun sale() = reproducir(listOf(1046 to 90), AMPLITUD_RX)
+
+    /**
+     * Dos microfonos abiertos a la vez: el agente esta hablando y otro ha abierto
+     * el canal encima, o al reves. Va a volumen pleno y no al de recepcion porque
+     * tiene que oirse por encima de la propia voz; con [entra] a ese volumen el
+     * agente que habla no se enteraba de que le estaban pisando.
+     */
+    fun pisando() = reproducir(listOf(1760 to 60, 0 to 40, 1760 to 60, 0 to 40, 1760 to 60))
 
     /** tramos = pares (frecuencia en Hz, duracion en ms). Frecuencia 0 = silencio. */
     private fun reproducir(tramos: List<Pair<Int, Int>>, amplitud: Double = AMPLITUD) {
