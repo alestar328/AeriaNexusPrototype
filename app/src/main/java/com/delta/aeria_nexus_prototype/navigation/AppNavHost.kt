@@ -16,6 +16,8 @@ import com.delta.aeria_nexus_prototype.data.AppContainer
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.SubidasBodycamScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.SubidasBodycamViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderScreen
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderViewModel
@@ -80,6 +82,8 @@ object Routes {
     const val BODYCAM_VIEWFINDER = "bodycam/viewfinder"
     // Monitor de la grabacion en curso de la bodycam (misma pantalla, modo REC).
     const val BODYCAM_REC_MONITOR = "bodycam/recording"
+    // Subidas de evidencia de la bodycam, con el boton de cancelar.
+    const val BODYCAM_UPLOADS = "bodycam/uploads"
     // Mando a distancia de las gafas BleeqUp (grabacion y foto por BLE).
     const val GAFAS = "gafas"
 
@@ -179,6 +183,7 @@ fun AppNavHost() {
                 },
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
                 onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },
+                onOpenUploads = { navController.navigate(Routes.BODYCAM_UPLOADS) },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -192,6 +197,15 @@ fun AppNavHost() {
                         pendientes = AppContainer.gafasPendientesRepository,
                         descarga = AppContainer.descargaDeGafas,
                     )
+                },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Routes.BODYCAM_UPLOADS) {
+            SubidasBodycamScreen(
+                viewModel = viewModel {
+                    SubidasBodycamViewModel(AppContainer.bodycamRepository)
                 },
                 onBack = { navController.popBackStack() },
             )

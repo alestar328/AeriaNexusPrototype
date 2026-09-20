@@ -45,10 +45,25 @@ import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
 import com.delta.aeria_nexus_prototype.data.identity.EmparejamientoDelTelefono
 import com.delta.aeria_nexus_prototype.data.identity.ResultadoEmparejamiento
 import java.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Estado de la conexion Bluetooth con la bodycam. */
 enum class BodycamState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
+
+/**
+ * Una evidencia de la bodycam y como va su subida a Nexus.
+ *
+ * [pendiente] no se deduce aqui: lo manda la propia bodycam, que es quien sabe si
+ * un incidente sigue en su cola de reintentos. Es lo unico sobre lo que tiene
+ * sentido ofrecer un boton de cancelar.
+ */
+data class SubidaDeEvidencia(
+    val id: String,
+    val entregada: Boolean,
+    val cancelada: Boolean,
+    val pendiente: Boolean,
+)
 
 /**
  * Si sabemos con QUIEN estamos hablando (workflow 31).
@@ -188,6 +203,12 @@ class BodycamRepository(private val context: Context) {
     // Respuestas OK:/ERROR: a los comandos, para dar feedback puntual en la UI.
     private val _commandResponses = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val commandResponses: SharedFlow<String> = _commandResponses.asSharedFlow()
+
+    // Subidas de evidencia de la bodycam, de la respuesta UPLOADS: a UPLOAD_LIST.
+    // No llega en el STATUS periodico a proposito: la lista puede tener decenas de
+    // incidentes y no cambia sola cada 5 segundos, asi que se pide cuando se mira.
+    private val _subidas = MutableStateFlow<List<SubidaDeEvidencia>>(emptyList())
+    val subidas: StateFlow<List<SubidaDeEvidencia>> = _subidas.asStateFlow()
 
     /** True si los permisos Bluetooth de runtime ya estan concedidos. */
     fun hasBluetoothPermission(): Boolean {
@@ -680,6 +701,10 @@ class BodycamRepository(private val context: Context) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
             }
+            // UPLOADS:[...] — estado de subida de cada incidente de la unidad.
+            // Respuesta a UPLOAD_LIST. Cancelar o reanudar contesta OK:, no una
+            // lista nueva: quien lo pida vuelve a llamar a pedirSubidas().
+            line.startsWith("UPLOADS:") -> atenderListaDeSubidas(line)
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
             line.startsWith("BTN_") -> {
                 applyStateChange(line)
@@ -690,6 +715,35 @@ class BodycamRepository(private val context: Context) {
                 applyStateChange(line)
                 _commandResponses.tryEmit(line)
             }
+        }
+    }
+
+    /** Pide a la bodycam la lista de subidas. La respuesta llega en [subidas]. */
+    fun pedirSubidas() = sendCommand("UPLOAD_LIST")
+
+    /**
+     * Cancela la subida de un incidente: corta la transferencia en curso y lo saca
+     * de la cola de reintentos de la bodycam. **No borra el video** — sigue en la
+     * unidad y [reanudarSubida] lo devuelve a la cola sin repetir un solo byte.
+     */
+    fun cancelarSubida(incidentId: String) = sendCommand("UPLOAD_CANCEL:$incidentId")
+
+    fun reanudarSubida(incidentId: String) = sendCommand("UPLOAD_RESUME:$incidentId")
+
+    private fun atenderListaDeSubidas(linea: String) {
+        try {
+            val array = JSONArray(linea.removePrefix("UPLOADS:"))
+            _subidas.value = (0 until array.length()).map { i ->
+                val o = array.getJSONObject(i)
+                SubidaDeEvidencia(
+                    id = o.optString("id"),
+                    entregada = o.optBoolean("delivered"),
+                    cancelada = o.optBoolean("cancelled"),
+                    pendiente = o.optBoolean("pending"),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "UPLOADS ilegible de la bodycam")
         }
     }
 

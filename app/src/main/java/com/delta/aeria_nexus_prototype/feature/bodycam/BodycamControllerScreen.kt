@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
@@ -75,6 +76,7 @@ fun BodycamControllerScreen(
     onOpenLivestream: () -> Unit,
     onOpenViewfinder: () -> Unit,
     onOpenRecordingMonitor: () -> Unit,
+    onOpenUploads: () -> Unit,
     onBack: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -131,6 +133,7 @@ fun BodycamControllerScreen(
         onOpenLivestream = onOpenLivestream,
         onOpenViewfinder = onOpenViewfinder,
         onOpenRecordingMonitor = onOpenRecordingMonitor,
+        onOpenUploads = onOpenUploads,
         modifier = Modifier,
     )
 
@@ -149,6 +152,7 @@ private fun BodycamControllerContent(
     onOpenLivestream: () -> Unit,
     onOpenViewfinder: () -> Unit,
     onOpenRecordingMonitor: () -> Unit,
+    onOpenUploads: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val conectada = uiState.connectionState == BodycamState.CONNECTED
@@ -207,6 +211,13 @@ private fun BodycamControllerContent(
                     modifier = Modifier.weight(1f),
                 )
             }
+            // Va antes del livestream y del desconectar: es consulta, no una
+            // accion sobre la camara, y desde aqui se cancela lo que este subiendo.
+            SecondaryPanelButton(
+                text = "UPLOADS",
+                icon = Icons.Filled.CloudUpload,
+                onClick = onOpenUploads,
+            )
             LivestreamButton(isStreaming = uiState.isStreaming, onClick = onToggleLivestream)
             DisconnectButton(onClick = onDisconnect)
         } else {

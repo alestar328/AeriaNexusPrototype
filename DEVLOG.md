@@ -6,6 +6,50 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-20 — Cancelar desde el móvil la subida de una evidencia de la bodycam
+
+### Por qué
+
+Una unidad estaba subiendo `INC_000032` una y otra vez. No es un fallo de la bodycam: su
+reanudación **no se rinde nunca** por diseño (reencola cada incidente sin entregar en cada arranque
+y reintenta con espera creciente). Para una evidencia real sin cobertura es lo que queremos; para
+una prueba vieja o un destino mal configurado, es un bucle infinito. Faltaba la puerta de salida, y
+el teléfono es el único sitio con pantalla para enseñar la lista y elegir: la de la unidad mide 3 cm.
+
+### Hecho
+
+- **`BodycamRepository`:** modelo `SubidaDeEvidencia` (id, entregada, cancelada, pendiente), flujo
+  `subidas`, y `pedirSubidas()` / `cancelarSubida(id)` / `reanudarSubida(id)`. La lista llega en la
+  línea `UPLOADS:[...]` del mismo canal de texto.
+  **No viaja en el `STATUS` de cada 5 s** a propósito: puede tener decenas de incidentes y no cambia
+  sola, así que se pide al mirarla.
+- **`SubidasBodycamViewModel` + `SubidasBodycamScreen` (nuevos):** lista con tres estados
+  —DELIVERED, PENDING, CANCELLED—, botón CANCEL con diálogo de confirmación y QUEUE AGAIN para
+  devolver a la cola. Se refresca sola al recuperar el enlace.
+- **Navegación:** ruta `bodycam/uploads`, con botón UPLOADS en el controlador de la bodycam.
+
+### La decisión que manda en esta pantalla
+
+**Cancelar no borra el vídeo.** Corta la transferencia y saca el incidente de la cola; el vídeo se
+queda en la cámara y volver a encolarlo no repite un solo byte, porque el servidor conserva los
+bloques que ya recibió. El diálogo lo dice con esas palabras: si diera a entender que borra, nadie
+se atrevería a usarlo. Una bodycam donde un botón hace desaparecer evidencia no es defendible en
+cadena de custodia.
+
+### Pendiente
+
+- **Sin probar con hardware**: no había ni bodycam ni teléfono conectados. Compila.
+- El lado de la bodycam va en la rama `dev_device_owner` de BodyCamServer (comandos `UPLOAD_LIST`,
+  `UPLOAD_CANCEL:<id>`, `UPLOAD_RESUME:<id>`). **Las dos ramas tienen que ir juntas**: sin la app
+  nueva de la unidad, esta pantalla no recibe nada.
+- Pasar el agente de coherencia entre las dos apps: esto amplía el contrato Bluetooth.
+
+### Próximo paso
+
+Probar las dos apps juntas contra el stub de subida.
+
+---
+
 ## 2026-09-18 — La app habla con el backend de verdad: alta, sesión, subida autenticada, manifiesto y ubicación
 
 Rama nueva **`dev_back_connection`** (la creó el usuario) para todo lo que conecta la app con
