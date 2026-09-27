@@ -100,7 +100,7 @@ object AppContainer {
             locationRepository = locationRepository,
             sosNotifier = SosNotifier(appContext, uploadConfig),
         )
-        bodycamRepository = BodycamRepository(appContext)
+        bodycamRepository = BodycamRepository(appContext, sesionBackend)
         buscadorBodycam = BuscadorBodycam(appContext)
         gafasRepository = GafasRepository(appContext)
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre

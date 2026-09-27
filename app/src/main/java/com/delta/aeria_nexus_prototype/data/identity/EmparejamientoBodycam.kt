@@ -18,24 +18,21 @@ import java.util.Base64
  *
  * COMO. Cuatro lineas sobre el mismo canal de texto que ya existe:
  *
- *     telefono -> bodycam   AUTH_HELLO:<version>:<deviceId>:<nonceA>
- *     bodycam  -> telefono  AUTH_ID:<bwcId>:<nonceB>:<certificado>
+ *     telefono -> bodycam   AUTH_HELLO:<version>:<deviceId>:<nonceA>:<efimeraA>
+ *     bodycam  -> telefono  AUTH_ID:<bwcId>:<nonceB>:<certificado>:<efimeraB>
  *     telefono -> bodycam   AUTH_PROOF:<firma>:<certificado>
  *     bodycam  -> telefono  AUTH_OK:<firma>          o  AUTH_FAIL:<motivo>
  *
  * Cada lado firma la MISMA transcripcion con su propia clave, y ahi esta todo lo
  * que hace que esto valga algo. Ver [transcripcion].
  *
- * QUE NO HACE, para no venderlo por mas de lo que es:
- *
- *  - **No cifra el canal.** Autentica quien habla, no oculta lo que dice. Cifrarlo
- *    necesita un acuerdo de claves efimero, y las claves que tenemos son de firma
- *    (`PURPOSE_SIGN`), asi que no sirven para derivar un secreto compartido. Es la
- *    parte que queda del paso 6 del catalogo.
- *  - **No hay identidad de la bodycam todavia**: es el workflow 13. Hasta que la
- *    W1 tenga su par de claves y su certificado, este intercambio no puede
- *    completarse contra el hardware real, y el enlace queda marcado como NO
- *    autenticado en vez de fingir que lo esta.
+ * **Desde la version 2 (2026-09-28) el canal queda cifrado** (paso 6 del
+ * catalogo). Las claves de identidad son de firma (`PURPOSE_SIGN`) y no sirven
+ * para acordar un secreto, asi que cada conexion estrena un par ECDH efimero
+ * ([AcuerdoDeClaves]); las dos publicas van en el saludo y dentro de lo firmado.
+ * Tras `AUTH_OK` todo viaja como `S:<base64>` con AES-256-GCM ([CanalCifrado]).
+ * El telefono solo habla v2; la bodycam acepta tambien v1 para telefonos viejos,
+ * y con esos no cifra.
  */
 object ProtocoloEmparejamiento {
 
@@ -46,7 +43,10 @@ object ProtocoloEmparejamiento {
      * version 2 con cifrado, nadie puede convencer a un extremo de volver a la 1
      * cambiando la linea del saludo, porque la firma no cuadraria.
      */
-    const val VERSION = "AERIA-BWC-1"
+    const val VERSION_1 = "AERIA-BWC-1"
+
+    /** La que habla este telefono: la 1 mas las claves efimeras del canal cifrado. */
+    const val VERSION_2 = "AERIA-BWC-2"
 
     const val ALGORITMO_FIRMA = Pkcs10.ALGORITMO_FIRMA
 
@@ -65,27 +65,33 @@ object ProtocoloEmparejamiento {
      *  - **los dos identificadores**, para que una prueba valida entre otro
      *    telefono y otra camara no sirva aqui;
      *  - **los dos nonces**, para que ninguno de los dos extremos pueda decidir
-     *    por su cuenta lo que se va a firmar y precalcularlo.
+     *    por su cuenta lo que se va a firmar y precalcularlo;
+     *  - **las dos claves efimeras** (v2), para que nadie en medio pueda cambiarlas
+     *    por las suyas: autenticaria a los dos extremos y aun asi lo leeria todo.
      *
-     * Quitar cualquiera de los cuatro rompe una de esas cuatro cosas, y por eso
-     * esto no se toca sin volver a leer esta lista.
+     * Quitar cualquiera de los cinco rompe una de esas cinco cosas, y por eso
+     * esto no se toca sin volver a leer esta lista. En v1 las efimeras son null y
+     * sale byte a byte lo de antes. Es la misma funcion que en BodyCamServer.
      */
     fun transcripcion(
+        version: String,
         rol: Rol,
         deviceId: String,
         bwcId: String,
         nonceDelTelefono: ByteArray,
         nonceDeLaBodycam: ByteArray,
+        efimeraDelTelefono: String? = null,
+        efimeraDeLaBodycam: String? = null,
     ): ByteArray {
         val codificador = Base64.getEncoder()
-        return listOf(
-            VERSION,
+        return (listOf(
+            version,
             rol.name,
             deviceId,
             bwcId,
             codificador.encodeToString(nonceDelTelefono),
             codificador.encodeToString(nonceDeLaBodycam),
-        ).joinToString("|").toByteArray(Charsets.UTF_8)
+        ) + listOfNotNull(efimeraDelTelefono, efimeraDeLaBodycam)).joinToString("|").toByteArray(Charsets.UTF_8)
     }
 
     fun nonce(): ByteArray = ByteArray(NONCE_BYTES).also { SecureRandom().nextBytes(it) }
@@ -115,11 +121,15 @@ sealed interface ResultadoEmparejamiento {
      * Se devuelve tambien el nonce de la camara porque la atadura agente-camara
      * (workflow 33) va firmada sobre el: eso la hace tan efimera como el
      * emparejamiento que la respalda, en vez de un permiso reutilizable.
+     *
+     * [canal] es el canal cifrado acordado: desde esta linea, todo lo que se mande
+     * a la camara va por el.
      */
     data class Autenticado(
         val bwcId: String,
         val sujeto: String,
         val nonceDeLaSesion: ByteArray,
+        val canal: CanalCifrado,
     ) : ResultadoEmparejamiento {
         override fun equals(other: Any?): Boolean = other is Autenticado && bwcId == other.bwcId
         override fun hashCode(): Int = bwcId.hashCode()
@@ -163,12 +173,18 @@ class EmparejamientoDelTelefono(
     private var bwcId: String? = null
     private var certificadoDeLaBodycam: X509Certificate? = null
 
-    /** Primera linea: quien somos y nuestro nonce. */
+    /** Par ECDH de esta conexion; se olvida al acordar el canal. */
+    private var efimera: java.security.KeyPair? = AcuerdoDeClaves.parEfimero()
+    private val efimeraPropia = AcuerdoDeClaves.codificar(efimera!!.public)
+    private var efimeraDeLaBodycam: String? = null
+
+    /** Primera linea: quien somos, nuestro nonce y nuestra clave efimera. */
     fun saludo(): String = listOf(
         "AUTH_HELLO",
-        ProtocoloEmparejamiento.VERSION,
+        ProtocoloEmparejamiento.VERSION_2,
         deviceId,
         codificar(nonceDelTelefono),
+        efimeraPropia,
     ).joinToString(":")
 
     /**
@@ -177,19 +193,26 @@ class EmparejamientoDelTelefono(
      */
     fun responderA(linea: String): String? {
         val partes = linea.split(":")
-        if (partes.size != 4 || partes[0] != "AUTH_ID") return null
+        // Cinco campos o nada: un AUTH_ID sin clave efimera a un saludo v2 es una
+        // camara que no cifra o alguien intentando que no se cifre.
+        if (partes.size != 5 || partes[0] != "AUTH_ID") return null
 
         val certificado = leerCertificado(partes[3]) ?: return null
+        AcuerdoDeClaves.leer(partes[4]) ?: return null
         bwcId = partes[1]
         nonceDeLaBodycam = decodificar(partes[2]) ?: return null
+        efimeraDeLaBodycam = partes[4]
 
         val prueba = firmar(
             ProtocoloEmparejamiento.transcripcion(
+                version = ProtocoloEmparejamiento.VERSION_2,
                 rol = ProtocoloEmparejamiento.Rol.TELEFONO,
                 deviceId = deviceId,
                 bwcId = partes[1],
                 nonceDelTelefono = nonceDelTelefono,
                 nonceDeLaBodycam = nonceDeLaBodycam!!,
+                efimeraDelTelefono = efimeraPropia,
+                efimeraDeLaBodycam = partes[4],
             ),
         )
         certificadoDeLaBodycam = certificado
@@ -218,6 +241,8 @@ class EmparejamientoDelTelefono(
             ?: return ResultadoEmparejamiento.Rechazado("Falta el nonce de la bodycam")
         val identificador = bwcId
             ?: return ResultadoEmparejamiento.Rechazado("La bodycam no dijo quien es")
+        val efimeraB = efimeraDeLaBodycam
+            ?: return ResultadoEmparejamiento.Rechazado("La bodycam no presento clave efimera")
 
         val ancla = anclaDePerifericos
             ?: return ResultadoEmparejamiento.NoSoportado(
@@ -232,11 +257,14 @@ class EmparejamientoDelTelefono(
         val valida = ProtocoloEmparejamiento.verificar(
             firma = firma,
             transcripcion = ProtocoloEmparejamiento.transcripcion(
+                version = ProtocoloEmparejamiento.VERSION_2,
                 rol = ProtocoloEmparejamiento.Rol.BODYCAM,
                 deviceId = deviceId,
                 bwcId = identificador,
                 nonceDelTelefono = nonceDelTelefono,
                 nonceDeLaBodycam = nonceB,
+                efimeraDelTelefono = efimeraPropia,
+                efimeraDeLaBodycam = efimeraB,
             ),
             certificado = certificado,
         )
@@ -244,10 +272,24 @@ class EmparejamientoDelTelefono(
             return ResultadoEmparejamiento.Rechazado("La bodycam no pudo demostrar su clave")
         }
 
+        val par = efimera
+            ?: return ResultadoEmparejamiento.Rechazado("Emparejamiento ya cerrado")
+        val suya = AcuerdoDeClaves.leer(efimeraB)
+            ?: return ResultadoEmparejamiento.Rechazado("Clave efimera de la bodycam ilegible")
+        val canal = CanalCifrado.derivar(
+            secreto = AcuerdoDeClaves.secreto(par.private, suya),
+            nonceDelTelefono = nonceDelTelefono,
+            nonceDeLaBodycam = nonceB,
+            soyTelefono = true,
+        )
+        // Sin la privada efimera no se pueden rehacer las claves de esta conexion.
+        efimera = null
+
         return ResultadoEmparejamiento.Autenticado(
             bwcId = identificador,
             sujeto = certificado.subjectX500Principal.name,
             nonceDeLaSesion = nonceB,
+            canal = canal,
         )
     }
 

@@ -6,6 +6,307 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-29 (PLAN) — Reparto del día: dos sesiones en paralelo, workflows sin backend
+
+Escrito el 28-sep por la noche. **El mismo texto está en el DEVLOG de los dos repos.**
+Objetivo de 2 días: el código de 6-8 workflows más y 3-4 verificados en aparatos. Lo
+que solo compile se apunta como "compila, sin probar", no como terminado.
+
+### 0 · Antes de paralelizar (el usuario, ~30 min)
+
+1. **Commit en los dos repos.** Hoy hay trabajo de dos sesiones sin commitear mezclado
+   en los mismos ficheros: BodyCamServer `dev_device_owner` (token prestado, agente
+   atado, workflow 31 v2) y Aeria Nexus `dev_back_connection` (sesión, token, workflow
+   31 v2). Trabajar en paralelo encima de eso es arriesgado.
+2. **Anclas de la W1: opción B** (ver abajo), salvo que se decida otra cosa. Sin esto
+   no se prueba nada que pase por el emparejamiento.
+3. Tener conectados **la W1 y un teléfono dado de alta contra el backend** (Samsung).
+
+**Las anclas, en corto.** La W1 valida al teléfono con `files/identity/ca.pem` (y la
+atadura con `user-ca.pem`), que son de la CA de pruebas; el backend firma los teléfonos
+con `qpd-device-ca`/`qpd-user-ca`. Y la W1 presenta un certificado de la CA de pruebas,
+que un teléfono con las anclas del backend tampoco aceptaría. Tres salidas:
+- **A · Solo las anclas del backend en la W1, por adb.** La W1 aceptaría al teléfono,
+  pero su propio certificado seguiría siendo de la CA de pruebas: media solución.
+- **B · Alta de la W1 contra el IAM (recomendada).** El backend ya lo soporta sin
+  tocarlo: `POST /api/iam/devices/enroll` con `device_kind` bodycam respeta el
+  `BWC-xxxx` y devuelve el certificado y las **dos** anclas. En la W1 ya existen las
+  órdenes por adb (`bwc_enroll`, `bwc_cert`, `bwc_anchor`, `bwc_user_anchor`). Falta
+  llevar el CSR al endpoint con el secreto de enrolamiento. Aprox. 1 h.
+- **C · Que el backend firme con la CA de pruebas.** Toca el backend y rebaja su PKI. No.
+
+### Sesión BC — BodyCamServer (dueña del adb de la W1)
+
+1. **Alta de la W1 contra el IAM (opción B)** y prueba de punta a punta con el teléfono:
+   emparejamiento v2 y canal cifrado (wf 31), atadura con nombre real (33/34), token
+   prestado y subida al backend (40). Coordinar con la sesión AN el turno del teléfono.
+   Si todo sale, proponer al usuario `EXIGIR_CANAL_CIFRADO = true`.
+2. **Wf 61 en la unidad: diario de auditoría local.** Portar `AuditoriaLocal` del móvil
+   (HMAC encadenado con clave propia del Keystore). Eventos: emparejamiento, atadura,
+   token, grabar/parar, SOS, subida, cancelación, apagado. Hoy la unidad no tiene ninguno.
+3. **Wf 30 en la unidad: fin de turno.** Hoy `FIN_DE_TURNO` solo se registra. Que desate,
+   retire el token y lo apunte en el diario del punto 2.
+
+### Sesión AN — Aeria Nexus (dueña del teléfono)
+
+0. **AN-0, ANTES de BC-1: el ancla de periféricos del teléfono sale del backend.** Con la
+   opción B la W1 presentará un certificado de `qpd-device-ca`, y el teléfono la valida con
+   `perifericos.ca.pem`, que hoy solo se instala por adb con la CA de pruebas: rechazaría a la
+   W1 ya dada de alta. El teléfono **no guarda** el `device_ca_pem` que le devuelve el backend.
+   - Guardarlo al darse de alta: sale en `iam/devices/enroll` y también en `iam/users/enroll`
+     (`_anclas()` en `iam_views.py`, líneas 233 y 346).
+   - Teléfonos ya dados de alta (el Samsung): ningún GET devuelve las anclas (revisado
+     `iam_trust_views.py` e `iam_session_views.py`). O se repite el alta, o se instala por adb
+     con el intent `peripheral_anchor` y el PEM sacado del backend (`ensure_ca(tenant, DEVICE)`).
+   - Avisar a la sesión BC al terminar: su prueba de punta a punta espera esto.
+1. Ayudar a la prueba del punto BC-1 con el teléfono cuando la sesión BC lo pida.
+2. **Wf 53: certificado que caduca en plena grabación.** Política local con periodo de
+   gracia mientras se graba.
+3. **Wf 51: grabación sin red, gobernada.** Conjunto cerrado de lo que se permite sin red,
+   en vez de "todo funciona offline sin control".
+4. **Wf 66: detectar el reseteo de fábrica** y exigir alta nueva en vez de seguir con
+   carpetas huérfanas.
+5. Si sobra tiempo, **wf 46**: el evento de auditoría de quién abre la bóveda y qué mira **ya
+   existe desde el 15-sep** (`EVIDENCIA_VISUALIZADA` y los de bóveda). Lo que falta es el
+   **permiso de visionado por política**.
+
+### Compartidos: una sola sesión hace las dos puntas
+
+- **Wf 37 + 36: firma y procedencia de la evidencia.** Toca el formato que leerá el
+  backend en el wf 41, así que va en una sola sesión (la BC, tras su punto 1) y con
+  entrada nueva en `docs/CRYPTO-FORMAT.md`. **Decisión previa del usuario:** qué clave
+  firma. Propuesta: cada aparato con su clave de identidad (la BWC en la bodycam, la del
+  terminal en el móvil) y el agente dentro de lo firmado, por la atadura.
+- **Wf 21 (cadena de build: SAST, SCA, secretos)** si queda hueco: no toca código de las
+  apps; puede ir a un subagente en su propio worktree.
+
+### Reglas del día
+
+- Cada sesión escribe solo en su repo. Si un cambio toca el protocolo entre las dos, lo
+  hace una sola sesión en los dos lados y avisa a la otra antes (como el 28-sep).
+- La W1 por adb es de una sesión a la vez: la BC. Las pruebas en aparatos van por turnos.
+- Al cerrar: agente `coherencia-bodycam-movil` (ocho puntos), DEVLOG de cada repo y horas
+  al libro del manager (filas libres 57-65, una fila por app y bloque).
+
+---
+
+## 2026-09-28 — El canal Bluetooth con la bodycam va cifrado (workflow 31, v2)
+
+### Por qué
+
+El RFCOMM entre el teléfono y la W1 iba en claro. Desde el 25-sep por él viaja el
+token de la sesión del agente (`TOKEN:<jwt>:<segundos>`), que vale para subir a
+AeriaOne con todos los alcances del agente, y cualquiera con un receptor Bluetooth
+cerca podía leerlo. Es el paso 6 del workflow 31, el siguiente de la lista
+«Sin-backend-YA»: las dos puntas son nuestras.
+
+### Hecho (en las dos apps, que tienen que ir juntas)
+
+- **Emparejamiento v2 (`AERIA-BWC-2`).** `AUTH_HELLO` y `AUTH_ID` llevan un quinto
+  campo: una clave pública ECDH P-256 **efímera**, de una sola conexión y fuera del
+  Keystore (las claves de identidad son de firma y no sirven para acordar secretos).
+  Las dos efímeras entran en la transcripción que firma cada extremo: quien estuviera
+  en medio no puede cambiarlas por las suyas sin romper las dos firmas.
+- **`CanalCifrado.kt`, idéntico en los dos repositorios** (solo cambia el `package`).
+  Tras `AUTH_OK` cada línea viaja como `S:<base64>` con AES-256-GCM. Una clave por
+  sentido (HKDF-SHA256 del secreto ECDH, con los dos nonces de sal) y el IV es un
+  contador implícito: una trama repetida, quitada, reordenada o devuelta a quien la
+  mandó no descifra, y **un solo fallo rompe el canal** y se corta la conexión.
+- **Modo transición (decisión del usuario, 28-sep).** La bodycam sigue aceptando v1
+  (autentica sin cifrar) y comandos en claro de un teléfono que no se empareja,
+  porque sus anclas son las de la CA de pruebas y el backend firma los teléfonos con
+  otras: exigirlo ya dejaría la W1 sin nadie que la maneje. El interruptor es
+  `EXIGIR_CANAL_CIFRADO` en `BtServerService.kt`, hoy `false`.
+- **Lo que sí se exige ya:** `TOKEN` solo por el canal cifrado (`TOKEN_FAIL:hace
+  falta el canal cifrado`). Con el canal puesto, una línea en claro se rechaza en los
+  dos extremos.
+
+### Detalle de este lado
+
+- `EmparejamientoBodycam.kt`: el teléfono solo habla v2. Un `AUTH_ID` sin clave
+  efímera se rechaza (sería una bodycam que no cifra o alguien intentando que no se
+  cifre). `Autenticado` trae el `canal`.
+- `BodycamRepository.kt`: el canal se instala **antes** de `marcarEnlace(SI)`, porque
+  eso dispara `prestarToken()` en otra corrutina (aviso de la sesión de este repo).
+  Mientras se empareja, los comandos esperan en `enEspera` y salen después por el
+  canal que toque (STATUS no se guarda). Una trama que no descifra marca el enlace
+  RECHAZADO y lo corta.
+- `EmparejamientoBodycamTest`: la bodycam de referencia pasa a v2 y hay siete pruebas
+  nuevas: canal en los dos sentidos, intermediario que cambia la efímera, bodycam sin
+  efímera, trama repetida, trama reflejada, trama manipulada y la transcripción v1
+  intacta. **13/13 pasan.**
+
+### Pendiente
+
+- **Sin probar con hardware**: ningún teléfono se acredita hoy ante la W1 (anclas
+  desalineadas). Lo mismo que en BodyCamServer.
+- Un teléfono nuevo con una bodycam vieja (solo v1) queda NO autenticado y en claro,
+  como en modo transición; no hay vuelta atrás automática a v1 a propósito.
+
+---
+
+## 2026-09-25 (5) — Cada instalación tiene su propio `app_instance_id` (workflows 22-23)
+
+### Por qué
+
+Todos los teléfonos mandaban la constante `APPINST-8F27A91C`. El backend crea la instancia al
+verla (`AppInstance.update_or_create`) y la reasigna al último terminal que la presenta: la
+instancia saltaba de un teléfono a otro, y **revocarla habría cortado a todos a la vez**.
+
+### Hecho
+
+- **`IdentityRepository`:** la instancia se genera una vez por instalación (`APPINST-` + 16 hex
+  de `SecureRandom`) y se guarda en `noBackupFilesDir/app_instance_id`. Todas las identidades
+  que se construían desde `IDENTIDAD_DEMO` pasan por `identidadBase()`, que la pone. Viaja
+  sola a `iam/session` y a la auditoría.
+- **Fuera de la copia de seguridad a propósito:** `allowBackup="true"` con las reglas de
+  ejemplo, así que las preferencias se restauran en otro teléfono. Una instancia restaurada
+  sería justo el "APK copiado que hereda" que el modelo prohíbe.
+- Reinstalar o `deshacerAlta()` dan una instancia nueva.
+- Sin cambios en el backend: acepta cualquier id y crea la fila la primera vez.
+
+### Hallazgo (deuda, no se toca hoy)
+
+`android:allowBackup="true"` con `backup_rules.xml` / `data_extraction_rules.xml` de ejemplo:
+la copia automática se lleva `aeria_trust` y el resto de preferencias a Google Drive y las
+restaura en otro terminal. Las claves del Keystore no viajan, así que lo restaurado queda roto
+en vez de suplantar, pero no debería salir del teléfono. Para release: `allowBackup="false"`.
+
+### Pendiente
+
+- **Sin probar en teléfono.** Prueba: `adb shell run-as com.delta.aeria_nexus_prototype cat
+  no_backup/app_instance_id` en dos teléfonos → ids distintos; en el backend, una fila de
+  `AppInstance` por teléfono tras abrir sesión en cada uno.
+
+---
+
+## 2026-09-25 (4) — La sesión se renueva sola y se reintenta si no había red (workflow 29)
+
+### Por qué
+
+Sexto de la lista para la demo. El token de sesión caduca (12 h en el backend,
+`IAM_SESSION_HOURS`; el contrato dice 8) y nadie lo renovaba: al caducar, el teléfono y la W1
+dejaban de subir **sin avisar**, porque la pantalla seguía diciendo que la sesión estaba
+acreditada. Además, repasando: **si al poner el PIN no había red, la sesión se quedaba
+`SOLO_LOCAL` hasta el siguiente desbloqueo**, no se reintentaba nunca.
+
+### Hecho
+
+- **`IdentityRepository.mantenerAcreditada(sesion)`** sustituye a la acreditación de un solo
+  disparo. Un bucle por sesión que:
+  - acredita al desbloquear y **reintenta** con espera creciente (30 s, 1, 2 y 5 min);
+  - **renueva 10 min antes** de que caduque. El backend no tiene endpoint de renovación:
+    renovar es abrir otra sesión con un reto nuevo, y la clave del agente lo firma sin
+    pedir el PIN porque sigue autorizada mientras la app esté desbloqueada;
+  - si caduca sin renovarse, **vuelve a `SOLO_LOCAL` a la vista** y lo registra.
+- Al renovar, el token anterior se cierra en el backend en cuanto el nuevo está guardado.
+- La W1 recibe el token nuevo sola (sigue el `StateFlow` de `SesionBackend`), y al caducar
+  recibe `TOKEN_CLEAR`.
+- Tras cada acreditación, también las renovaciones, se reanudan las subidas pendientes.
+- La espera larga va a pasos de 1 min contra el reloj de pared: `delay` no avanza con el
+  teléfono en reposo profundo.
+- `lock()` cancela el bucle. Auditoría: `SESION_ACREDITADA` / `SESION_NO_ACREDITADA` llevan
+  `renewal`, y la caducidad sin renovar deja `reason=token expired`.
+
+### Pendiente
+
+- **Sin probar en teléfono.** Prueba corta: backend con `IAM_SESSION_HOURS=1` (son horas
+  enteras) → a los ~50 min "sesion renovada" en el log y la W1 recibe otro token. Y sin
+  el túnel al desbloquear → `SOLO_LOCAL`; poner el túnel → acreditada en ≤ 30 s, sin
+  volver a poner el PIN.
+
+---
+
+## 2026-09-25 (3) — Los vídeos de la bodycam salen a nombre del agente atado, no de "John Smith"
+
+### Por qué
+
+Tercero de la lista para la demo. La W1 rotulaba y firmaba el manifiesto con un oficial fijo
+(`HardcodedOfficer`: John Smith, 36975) aunque el que había entrado fuese `cmendez`.
+
+### Hecho (lado teléfono)
+
+- **`BindingPeriferico.declaracion`** lleva `officer_name`, `officer_rank` y `officer_badge`
+  (nuevo `OficialRotulado`). Van **dentro de lo firmado** por el agente: la cámara no rotula
+  nada que él no haya firmado. Se escapan con `JSONObject.quote` porque son texto libre.
+- `atarAlAgente` los saca de `incidentRepository.officerProfile`, el mismo perfil que va en el
+  manifiesto de los incidentes del teléfono (hoy `OfficerSampleData`: Carlos Mendez, P-4471).
+- La versión de la declaración no cambia: los campos son añadidos y la W1 no comprueba `v`.
+- Sin prueba JVM: `org.json` en los tests es el stub de Android y no merece añadirlo por esto.
+
+### Pendiente
+
+- **Sin probar con hardware**, y depende de que la atadura (wf 33) funcione en los aparatos,
+  que sigue sin verificar. Si no ata, los vídeos salen **UNASSIGNED**. El lado de la W1 está
+  en su DEVLOG del mismo día.
+
+---
+
+## 2026-09-25 (2) — La bodycam sube con el token de la sesión, prestado por el teléfono
+
+### Por qué
+
+Segundo de la lista para la demo. La W1 subía con `stub-token` y el backend real lo rechaza
+(401): **sus vídeos no llegaban**. El backend solo abre sesión al teléfono. Opciones: token
+reducido ligado al binding (toca backend), sesión propia de la unidad (toca más backend) o
+prestarle el del teléfono. **El usuario eligió la última**: sin cambios en el backend, que
+además comparte con otra persona (rama `dev_auth_supa` con cambios sin commitear).
+
+### Hecho
+
+- **`SesionBackend`** expone la sesión como `StateFlow` (`actual`); `token()` no cambia.
+- **`BodycamRepository.prestarToken()`**: combina el enlace autenticado con la sesión. Con
+  enlace `SI` y sesión manda `TOKEN:<jwt>:<segundos que le quedan>`; con enlace `SI` y sin
+  sesión, `TOKEN_CLEAR`. Por un enlace sin autenticar **no se manda nada**. Al reconectar el
+  enlace pasa por `DESCONOCIDO` y vuelve a `SI`, así que se reenvía solo.
+- Segundos de vida y no hora de caducidad: la W1 ha llegado a ir 6 h desfasada.
+- Bloquear o terminar el turno olvida la sesión, y eso manda el `TOKEN_CLEAR`.
+- El lado de la unidad está en el DEVLOG de BodyCamServer del mismo día.
+
+### Lo que se acepta
+
+La W1 lleva **todos** los alcances del agente durante el turno, por un RFCOMM sin cifrar, y en
+el backend sus subidas figuran con el terminal del agente como dispositivo. La salida limpia
+es un token reducido ligado al binding. No está en `aeria-contracts`: si se mantiene, hay que
+apuntarlo en su CHANGELOG (afecta a TEL y BWC).
+
+### Pendiente
+
+- **Sin probar con hardware**. Prueba: backend + túnel, desbloquear el teléfono (sesión
+  acreditada) con la W1 enlazada → en el log de la W1 "token de la sesión recibido"; grabar
+  un incidente en la W1 → llega al backend. Bloquear → "token de la sesión retirado".
+
+---
+
+## 2026-09-25 — Los reintentos de subida ya no parten el incidente
+
+### Por qué
+
+Pendiente del 18-sep, primero de la lista para la demo. Lo que se capturaba sin sesión con
+AeriaOne (o sin red) salía después por `resumePending`, que llamaba a `deliver` con `incident_id`,
+`sha256_plain`, `evidence_id`, `label` y `media_type` a null: al reintentar solo quedaba el `.fev`.
+El backend abría un incidente por fichero; así se partió en 3 la prueba de aquella mañana.
+
+### Hecho
+
+- **`EvidenceUploader`:** `enqueue` y `enqueueVideo` guardan esos datos en
+  `<nombre>.fev.evidence.json` junto al `.fev`, **antes** de mirar si la subida está configurada.
+  Es el mismo patrón que el `.proxy.json` del proxy. `resumePending` lo lee; si no existe (los
+  `.fev` de antes de este cambio) se comporta como hasta ahora.
+- Una sesión de subida que ya existía en el servidor conserva la metadata del primer intento; el
+  fallo solo pasaba cuando el primer intento no llegó a abrirla (típico: sin token).
+- Otras lecturas de la carpeta `evidence/` filtran por `.fev`, así que el json no aparece como
+  evidencia. El fichero no se borra al entregar, igual que el recibo.
+
+### Pendiente
+
+- **Sin verificar en teléfono**: ni aparato conectado ni backend local levantado. Compila.
+  Prueba: sin el `adb reverse` desbloquear (la sesión se queda `SOLO_LOCAL`), abrir incidente
+  y capturar foto + vídeo; poner el túnel, bloquear y desbloquear → en el backend un solo
+  incidente con las dos piezas, `media_type` correcto y `sha256_plain`.
+
+---
+
 ## 2026-09-20 — Cancelar desde el móvil la subida de una evidencia de la bodycam
 
 ### Por qué

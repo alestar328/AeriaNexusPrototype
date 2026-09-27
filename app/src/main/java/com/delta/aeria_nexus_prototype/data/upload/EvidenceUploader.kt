@@ -89,6 +89,7 @@ class EvidenceUploader(
         // Los datos del proxy se guardan aunque la subida este apagada: son lo unico que
         // permitira enlazarlo con su original el dia que se configure.
         proxy?.let { guardarDatosDeProxy(it, evidenceId, incidentId) }
+        guardarDatosDeEvidencia(original, evidenceId, incidentId, label, EvidenceType.VIDEO)
         if (!config.enabled()) {
             Log.d(TAG, "subida no configurada — ${original.file.name} se queda en el teléfono")
             return
@@ -117,6 +118,7 @@ class EvidenceUploader(
         label: String?,
         type: EvidenceType,
     ) {
+        guardarDatosDeEvidencia(sealed, evidenceId, incidentId, label, type)
         if (!config.enabled()) {
             Log.d(TAG, "subida no configurada — ${sealed.file.name} se queda en el teléfono")
             return
@@ -152,8 +154,18 @@ class EvidenceUploader(
                 // —si el fichero nunca llegó a subirse no hay recibo—, así que se recalcula.
                 // Cuesta una lectura y solo pasa al reanudar.
                 val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
-                // Sin tipo: el backend lo deduce de la extension que hay bajo el .fev.
-                deliver(fev, sha, null, null, null, null, type = null)
+                // Sin sus datos cada pieza llegaba suelta y el backend abria un incidente
+                // nuevo por fichero. Solo faltan en los .fev anteriores a este cambio.
+                val datos = runCatching { JSONObject(datosDeEvidencia(fev).readText()) }.getOrNull()
+                deliver(
+                    fev = fev,
+                    cipherSha256 = sha,
+                    plainSha256 = datos?.optString("sha256_plain")?.ifBlank { null },
+                    evidenceId = datos?.optString("evidence_id")?.ifBlank { null },
+                    incidentId = datos?.optString("incident_id")?.ifBlank { null },
+                    label = datos?.optString("label")?.ifBlank { null },
+                    type = datos?.optString("type")?.let { t -> EvidenceType.entries.find { it.name == t } },
+                )
             }
         }
     }
@@ -268,6 +280,30 @@ class EvidenceUploader(
     }
 
     private fun datosDeProxy(fev: File) = File(fev.parentFile, fev.name + PROXY_DATA_SUFFIX)
+
+    /**
+     * Lo que une una evidencia a su incidente, junto al .fev. Mismo motivo que el proxy:
+     * la subida puede no salir ahora (sin sesion, sin red) y al reintentarla solo queda
+     * el fichero. Se guarda antes de mirar si la subida esta configurada.
+     */
+    private fun guardarDatosDeEvidencia(
+        sealed: EvidenceCrypto.Sealed,
+        evidenceId: String?,
+        incidentId: String?,
+        label: String?,
+        type: EvidenceType,
+    ) {
+        val datos = JSONObject()
+            .put("sha256_plain", sealed.plainSha256)
+            .put("type", type.name)
+        evidenceId?.let { datos.put("evidence_id", it) }
+        incidentId?.let { datos.put("incident_id", it) }
+        label?.let { datos.put("label", it) }
+        runCatching { datosDeEvidencia(sealed.file).writeText(datos.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
+    }
+
+    private fun datosDeEvidencia(fev: File) = File(fev.parentFile, fev.name + EVIDENCE_DATA_SUFFIX)
 
     /** Valor de `media_type`. Lo que subio un testigo no es de este camino. */
     private fun mediaTypeDe(type: EvidenceType): String? = when (type) {
@@ -386,6 +422,7 @@ class EvidenceUploader(
     private companion object {
         const val RECEIPT_SUFFIX = ".upload.json"
         const val PROXY_DATA_SUFFIX = ".proxy.json"
+        const val EVIDENCE_DATA_SUFFIX = ".evidence.json"
         const val EVIDENCE_FOLDER = "evidence"
 
         /** TODO: sale de la sesión autenticada cuando exista login real (AUTH-001). */

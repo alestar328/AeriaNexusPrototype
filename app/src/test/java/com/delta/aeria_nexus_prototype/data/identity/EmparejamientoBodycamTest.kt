@@ -12,6 +12,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -96,12 +97,104 @@ class EmparejamientoBodycamTest {
         val nonceA = ProtocoloEmparejamiento.nonce()
         val nonceB = ProtocoloEmparejamiento.nonce()
         val delTelefono = ProtocoloEmparejamiento.transcripcion(
-            ProtocoloEmparejamiento.Rol.TELEFONO, DEVICE_ID, BWC_ID, nonceA, nonceB,
+            ProtocoloEmparejamiento.VERSION_2, ProtocoloEmparejamiento.Rol.TELEFONO, DEVICE_ID, BWC_ID, nonceA, nonceB,
         )
         val deLaBodycam = ProtocoloEmparejamiento.transcripcion(
-            ProtocoloEmparejamiento.Rol.BODYCAM, DEVICE_ID, BWC_ID, nonceA, nonceB,
+            ProtocoloEmparejamiento.VERSION_2, ProtocoloEmparejamiento.Rol.BODYCAM, DEVICE_ID, BWC_ID, nonceA, nonceB,
         )
         assertTrue("Los dos roles firman lo mismo", !delTelefono.contentEquals(deLaBodycam))
+    }
+
+    /**
+     * La v1 tiene que seguir firmando exactamente lo de antes: la bodycam la acepta
+     * para telefonos viejos, y un byte distinto los dejaria a todos fuera.
+     */
+    @Test
+    fun la_transcripcion_v1_no_cambia() {
+        val nonceA = ByteArray(32) { 1 }
+        val nonceB = ByteArray(32) { 2 }
+        val v1 = ProtocoloEmparejamiento.transcripcion(
+            ProtocoloEmparejamiento.VERSION_1, ProtocoloEmparejamiento.Rol.TELEFONO, DEVICE_ID, BWC_ID, nonceA, nonceB,
+        )
+        val b64 = Base64.getEncoder()
+        val esperada = "AERIA-BWC-1|TELEFONO|$DEVICE_ID|$BWC_ID|${b64.encodeToString(nonceA)}|${b64.encodeToString(nonceB)}"
+        assertEquals(esperada, String(v1, Charsets.UTF_8))
+    }
+
+    // ── Canal cifrado (v2) ────────────────────────────────────────────────────
+
+    /** Lo que cifra un extremo lo descifra el otro, en los dos sentidos y en orden. */
+    @Test
+    fun el_canal_acordado_funciona_en_los_dos_sentidos() {
+        val escenario = Escenario()
+        val telefono = (escenario.emparejar() as ResultadoEmparejamiento.Autenticado).canal
+        val bodycam = escenario.bodycam.canal!!
+
+        assertEquals("STATUS", bodycam.descifrar(telefono.cifrar("STATUS")))
+        assertEquals("TOKEN:jwt:600", bodycam.descifrar(telefono.cifrar("TOKEN:jwt:600")))
+        assertEquals("OK:STATUS", telefono.descifrar(bodycam.cifrar("OK:STATUS")))
+    }
+
+    /**
+     * Alguien en medio cambia la clave efimera del telefono por la suya. Si las
+     * efimeras no fueran dentro de lo firmado, los dos extremos se autenticarian y
+     * el intermediario leeria todo. Tienen que fallar las dos firmas.
+     */
+    @Test
+    fun cambiar_la_clave_efimera_por_el_camino_no_cuela() {
+        val escenario = Escenario(intermediarioCambiaLaEfimera = true)
+        val resultado = escenario.emparejar()
+
+        assertTrue("Un intermediario coloco su clave efimera: $resultado",
+            resultado is ResultadoEmparejamiento.Rechazado)
+        assertTrue("La bodycam acepto un saludo manipulado", !escenario.bodycam.aceptoAlTelefono)
+    }
+
+    /** Una respuesta sin clave efimera a un saludo v2 es intentar que no se cifre. */
+    @Test
+    fun una_bodycam_que_no_manda_clave_efimera_no_se_acepta() {
+        val escenario = Escenario(bodycamSinEfimera = true)
+        val resultado = escenario.emparejar()
+
+        assertTrue("Se acepto un AUTH_ID sin clave efimera: $resultado",
+            resultado is ResultadoEmparejamiento.Rechazado)
+    }
+
+    /** Una trama repetida o fuera de orden no descifra, y el canal no se recupera. */
+    @Test
+    fun una_trama_repetida_o_reordenada_rompe_el_canal() {
+        val escenario = Escenario()
+        val telefono = (escenario.emparejar() as ResultadoEmparejamiento.Autenticado).canal
+        val bodycam = escenario.bodycam.canal!!
+
+        val primera = telefono.cifrar("REC_START")
+        val segunda = telefono.cifrar("REC_STOP")
+        assertEquals("REC_START", bodycam.descifrar(primera))
+        assertNull("Se acepto una trama repetida", bodycam.descifrar(primera))
+        assertNull("El canal siguio vivo tras una trama mala", bodycam.descifrar(segunda))
+        assertTrue(bodycam.roto)
+    }
+
+    /** Una trama del telefono devuelta al telefono no pasa por mensaje de la camara. */
+    @Test
+    fun devolver_una_trama_a_quien_la_mando_no_descifra() {
+        val escenario = Escenario()
+        val telefono = (escenario.emparejar() as ResultadoEmparejamiento.Autenticado).canal
+
+        assertNull("Una trama reflejada descifro", telefono.descifrar(telefono.cifrar("STATUS")))
+    }
+
+    /** Un bit cambiado en la trama se detecta: GCM autentica, no solo cifra. */
+    @Test
+    fun una_trama_manipulada_no_descifra() {
+        val escenario = Escenario()
+        val telefono = (escenario.emparejar() as ResultadoEmparejamiento.Autenticado).canal
+        val bodycam = escenario.bodycam.canal!!
+
+        val trama = telefono.cifrar("REC_STOP")
+        val bytes = Base64.getDecoder().decode(trama.removePrefix(CanalCifrado.PREFIJO))
+        bytes[0] = (bytes[0].toInt() xor 1).toByte()
+        assertNull(bodycam.descifrar(CanalCifrado.PREFIJO + Base64.getEncoder().encodeToString(bytes)))
     }
 
     private companion object {
@@ -116,6 +209,8 @@ private class Escenario(
     bodycamFirmaOtroNonce: Boolean = false,
     bodycamDeOtraCa: Boolean = false,
     telefonoSinAncla: Boolean = false,
+    bodycamSinEfimera: Boolean = false,
+    private val intermediarioCambiaLaEfimera: Boolean = false,
 ) {
     private val caDePerifericos = Ca("AeriaOne Peripheral CA test")
     private val otraCa = Ca("Alguien Else CA")
@@ -130,6 +225,7 @@ private class Escenario(
         anclaParaValidarAlTelefono = caDePerifericos.certificado,
         devuelveLaFirmaRecibida = bodycamDevuelveLaFirmaRecibida,
         firmaOtroNonce = bodycamFirmaOtroNonce,
+        sinEfimera = bodycamSinEfimera,
     )
 
     private val telefono = EmparejamientoDelTelefono(
@@ -140,7 +236,13 @@ private class Escenario(
     )
 
     fun emparejar(): ResultadoEmparejamiento {
-        val identidad = bodycam.responderASaludo(telefono.saludo())
+        var saludo = telefono.saludo()
+        if (intermediarioCambiaLaEfimera) {
+            val partes = saludo.split(":").toMutableList()
+            partes[4] = AcuerdoDeClaves.codificar(AcuerdoDeClaves.parEfimero().public)
+            saludo = partes.joinToString(":")
+        }
+        val identidad = bodycam.responderASaludo(saludo)
         val prueba = telefono.responderA(identidad)
             ?: return ResultadoEmparejamiento.Rechazado("AUTH_ID ilegible")
         return telefono.comprobar(bodycam.responderAPrueba(prueba))
@@ -148,14 +250,14 @@ private class Escenario(
 }
 
 /**
- * Implementacion de referencia del lado de la BODYCAM.
+ * Implementacion de referencia del lado de la BODYCAM, en v2.
  *
- * **Esto es lo que hay que portar a BodyCamServer**, que vive en otro repositorio
- * y no esta disponible desde esta maquina. Vive en el codigo de pruebas y no en el
- * de la app a proposito: el telefono nunca hace de bodycam, y meterlo en el APK
- * seria codigo muerto que ademas confundiria sobre quien responde que.
+ * Es el espejo de `Emparejamiento.kt` de BodyCamServer (otro repositorio): si se
+ * cambia uno, se cambian los dos. Vive en el codigo de pruebas y no en el de la app
+ * a proposito: el telefono nunca hace de bodycam, y meterlo en el APK seria codigo
+ * muerto que ademas confundiria sobre quien responde que.
  *
- * Los tres interruptores son ataques, no configuracion.
+ * Los interruptores son ataques, no configuracion.
  */
 private class BodycamDeReferencia(
     private val bwcId: String,
@@ -164,25 +266,34 @@ private class BodycamDeReferencia(
     private val anclaParaValidarAlTelefono: X509Certificate,
     private val devuelveLaFirmaRecibida: Boolean,
     private val firmaOtroNonce: Boolean,
+    private val sinEfimera: Boolean,
 ) {
     private val par = generarParEc()
     private val certificado = ca.emitir(bwcId, par)
     private val nonce = ProtocoloEmparejamiento.nonce()
     private var nonceDelTelefono: ByteArray = ByteArray(0)
+    private val efimera = AcuerdoDeClaves.parEfimero()
+    private val efimeraPropia = AcuerdoDeClaves.codificar(efimera.public)
+    private var efimeraDelTelefono = ""
 
     var aceptoAlTelefono = false
         private set
 
+    /** El canal acordado, si el telefono se acredito. */
+    var canal: CanalCifrado? = null
+        private set
+
     fun responderASaludo(linea: String): String {
         val partes = linea.split(":")
-        require(partes[0] == "AUTH_HELLO" && partes[1] == ProtocoloEmparejamiento.VERSION)
+        require(partes[0] == "AUTH_HELLO" && partes[1] == ProtocoloEmparejamiento.VERSION_2 && partes.size == 5)
         nonceDelTelefono = Base64.getDecoder().decode(partes[3])
-        return listOf(
+        efimeraDelTelefono = partes[4]
+        return (listOf(
             "AUTH_ID",
             bwcId,
             Base64.getEncoder().encodeToString(nonce),
             Base64.getEncoder().encodeToString(certificado.encoded),
-        ).joinToString(":")
+        ) + if (sinEfimera) emptyList() else listOf(efimeraPropia)).joinToString(":")
     }
 
     fun responderAPrueba(linea: String): String {
@@ -194,11 +305,14 @@ private class BodycamDeReferencia(
         // La camara valida al telefono igual que el telefono la valida a ella: es
         // autenticacion MUTUA, no un login del telefono contra la camara.
         val delTelefono = ProtocoloEmparejamiento.transcripcion(
+            version = ProtocoloEmparejamiento.VERSION_2,
             rol = ProtocoloEmparejamiento.Rol.TELEFONO,
             deviceId = deviceIdEsperado,
             bwcId = bwcId,
             nonceDelTelefono = nonceDelTelefono,
             nonceDeLaBodycam = nonce,
+            efimeraDelTelefono = efimeraDelTelefono,
+            efimeraDeLaBodycam = efimeraPropia,
         )
         val emitidoPorLaCa = runCatching {
             certificadoDelTelefono.verify(anclaParaValidarAlTelefono.publicKey)
@@ -214,11 +328,20 @@ private class BodycamDeReferencia(
 
         val nonceQueFirma = if (firmaOtroNonce) ProtocoloEmparejamiento.nonce() else nonceDelTelefono
         val mia = ProtocoloEmparejamiento.transcripcion(
+            version = ProtocoloEmparejamiento.VERSION_2,
             rol = ProtocoloEmparejamiento.Rol.BODYCAM,
             deviceId = deviceIdEsperado,
             bwcId = bwcId,
             nonceDelTelefono = nonceQueFirma,
             nonceDeLaBodycam = nonce,
+            efimeraDelTelefono = efimeraDelTelefono,
+            efimeraDeLaBodycam = efimeraPropia,
+        )
+        canal = CanalCifrado.derivar(
+            secreto = AcuerdoDeClaves.secreto(efimera.private, AcuerdoDeClaves.leer(efimeraDelTelefono)!!),
+            nonceDelTelefono = nonceDelTelefono,
+            nonceDeLaBodycam = nonce,
+            soyTelefono = false,
         )
         return "AUTH_OK:" + Base64.getEncoder().encodeToString(firmar(mia, par.private))
     }

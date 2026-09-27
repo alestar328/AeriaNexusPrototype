@@ -5,11 +5,16 @@ import android.util.Log
 import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
+import java.io.File
+import java.security.SecureRandom
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -102,6 +107,32 @@ class IdentityRepository(
 
     private val prefs = context.getSharedPreferences("aeria_trust", Context.MODE_PRIVATE)
 
+    /**
+     * Identidad de ESTA instalacion (workflows 22-23). Hasta el 2026-09-25 era la
+     * constante APPINST-8F27A91C en todos los telefonos, y el backend, que la crea al
+     * verla y la asigna al ultimo terminal que la presenta, la hacia saltar de uno a
+     * otro: revocarla habria cortado a todos a la vez.
+     *
+     * En noBackupFilesDir y no en las preferencias: la copia de seguridad automatica
+     * esta activa y restauraria las preferencias en otro telefono, y "un APK copiado a
+     * otro terminal es otra instancia, y no debe heredar nada". Reinstalar o deshacer
+     * el alta da una instancia nueva. Va antes que [_status], que la lee al arrancar.
+     */
+    private val ficheroDeInstancia = File(context.noBackupFilesDir, "app_instance_id")
+
+    private fun instanciaDeEstaInstalacion(): String {
+        ficheroDeInstancia.takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        val aleatorio = ByteArray(8).also { SecureRandom().nextBytes(it) }
+        val nueva = "APPINST-" + aleatorio.joinToString("") { "%02X".format(it) }
+        runCatching { ficheroDeInstancia.writeText(nueva) }
+            .onFailure { Log.e(TAG, "no se pudo guardar la instancia: ${it.message}") }
+        return nueva
+    }
+
+    /** La identidad de ejemplo con la instancia real de esta instalacion. */
+    private fun identidadBase(): ProvisionedIdentity =
+        IDENTIDAD_DEMO.copy(appInstanceId = instanciaDeEstaInstalacion())
+
     // Vive lo mismo que la app. Solo lo usa la acreditacion, que es red.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -112,6 +143,9 @@ class IdentityRepository(
      */
     @Volatile var sesionActual: String? = null
         private set
+
+    /** Bucle que acredita y renueva la sesion en curso (ver [mantenerAcreditada]). */
+    private var mantenimiento: Job? = null
 
     init {
         // El contador de intentos vivia aqui en claro hasta el workflow 4. Ahora lo
@@ -187,58 +221,131 @@ class IdentityRepository(
                 emisorDelReto = null,
             )
         }
-        acreditar(sesion)
+        mantenerAcreditada(sesion)
         return UnlockResult.OK
     }
 
     /**
-     * Pasos 11 a 21: pedir un reto a AeriaOne, firmarlo con la clave del agente recien
-     * autorizada y cambiar la firma por el token de la sesion.
+     * Mantiene la sesion acreditada ante AeriaOne mientras este abierta (workflows 27 y 29).
      *
-     * Si falla —sin red, agente dado de baja, terminal revocado— el agente sigue
-     * dentro con la sesion SOLO_LOCAL: nadie debe poder confundir eso con haberse
-     * autenticado, pero tampoco dejarle sin terminal en mitad de la calle.
+     * El backend no tiene endpoint de renovacion: renovar es abrir otra sesion con un
+     * reto nuevo, que la clave del agente puede firmar sin volver a pedir el PIN porque
+     * sigue autorizada mientras la app este desbloqueada. Tres cosas en un solo bucle:
+     *  - acreditar al desbloquear, y **reintentar** si no habia red: antes, sin
+     *    cobertura al poner el PIN la sesion se quedaba SOLO_LOCAL hasta el siguiente;
+     *  - renovar [MARGEN_DE_RENOVACION_MILLIS] antes de que caduque el token (un turno);
+     *  - si caduca sin renovar, volver a SOLO_LOCAL **a la vista**. El token caducado ya
+     *    no servia para subir, pero la pantalla seguia diciendo que la sesion valia.
      */
-    private fun acreditar(sesion: String) {
+    private fun mantenerAcreditada(sesion: String) {
         val identidad = _status.value.identity ?: return
         if (!iam.configurado()) {
             Log.w(TAG, "sin servidor AeriaOne configurado: la sesion es SOLO local")
             return
         }
-        scope.launch {
-            try {
-                val reto = iam.pedirReto(PropositoDelReto.LOGIN, identidad.userId)
-                val firma = credential.firmarRetoDeSesion(reto.nonce)
-                val emitida = iam.abrirSesion(
-                    reto = reto,
-                    firma = firma,
-                    deviceId = identidad.deviceId,
-                    appInstanceId = identidad.appInstanceId,
-                    appVersion = BuildConfig.VERSION_NAME,
-                )
-                guardarSiSigueAbierta(sesion, emitida, reto.emisor)
-            } catch (e: Exception) {
-                Log.e(TAG, "AeriaOne no ha acreditado la sesion: ${e.message}")
-                auditoria.registrar(TipoEvento.SESION_NO_ACREDITADA, listOf("reason" to e.message))
+        mantenimiento?.cancel()
+        mantenimiento = scope.launch {
+            var fallos = 0
+            while (isActive && sesionActual == sesion) {
+                val vigente = sesionBackend.actual.value
+                val ahora = System.currentTimeMillis()
+                if (vigente != null && ahora < vigente.caducaEnMillis - MARGEN_DE_RENOVACION_MILLIS) {
+                    // A pasos de un minuto contra el reloj de pared: delay no avanza con
+                    // el telefono en reposo profundo, y una espera de horas de un tiron
+                    // se pasaria de largo el momento de renovar.
+                    delay(minOf(vigente.caducaEnMillis - MARGEN_DE_RENOVACION_MILLIS - ahora, PASO_DE_ESPERA_MILLIS))
+                    continue
+                }
+                if (vigente != null && ahora >= vigente.caducaEnMillis) caducar(sesion)
+
+                if (acreditar(sesion, identidad, renovando = vigente != null)) {
+                    fallos = 0
+                } else {
+                    fallos++
+                    delay(esperaTrasFallo(fallos))
+                }
             }
         }
+    }
+
+    /**
+     * Pasos 11 a 21: pedir un reto a AeriaOne, firmarlo con la clave del agente y cambiar
+     * la firma por el token de la sesion. True si hay token nuevo guardado.
+     *
+     * Si falla —sin red, agente dado de baja, terminal revocado— el agente sigue
+     * dentro con la sesion SOLO_LOCAL: nadie debe poder confundir eso con haberse
+     * autenticado, pero tampoco dejarle sin terminal en mitad de la calle.
+     */
+    private fun acreditar(sesion: String, identidad: ProvisionedIdentity, renovando: Boolean): Boolean = try {
+        val reto = iam.pedirReto(PropositoDelReto.LOGIN, identidad.userId)
+        val firma = credential.firmarRetoDeSesion(reto.nonce)
+        val emitida = iam.abrirSesion(
+            reto = reto,
+            firma = firma,
+            deviceId = identidad.deviceId,
+            appInstanceId = identidad.appInstanceId,
+            appVersion = BuildConfig.VERSION_NAME,
+        )
+        guardarSiSigueAbierta(sesion, emitida, reto.emisor, renovando)
+    } catch (e: Exception) {
+        Log.e(TAG, "AeriaOne no ha acreditado la sesion: ${e.message}")
+        auditoria.registrar(
+            TipoEvento.SESION_NO_ACREDITADA,
+            listOf("reason" to e.message, "renewal" to renovando.toString()),
+        )
+        false
     }
 
     /**
      * El agente pudo bloquear mientras el reto iba y volvia. Un token que llega tarde
      * se invalida en el backend en vez de guardarse: si no, la subida seguiria
      * funcionando con la pantalla bloqueada.
+     *
+     * Al renovar, el token anterior se cierra en el backend en cuanto el nuevo esta
+     * guardado: dos sesiones vivas del mismo agente serian una credencial de mas.
      */
-    private fun guardarSiSigueAbierta(sesion: String, emitida: SesionEmitida, emisor: String) {
+    private fun guardarSiSigueAbierta(
+        sesion: String,
+        emitida: SesionEmitida,
+        emisor: String,
+        renovando: Boolean,
+    ): Boolean {
         if (sesionActual != sesion) {
             runCatching { iam.cerrarSesion(emitida.token) }
-            return
+            return false
         }
+        val anterior = sesionBackend.actual.value?.token
         sesionBackend.guardar(emitida)
-        auditoria.registrar(TipoEvento.SESION_ACREDITADA, listOf("challenge_issuer" to emisor))
+        anterior?.let { viejo ->
+            runCatching { iam.cerrarSesion(viejo) }
+                .onFailure { Log.w(TAG, "no se pudo cerrar el token anterior: ${it.message}") }
+        }
+        auditoria.registrar(
+            TipoEvento.SESION_ACREDITADA,
+            listOf("challenge_issuer" to emisor, "renewal" to renovando.toString()),
+        )
         _status.update { it.copy(origenDeSesion = OrigenDeSesion.ACREDITADA, emisorDelReto = emisor) }
-        Log.i(TAG, "sesion acreditada por $emisor")
+        Log.i(TAG, if (renovando) "sesion renovada por $emisor" else "sesion acreditada por $emisor")
+        // Tambien al renovar: si el token llego a caducar, lo que se quedo sin subir sale ahora.
         alAcreditarSesion?.invoke()
+        return true
+    }
+
+    /** El token caduco sin poder renovarse: la sesion sigue, pero ya no esta acreditada. */
+    private fun caducar(sesion: String) {
+        if (sesionActual != sesion) return
+        // Caducado no hace falta cerrarlo en el backend; olvidarlo avisa a la bodycam.
+        sesionBackend.olvidar()
+        auditoria.registrar(TipoEvento.SESION_NO_ACREDITADA, listOf("reason" to "token expired"))
+        _status.update { it.copy(origenDeSesion = OrigenDeSesion.SOLO_LOCAL, emisorDelReto = null) }
+        Log.w(TAG, "el token de la sesion ha caducado sin renovarse")
+    }
+
+    private fun esperaTrasFallo(fallos: Int): Long = when (fallos) {
+        1 -> 30_000L
+        2 -> 60_000L
+        3 -> 2 * 60_000L
+        else -> 5 * 60_000L
     }
 
     /**
@@ -316,6 +423,8 @@ class IdentityRepository(
         // El orden importa: primero se deshacen las ataduras, porque para firmar
         // su fin hace falta la clave del agente, y la linea siguiente la retira.
         alCerrarSesion?.invoke(motivo)
+        mantenimiento?.cancel()
+        mantenimiento = null
         credential.retirarAutorizacion()
         // El token caducaria solo, pero hasta entonces serviria para subir en nombre
         // de un agente que ya no esta de servicio.
@@ -361,7 +470,7 @@ class IdentityRepository(
             it.copy(
                 state = TrustState.ENROLLING,
                 blockReason = null,
-                identity = IDENTIDAD_DEMO.copy(deviceId = deviceId),
+                identity = identidadBase().copy(deviceId = deviceId),
             )
         }
     }
@@ -384,7 +493,7 @@ class IdentityRepository(
                 // paso 13, que es lo unico que el agente pone de su parte.
                 state = if (pinLocal.existe()) TrustState.LOCKED else TrustState.PIN_SETUP,
                 blockReason = null,
-                identity = (estado.identity ?: IDENTIDAD_DEMO).copy(userId = userId),
+                identity = (estado.identity ?: identidadBase()).copy(userId = userId),
             )
         }
     }
@@ -405,6 +514,8 @@ class IdentityRepository(
             .remove(CLAVE_CREDENCIAL)
             .remove(CLAVE_USER_ID)
             .apply()
+        // La proxima alta es otra instancia: no hereda nada de la anterior.
+        ficheroDeInstancia.delete()
         _status.update {
             it.copy(state = TrustState.NOT_PROVISIONED, blockReason = null, identity = null)
         }
@@ -444,7 +555,7 @@ class IdentityRepository(
             it.copy(
                 state = state,
                 blockReason = if (state == TrustState.BLOCKED) reason else null,
-                identity = if (terminalDadoDeAlta) IDENTIDAD_DEMO else null,
+                identity = if (terminalDadoDeAlta) identidadBase() else null,
                 attemptsLeft = MAX_ATTEMPTS,
                 lockedOutUntil = 0L,
             )
@@ -457,7 +568,7 @@ class IdentityRepository(
         val intentos = pinLocal.estadoDeIntentos()
         // Device ID y agente son los que emitieron el alta y la CA; si no hay
         // (identidad forzada desde el simulador) se cae a los de ejemplo.
-        val identidad = IDENTIDAD_DEMO.copy(
+        val identidad = identidadBase().copy(
             deviceId = prefs.getString(CLAVE_DEVICE_ID, null) ?: IDENTIDAD_DEMO.deviceId,
             userId = prefs.getString(CLAVE_USER_ID, null) ?: IDENTIDAD_DEMO.userId,
         )
@@ -481,6 +592,12 @@ class IdentityRepository(
 
         /** Intentos por tanda antes del bloqueo temporal (workflow 27, paso 7). */
         const val MAX_ATTEMPTS = 5
+
+        /** Cuanto antes de caducar se renueva el token: da para varios reintentos sin red. */
+        private const val MARGEN_DE_RENOVACION_MILLIS = 10 * 60_000L
+
+        /** Tramo maximo de espera entre comprobaciones del reloj de pared. */
+        private const val PASO_DE_ESPERA_MILLIS = 60_000L
 
         /** Digitos del PIN. Fijo, para poder validar solo al completarlo. */
         const val PIN_LENGTH = 6

@@ -69,6 +69,10 @@ object BindingPeriferico {
      * El orden de las claves importa: se firma el texto tal cual, asi que los dos
      * extremos tienen que construirlo igual byte a byte. Por eso se compone a mano
      * y no con un serializador que pueda reordenar.
+     *
+     * Nombre, rango y placa son lo que la camara rotula en el video y pone en su
+     * manifiesto. Van dentro de lo firmado para que la camara no rotule nada que el
+     * agente no haya firmado. Se escapan: a diferencia del resto, son texto libre.
      */
     fun declaracion(
         bindingId: String,
@@ -76,6 +80,7 @@ object BindingPeriferico {
         deviceId: String,
         bwcId: String,
         tenant: String,
+        oficial: OficialRotulado,
         nonceDeLaSesion: ByteArray,
         emitidoEn: Long,
         caducaEn: Long,
@@ -87,6 +92,9 @@ object BindingPeriferico {
         append("\"device_id\":\"").append(deviceId).append("\",")
         append("\"peripheral_id\":\"").append(bwcId).append("\",")
         append("\"tenant\":\"").append(tenant).append("\",")
+        append("\"officer_name\":").append(JSONObject.quote(oficial.nombre)).append(",")
+        append("\"officer_rank\":").append(JSONObject.quote(oficial.rango)).append(",")
+        append("\"officer_badge\":").append(JSONObject.quote(oficial.placa)).append(",")
         append("\"session_nonce\":\"").append(Base64.getEncoder().encodeToString(nonceDeLaSesion)).append("\",")
         append("\"issued_at\":").append(emitidoEn).append(",")
         append("\"expires_at\":").append(caducaEn)
@@ -136,6 +144,9 @@ object BindingPeriferico {
 }
 
 /** Atadura viva en el telefono, para que la interfaz pueda decir a quien sirve la camara. */
+/** Lo que la camara rotula del agente atado: sale del perfil, no de su certificado. */
+data class OficialRotulado(val nombre: String, val rango: String, val placa: String)
+
 data class BindingActivo(
     val bindingId: String,
     val userId: String,

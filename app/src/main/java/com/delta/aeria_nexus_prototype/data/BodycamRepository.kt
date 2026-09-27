@@ -35,6 +35,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -42,8 +44,11 @@ import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.identity.BindingActivo
 import com.delta.aeria_nexus_prototype.data.identity.BindingPeriferico
 import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
+import com.delta.aeria_nexus_prototype.data.identity.CanalCifrado
 import com.delta.aeria_nexus_prototype.data.identity.EmparejamientoDelTelefono
+import com.delta.aeria_nexus_prototype.data.identity.OficialRotulado
 import com.delta.aeria_nexus_prototype.data.identity.ResultadoEmparejamiento
+import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
@@ -108,9 +113,16 @@ enum class EnlaceAutenticado {
  * backoff, un watchdog descarta enlaces muertos que no llegan a fallar la
  * escritura, y BodycamService mantiene el proceso vivo en segundo plano.
  */
-class BodycamRepository(private val context: Context) {
+class BodycamRepository(
+    private val context: Context,
+    private val sesionBackend: SesionBackend,
+) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        prestarToken()
+    }
 
     private var socket: BluetoothSocket? = null
     private var output: OutputStream? = null
@@ -128,6 +140,22 @@ class BodycamRepository(private val context: Context) {
     /** Intercambio en curso, si lo hay. Vive lo que dure una conexion. */
     private var emparejamiento: EmparejamientoDelTelefono? = null
     private var inicioDelEmparejamientoMillis = 0L
+
+    /**
+     * Canal cifrado con la camara (workflow 31 v2). Con el puesto, todo lo que se
+     * manda va cifrado y una linea en claro de la camara se descarta. Null sin
+     * emparejamiento, o con una camara que no lo completa (modo transicion: se
+     * sigue hablando en claro, como antes).
+     */
+    @Volatile private var canal: CanalCifrado? = null
+
+    /**
+     * Comandos que llegaron mientras se emparejaba. No pueden salir en claro justo
+     * antes de que el canal se cifre (la camara ya los rechazaria), asi que esperan
+     * al resultado y salen despues por el canal que toque. STATUS no se guarda: el
+     * poll manda otro enseguida.
+     */
+    private val enEspera = mutableListOf<String>()
 
     /** Declaracion enviada a la camara mientras se espera su BIND_OK. */
     private var pendienteDeAtar: BindingPeriferico.Declaracion? = null
@@ -387,9 +415,17 @@ class BodycamRepository(private val context: Context) {
         scope.launch {
             try {
                 // Un solo escritor a la vez: sin esto, comandos concurrentes
-                // podrian entrelazar sus bytes dentro de la misma linea.
+                // podrian entrelazar sus bytes dentro de la misma linea. Con el
+                // canal cifrado, ademas, el contador del IV tiene que avanzar en el
+                // mismo orden en que salen los bytes: se cifra aqui dentro.
                 synchronized(writeLock) {
-                    output?.write("$command\n".toByteArray(Charsets.UTF_8))
+                    val activo = canal
+                    if (activo == null && emparejamiento != null && !command.startsWith("AUTH_")) {
+                        if (command != "STATUS") enEspera += command
+                        return@synchronized
+                    }
+                    val linea = activo?.cifrar(command) ?: command
+                    output?.write("$linea\n".toByteArray(Charsets.UTF_8))
                     output?.flush()
                 }
             } catch (e: IOException) {
@@ -406,10 +442,35 @@ class BodycamRepository(private val context: Context) {
             var linea: String?
             while (reader.readLine().also { linea = it } != null) {
                 lastRxMillis = System.currentTimeMillis()
-                linea?.trim()?.takeIf { it.isNotEmpty() }?.let(::handleLine)
+                linea?.trim()?.takeIf { it.isNotEmpty() }?.let(::abrir)?.let(::handleLine)
             }
         } catch (e: IOException) {
             // Fin normal de la conexion: el bucle decide si reintenta.
+        }
+    }
+
+    /**
+     * La linea en claro, o null si se descarta.
+     *
+     * Con el canal cifrado, una linea en claro no la ha mandado la camara (ella ya
+     * cifra todo) y se ignora; una trama que no descifra es manipulacion o un
+     * contador desincronizado, y se corta el enlace para volver a emparejar.
+     */
+    private fun abrir(linea: String): String? {
+        val activo = canal
+        if (activo == null) {
+            if (linea.startsWith(CanalCifrado.PREFIJO)) Log.w(TAG, "Trama cifrada sin canal acordado: ignorada")
+            return linea.takeUnless { it.startsWith(CanalCifrado.PREFIJO) }
+        }
+        if (!linea.startsWith(CanalCifrado.PREFIJO)) {
+            Log.w(TAG, "Linea en claro con el canal cifrado: ignorada")
+            return null
+        }
+        return activo.descifrar(linea) ?: run {
+            Log.e(TAG, "Trama de la bodycam que no descifra: se corta el enlace")
+            marcarEnlace(EnlaceAutenticado.RECHAZADO, "Trama cifrada manipulada o desincronizada")
+            closeQuietly()
+            null
         }
     }
 
@@ -482,7 +543,11 @@ class BodycamRepository(private val context: Context) {
 
         when (val resultado = enCurso.comprobar(linea)) {
             is ResultadoEmparejamiento.Autenticado -> {
-                marcarEnlace(EnlaceAutenticado.SI, "${resultado.bwcId} · ${resultado.sujeto}")
+                // El canal ANTES de marcar el enlace: marcarlo dispara prestarToken
+                // en otra corrutina, y el token no puede salir en claro. Mismo
+                // cerrojo que las escrituras, para que ninguna quede a medias.
+                synchronized(writeLock) { canal = resultado.canal }
+                marcarEnlace(EnlaceAutenticado.SI, "${resultado.bwcId} · ${resultado.sujeto} · canal cifrado")
                 // El emparejamiento dice QUE camara es; la atadura dice A QUIEN
                 // sirve. Son dos cosas distintas y esta es la segunda.
                 atarAlAgente(resultado.bwcId, resultado.nonceDeLaSesion)
@@ -495,6 +560,17 @@ class BodycamRepository(private val context: Context) {
                 marcarEnlace(EnlaceAutenticado.NO_SOPORTADO, resultado.motivo)
         }
         emparejamiento = null
+        soltarEnEspera()
+    }
+
+    /**
+     * Lo que se guardo durante el emparejamiento sale ahora, cifrado si se acordo
+     * canal. Sin canal sale en claro: es el modo transicion, la camara lo sigue
+     * aceptando y no mandarlo dejaria al agente sin su REC_START.
+     */
+    private fun soltarEnEspera() {
+        val pendientes = synchronized(writeLock) { enEspera.toList().also { enEspera.clear() } }
+        pendientes.forEach(::sendCommand)
     }
 
     /**
@@ -510,6 +586,7 @@ class BodycamRepository(private val context: Context) {
             EnlaceAutenticado.NO_SOPORTADO,
             "La bodycam no respondio al emparejamiento: firmware sin el workflow 31",
         )
+        soltarEnEspera()
     }
 
     /**
@@ -536,6 +613,39 @@ class BodycamRepository(private val context: Context) {
     }
 
     /**
+     * Presta a la camara el token de la sesion del agente, para que suba su evidencia.
+     *
+     * El backend solo da sesion al telefono, y la subida exige un token con alcance
+     * `video.upload`. Decision del 2026-09-25 para la demo: la camara usa el MISMO token
+     * que el telefono. Lo que se acepta con ello, dicho donde se ve: la camara lleva
+     * todos los alcances del agente hasta que caduque o se cierre la sesion; y en el
+     * backend sus subidas figuran con el terminal del agente como dispositivo. Desde
+     * el 2026-09-28 el token viaja por el canal cifrado: la camara rechaza un TOKEN
+     * sin el (TOKEN_FAIL).
+     *
+     * Solo por un enlace AUTENTICADO (workflow 31): a una camara que no ha demostrado
+     * quien es no se le da una credencial. Se reenvia al reconectar y al abrir otra
+     * sesion, y al cerrarla se le manda retirar.
+     */
+    private fun prestarToken() {
+        scope.launch {
+            combine(_enlaceAutenticado, sesionBackend.actual) { enlace, sesion -> enlace to sesion }
+                .collectLatest { (enlace, sesion) ->
+                    if (enlace != EnlaceAutenticado.SI) return@collectLatest
+                    if (sesion == null) {
+                        sendCommand("TOKEN_CLEAR")
+                    } else {
+                        // Segundos que le quedan, no la hora de caducidad: la W1 ha llegado
+                        // a ir 6 h desfasada y tiraria un token valido.
+                        val quedan = (sesion.caducaEnMillis - System.currentTimeMillis()) / 1_000
+                        sendCommand("TOKEN:${sesion.token}:$quedan")
+                        Log.i(TAG, "token de la sesion prestado a la camara")
+                    }
+                }
+        }
+    }
+
+    /**
      * Ata la camara al agente que tiene la sesion abierta (workflow 33).
      *
      * La atadura es una declaracion firmada CON LA CLAVE DEL AGENTE, no con la del
@@ -558,12 +668,16 @@ class BodycamRepository(private val context: Context) {
         }
 
         val ahora = System.currentTimeMillis()
+        // El mismo perfil que va en el manifiesto de los incidentes del telefono, para
+        // que el video de la camara y el incidente digan el mismo nombre.
+        val perfil = AppContainer.incidentRepository.officerProfile
         val declaracion = BindingPeriferico.declaracion(
             bindingId = BindingPeriferico.nuevoId(),
             userId = identidad.userId,
             deviceId = identidad.deviceId,
             bwcId = bwcId,
             tenant = identidad.tenant,
+            oficial = OficialRotulado(perfil.name, perfil.rank, perfil.officerNum),
             nonceDeLaSesion = nonceDeLaSesion,
             emitidoEn = ahora,
             caducaEn = ahora + BindingPeriferico.VALIDEZ_POR_DEFECTO_MILLIS,
@@ -705,6 +819,9 @@ class BodycamRepository(private val context: Context) {
             // Respuesta a UPLOAD_LIST. Cancelar o reanudar contesta OK:, no una
             // lista nueva: quien lo pida vuelve a llamar a pedirSubidas().
             line.startsWith("UPLOADS:") -> atenderListaDeSubidas(line)
+            // TOKEN_OK / TOKEN_FAIL:<motivo> — respuesta a prestarToken().
+            line.startsWith("TOKEN_FAIL") -> Log.e(TAG, "la camara rechazo el token: $line")
+            line.startsWith("TOKEN_OK") -> Log.i(TAG, "la camara tiene el token")
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
             line.startsWith("BTN_") -> {
                 applyStateChange(line)
@@ -776,6 +893,10 @@ class BodycamRepository(private val context: Context) {
 
     private fun closeQuietly() {
         emparejamiento = null
+        synchronized(writeLock) {
+            canal = null
+            enEspera.clear()
+        }
         // La atadura NO sobrevive al enlace: un corte de Bluetooth es rutinario y
         // se recrea al reconectar, pero mientras no hay enlace la camara no esta
         // sirviendo a nadie y la interfaz no debe decir lo contrario.
