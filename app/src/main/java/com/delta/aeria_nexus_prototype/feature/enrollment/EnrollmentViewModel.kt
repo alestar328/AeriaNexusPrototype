@@ -186,6 +186,7 @@ class EnrollmentViewModel(
         withContext(Dispatchers.IO) {
             enrollment.adoptarDeviceId(alta.deviceId)
             enrollment.instalarCertificado(alta.cadenaPem)
+            alta.anclaDePerifericosPem?.let(enrollment::instalarAnclaDePerifericos)
         }
         // El telefono queda acreditado, pero el alta NO ha terminado: falta la
         // credencial del agente, que es el workflow 3.
@@ -249,8 +250,9 @@ class EnrollmentViewModel(
         val deviceId = enrollment.deviceId()
         withContext(Dispatchers.IO) {
             val firma = credential.firmarSolicitud(csr)
-            val cadena = iam.enrolarAgente(csr, userId, deviceId, firma)
-            credential.instalarCertificado(cadena, userId)
+            val alta = iam.enrolarAgente(csr, userId, deviceId, firma)
+            credential.instalarCertificado(alta.cadenaPem, userId)
+            alta.anclaDePerifericosPem?.let(enrollment::instalarAnclaDePerifericos)
         }
         hecho(AGENTE_ENTREGA, "Issued by AeriaOne · bound to $deviceId")
         identity.credencialCompletada(userId)

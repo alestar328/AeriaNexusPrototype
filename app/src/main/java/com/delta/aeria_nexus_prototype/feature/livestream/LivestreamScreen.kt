@@ -1,13 +1,19 @@
 package com.delta.aeria_nexus_prototype.feature.livestream
 
+import android.Manifest
 import android.view.TextureView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,16 +29,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -40,6 +50,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
+import com.delta.aeria_nexus_prototype.ui.theme.AmbarRevision
+import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
+import com.delta.aeria_nexus_prototype.ui.theme.AzulPrimario
 import com.delta.aeria_nexus_prototype.ui.theme.RojoCritico
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import java.time.Instant
@@ -49,8 +62,9 @@ import java.time.format.DateTimeFormatter
 /**
  * Pantalla de livestream del SOS, a pantalla completa sobre fondo negro.
  * Emisor: previsualiza su propia camara mientras se publica al canal, con el
- * boton para cancelar el SOS. Receptor: ve en vivo la camara del emisor y un
- * aviso de "Signal cut" si este corta la senal.
+ * boton para cancelar el SOS. Receptor: ve en vivo la camara del emisor, le
+ * contesta por voz con el PTT de mantener pulsado y ve un aviso de "Signal cut"
+ * si este corta la senal.
  */
 @Composable
 fun LivestreamScreen(
@@ -58,6 +72,14 @@ fun LivestreamScreen(
     onClose: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val pttActivo by viewModel.pttActivo.collectAsStateWithLifecycle()
+    val pttPisadoPor by viewModel.pttPisadoPor.collectAsStateWithLifecycle()
+
+    // Sin microfono se pide al pulsar. Al concederlo NO se abre solo: es de
+    // mantener pulsado, y el dedo ya se levanto para contestar al dialogo.
+    val pttPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
 
     // Si el emisor cancela su SOS desde otra pantalla, esta ya no tiene sentido.
     LaunchedEffect(uiState.sosActive) {
@@ -83,11 +105,27 @@ fun LivestreamScreen(
                 agent = agente,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    // Sobre el emisor la tarjeta sube para no tapar CANCEL SOS.
-                    .padding(
-                        start = 16.dp,
-                        bottom = if (viewModel.isBroadcaster) 128.dp else 32.dp,
-                    ),
+                    // La tarjeta sube para no tapar CANCEL SOS ni el PTT.
+                    .padding(start = 16.dp, bottom = 128.dp),
+            )
+        }
+
+        if (!viewModel.isBroadcaster) {
+            HoldToTalkButton(
+                activo = pttActivo,
+                pisadoPor = pttPisadoPor,
+                onPulsar = {
+                    if (viewModel.tienePermisoMicrofono()) {
+                        viewModel.pulsarPtt()
+                    } else {
+                        pttPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        false
+                    }
+                },
+                onSoltar = viewModel::soltarPtt,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 32.dp),
             )
         }
 
@@ -234,6 +272,87 @@ private fun CancelSosButton(onClick: () -> Unit, modifier: Modifier = Modifier) 
             fontWeight = FontWeight.Black,
             letterSpacing = 2.sp,
         )
+    }
+}
+
+/**
+ * PTT del receptor: habla mientras se mantiene pulsado y se cierra al soltar.
+ *
+ * El de Operations es conmutador; este no, porque aqui el agente tiene la vista
+ * en el video y un microfono olvidado abierto meteria su ambiente encima de la
+ * voz del companero en apuros. Como alli, el indicador sigue a lo que el
+ * repositorio confirma ([activo]), no al dedo, y pasa a ambar si otro habla a la
+ * vez ([pisadoPor]).
+ */
+@Composable
+private fun HoldToTalkButton(
+    activo: Boolean,
+    pisadoPor: String?,
+    onPulsar: () -> Boolean,
+    onSoltar: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // pointerInput se lanza una vez: sin esto usaria las lambdas de la primera composicion.
+    val pulsar by rememberUpdatedState(onPulsar)
+    val soltar by rememberUpdatedState(onSoltar)
+    val pisado = activo && pisadoPor != null
+    val colorAcento = when {
+        pisado -> AmbarRevision
+        activo -> AzulClaro
+        else -> AzulPrimario.copy(alpha = 0.5f)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (activo) AzulPrimario.copy(alpha = 0.55f) else Color.Black.copy(alpha = 0.6f))
+            .border(if (pisado) 2.dp else 1.dp, colorAcento, RoundedCornerShape(16.dp))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        if (!pulsar()) return@detectTapGestures
+                        // finally: si la pantalla se cierra con el dedo puesto, el
+                        // gesto se cancela y el microfono no puede quedarse abierto.
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            soltar()
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                if (pisado) Icons.Filled.Warning else Icons.Filled.Mic,
+                contentDescription = if (pisado) "Another officer is talking" else "Hold to talk",
+                tint = if (pisado) AmbarRevision else AzulClaro,
+                modifier = Modifier.size(26.dp),
+            )
+            Column {
+                Text(
+                    text = if (activo) "ON AIR — RELEASE TO STOP" else "HOLD TO TALK",
+                    color = if (activo) colorAcento else Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.sp,
+                )
+                if (pisado) {
+                    Text(
+                        text = "$pisadoPor ALSO ON AIR",
+                        color = AmbarRevision,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
     }
 }
 

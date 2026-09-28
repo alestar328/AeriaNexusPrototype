@@ -52,6 +52,7 @@ import com.delta.aeria_nexus_prototype.feature.vault.VaultScreen
 import com.delta.aeria_nexus_prototype.feature.vault.VaultViewModel
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.currentBackStackEntryAsState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
@@ -394,10 +395,13 @@ fun AppNavHost() {
     // Aviso de PTT: un companero esta comunicando por la bodycam. Se monta
     // DESPUES del SOS a proposito — si coinciden, la emergencia manda. Es una
     // banda superior, no un dialogo: no roba el foco ni tapa la pantalla.
+    // En el livestream va debajo de su barra superior: ahi es donde mas se habla
+    // (los companeros contestan al SOS) y taparia el boton de volver.
     PttAvisoOverlay(
         viewModel = viewModel {
             PttAvisoViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
         },
+        margenSuperior = if (entradaActual?.destination?.route == Routes.LIVESTREAM) 60.dp else 0.dp,
     )
 }
 

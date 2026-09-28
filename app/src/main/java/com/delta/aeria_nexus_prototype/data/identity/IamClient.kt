@@ -11,8 +11,16 @@ import org.json.JSONObject
 /** El backend ha contestado que no, o no ha contestado. El mensaje se puede ensenar tal cual. */
 class IamException(message: String) : Exception(message)
 
-/** Lo que devuelve el alta del telefono: el identificador lo decide el backend, no nosotros. */
-data class AltaDeTerminal(val deviceId: String, val cadenaPem: String)
+/**
+ * Lo que devuelve el alta del telefono: el identificador lo decide el backend, no nosotros.
+ *
+ * [anclaDePerifericosPem] es la CA con la que AeriaOne firma a las bodycams; null si
+ * el backend no la manda.
+ */
+data class AltaDeTerminal(val deviceId: String, val cadenaPem: String, val anclaDePerifericosPem: String?)
+
+/** Lo que devuelve el alta del agente. El ancla viaja tambien aqui (ver [AltaDeTerminal]). */
+data class AltaDeAgente(val cadenaPem: String, val anclaDePerifericosPem: String?)
 
 /** Reto emitido por el backend. Se devuelve con su id: el backend solo acepta la respuesta a SU reto. */
 class RetoEmitido(val id: String, val nonce: ByteArray, val emisor: String)
@@ -49,6 +57,7 @@ class IamClient(private val config: UploadConfig) {
         return AltaDeTerminal(
             deviceId = respuesta.getString("device_id"),
             cadenaPem = cadenaPem(respuesta),
+            anclaDePerifericosPem = anclaDePerifericos(respuesta),
         )
     }
 
@@ -63,14 +72,14 @@ class IamClient(private val config: UploadConfig) {
         userId: String,
         deviceId: String,
         firmaDelTerminal: ByteArray,
-    ): String {
+    ): AltaDeAgente {
         val cuerpo = JSONObject()
             .put("csr_pem", csrPem)
             .put("user_id", userId)
             .put("device_id", deviceId)
             .put("device_signature", Base64.getEncoder().encodeToString(firmaDelTerminal))
         val respuesta = post("iam/users/enroll", cuerpo, esperado = HttpURLConnection.HTTP_CREATED)
-        return cadenaPem(respuesta)
+        return AltaDeAgente(cadenaPem(respuesta), anclaDePerifericos(respuesta))
     }
 
     /** `POST iam/challenge`. El nonce lo genera el servidor, que es lo que da frescura a la firma. */
@@ -156,6 +165,13 @@ class IamClient(private val config: UploadConfig) {
         val intermedios = (0 until cadena.length()).map { cadena.getString(it) }
         return (listOf(respuesta.getString("certificate_pem")) + intermedios).joinToString("\n")
     }
+
+    /**
+     * `device_ca_pem`: la CA de dispositivos del tenant, la misma que firma a la W1
+     * cuando se da de alta. Es la que el telefono necesita para aceptarla al emparejar.
+     */
+    private fun anclaDePerifericos(respuesta: JSONObject): String? =
+        respuesta.optString("device_ca_pem").takeIf { it.isNotBlank() }
 
     /**
      * Solo el aparato y nuestra app: el `android_id` del contrato no se manda porque

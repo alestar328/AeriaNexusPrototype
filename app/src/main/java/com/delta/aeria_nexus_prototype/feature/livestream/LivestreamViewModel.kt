@@ -112,10 +112,27 @@ class LivestreamViewModel(
     /** Cancela el SOS propio (solo tiene efecto en modo emisor). */
     fun cancelSos() = agoraRepository.cancelSos()
 
+    // PTT del receptor: contestar por voz al agente del SOS (decision del 28-sep).
+    // Es el mismo PTT propio que el de Operations, pero de mantener pulsado: aqui
+    // el agente esta mirando la pantalla y no debe quedarse el micro abierto.
+    // El emisor no lo necesita: su microfono ya sale con el livestream.
+    val pttActivo: StateFlow<Boolean> = agoraRepository.pttPropioActivo
+    val pttPisadoPor: StateFlow<String?> = agoraRepository.pttPisadoPor
+
+    fun tienePermisoMicrofono(): Boolean = agoraRepository.tienePermisoMicrofono()
+
+    /** Devuelve false si no se pudo abrir; los tonos ya los da el repositorio. */
+    fun pulsarPtt(): Boolean = agoraRepository.iniciarPtt(OfficerSampleData.profile.officerNum)
+
+    fun soltarPtt() = agoraRepository.terminarPtt()
+
     override fun onCleared() {
         // Al salir de la pantalla el receptor deja de escuchar la voz del
         // emisor; el emisor NO corta nada: su SOS sigue hasta que lo cancele.
-        if (!isBroadcaster) agoraRepository.stopWatching(watchUid)
+        if (!isBroadcaster) {
+            agoraRepository.stopWatching(watchUid)
+            soltarPtt()
+        }
     }
 
     companion object {

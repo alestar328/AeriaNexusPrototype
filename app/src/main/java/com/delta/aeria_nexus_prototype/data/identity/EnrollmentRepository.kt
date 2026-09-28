@@ -75,8 +75,9 @@ class EnrollmentRepository(private val context: Context) {
     /**
      * Ancla con la que se valida a los perifericos que se emparejan (workflow 31).
      *
-     * En el modelo real la reparte el backend junto al resto de la politica
-     * (workflow 65). Aqui se instala en el alta y se guarda en la carpeta privada.
+     * Es el `device_ca_pem` que AeriaOne devuelve en el alta del terminal y en la del
+     * agente, y se guarda en la carpeta privada. El intent `peripheral_anchor` de
+     * MainActivity queda para telefonos dados de alta antes de guardarla.
      * Sin ancla no hay emparejamiento posible, y eso es lo correcto: aceptar a
      * cualquier camara que se identifique seria peor que no comprobar nada, porque
      * daria la impresion de que si se comprueba.

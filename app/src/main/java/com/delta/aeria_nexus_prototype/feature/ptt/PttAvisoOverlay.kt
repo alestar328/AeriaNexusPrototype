@@ -34,6 +34,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,9 +61,12 @@ private val BordeAviso = Color(0x333B82F6)
  * permanente para la bodycam (AgoraRepository.escucharBodycam) y al recibir el
  * anuncio "ptt_on" para el PTT de un telefono — asi que la voz se oye aunque esta
  * pantalla no llegue a montarse.
+ *
+ * [margenSuperior] baja la banda en pantallas con su propia barra arriba (el
+ * livestream), para no tapar el boton de volver justo cuando alguien habla.
  */
 @Composable
-fun PttAvisoOverlay(viewModel: PttAvisoViewModel) {
+fun PttAvisoOverlay(viewModel: PttAvisoViewModel, margenSuperior: Dp = 0.dp) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -74,6 +78,7 @@ fun PttAvisoOverlay(viewModel: PttAvisoViewModel) {
             Row(
                 modifier = Modifier
                     .statusBarsPadding()
+                    .padding(top = margenSuperior)
                     .padding(horizontal = 12.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
