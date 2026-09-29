@@ -11,12 +11,14 @@ import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.identity.PinLocal
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
+import com.delta.aeria_nexus_prototype.data.identity.VigilanteDeCaducidad
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import com.delta.aeria_nexus_prototype.data.upload.UploadSessions
 import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
+import kotlinx.coroutines.flow.combine
 
 /**
  * Contenedor de dependencias manual del proyecto. Se inicializa una sola vez
@@ -32,6 +34,8 @@ object AppContainer {
     lateinit var agoraRepository: AgoraRepository
         private set
     lateinit var bodycamRepository: BodycamRepository
+        private set
+    lateinit var ajustesSos: AjustesSos
         private set
     lateinit var buscadorBodycam: BuscadorBodycam
         private set
@@ -69,6 +73,8 @@ object AppContainer {
         private set
     lateinit var proxyRepository: ProxyRepository
         private set
+    lateinit var vigilanteDeCaducidad: VigilanteDeCaducidad
+        private set
 
     /** Diario de auditoria local (workflow 61). Lo primero en crearse: todos registran en el. */
     lateinit var auditoria: AuditoriaLocal
@@ -95,12 +101,19 @@ object AppContainer {
         // Material que entra de un periferico y todavia no es de ningun incidente.
         rawEvidenceRepository = RawEvidenceRepository(db.rawEvidenceDao(), incidentRepository)
         batteryRepository = BatteryRepository(appContext)
+        ajustesSos = AjustesSos(appContext)
+        bodycamRepository = BodycamRepository(appContext, sesionBackend, ajustesSos)
         agoraRepository = AgoraRepository(
             context = appContext,
             locationRepository = locationRepository,
             sosNotifier = SosNotifier(appContext, uploadConfig),
+            ajustesSos = ajustesSos,
+            // Solo con el enlace vivo: una bodycam de la que no llega nada no se
+            // puede ofrecer como la camara de este agente.
+            uidBodycamPropia = {
+                bodycamRepository.uidAgoraBodycam.takeIf { bodycamRepository.isConnected }
+            },
         )
-        bodycamRepository = BodycamRepository(appContext, sesionBackend)
         buscadorBodycam = BuscadorBodycam(appContext)
         gafasRepository = GafasRepository(appContext)
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
@@ -192,7 +205,9 @@ object AppContainer {
         // esto, una camara emparejada seguiria operando en nombre de un agente que
         // ya no esta de servicio.
         identityRepository.alCerrarSesion = { motivo ->
-            bodycamRepository.desatar(motivo)
+            // Soltar y no solo desatar: si el enlace sigue abierto, el telefono del
+            // agente que se va retiene la W1 y el siguiente no puede cogerla.
+            bodycamRepository.soltar(motivo)
             // Workflow 30: la boveda se sella con la sesion. Si no, quien coja el
             // telefono despues de desbloquearlo veria la evidencia abierta del agente
             // anterior, y sus copias descifradas seguirian en la cache.
@@ -202,6 +217,26 @@ object AppContainer {
             EvidenceVault.bloquear()
             vaultRepository.clearDecrypted()
         }
+        vigilarCaducidad()
+    }
+
+    /**
+     * Workflow 53: con la credencial caducada el telefono se bloquea, pero no en
+     * mitad de una grabacion. Cuenta cualquier captura, la del telefono y la de los
+     * perifericos: bloquear deshace la atadura con la bodycam.
+     */
+    private fun vigilarCaducidad() {
+        val grabando = combine(
+            incidentRepository.activeIncident,
+            localEvidenceRepository.grabandoAudio,
+            agoraRepository.sosActive,
+            bodycamRepository.isRecording,
+            gafasCommandRepository.grabando,
+        ) { incidente, audio, sos, bodycam, gafas ->
+            incidente?.isRecording == true || audio || sos || bodycam || gafas
+        }
+        vigilanteDeCaducidad = VigilanteDeCaducidad(identityRepository, auditoria, grabando)
+        vigilanteDeCaducidad.arrancar()
     }
 
     /** Reintenta la evidencia y los manifiestos que quedaron sin entregar. */

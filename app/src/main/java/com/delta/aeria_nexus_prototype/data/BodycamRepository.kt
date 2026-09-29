@@ -116,6 +116,7 @@ enum class EnlaceAutenticado {
 class BodycamRepository(
     private val context: Context,
     private val sesionBackend: SesionBackend,
+    private val ajustesSos: AjustesSos,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -179,6 +180,10 @@ class BodycamRepository(
     val state: StateFlow<BodycamState> = _state.asStateFlow()
 
     val isConnected: Boolean get() = _state.value == BodycamState.CONNECTED
+
+    init {
+        pasarTonoSos()
+    }
 
     // La MAC no es secreta (la W1 la anuncia a cualquiera que busque), por eso
     // basta con preferencias en claro.
@@ -412,26 +417,33 @@ class BodycamRepository(
 
     /** Envia un comando del protocolo; el salto de linea se agrega aqui. */
     fun sendCommand(command: String) {
-        scope.launch {
-            try {
-                // Un solo escritor a la vez: sin esto, comandos concurrentes
-                // podrian entrelazar sus bytes dentro de la misma linea. Con el
-                // canal cifrado, ademas, el contador del IV tiene que avanzar en el
-                // mismo orden en que salen los bytes: se cifra aqui dentro.
-                synchronized(writeLock) {
-                    val activo = canal
-                    if (activo == null && emparejamiento != null && !command.startsWith("AUTH_")) {
-                        if (command != "STATUS") enEspera += command
-                        return@synchronized
-                    }
-                    val linea = activo?.cifrar(command) ?: command
-                    output?.write("$linea\n".toByteArray(Charsets.UTF_8))
-                    output?.flush()
+        scope.launch { escribir(command) }
+    }
+
+    /**
+     * Escribe [command] en el hilo que llama. Cada sendCommand va en su propia
+     * corrutina y no garantiza el orden; quien necesita que varias ordenes salgan
+     * una detras de otra (ver [soltar]) usa esto directamente.
+     */
+    private fun escribir(command: String) {
+        try {
+            // Un solo escritor a la vez: sin esto, comandos concurrentes
+            // podrian entrelazar sus bytes dentro de la misma linea. Con el
+            // canal cifrado, ademas, el contador del IV tiene que avanzar en el
+            // mismo orden en que salen los bytes: se cifra aqui dentro.
+            synchronized(writeLock) {
+                val activo = canal
+                if (activo == null && emparejamiento != null && !command.startsWith("AUTH_")) {
+                    if (command != "STATUS") enEspera += command
+                    return
                 }
-            } catch (e: IOException) {
-                // El cierre despierta a readUntilClosed y dispara el reintento.
-                closeQuietly()
+                val linea = activo?.cifrar(command) ?: command
+                output?.write("$linea\n".toByteArray(Charsets.UTF_8))
+                output?.flush()
             }
+        } catch (e: IOException) {
+            // El cierre despierta a readUntilClosed y dispara el reintento.
+            closeQuietly()
         }
     }
 
@@ -646,6 +658,21 @@ class BodycamRepository(
     }
 
     /**
+     * La W1 hace sonar su propio tono al entrar en SOS, y tiene que ser el que el
+     * agente eligio en su perfil: se le manda en cada conexion y en cada cambio.
+     * No espera al enlace autenticado como el token porque no es secreto; si se
+     * esta emparejando, sendCommand lo deja en espera y sale por el canal cifrado.
+     */
+    private fun pasarTonoSos() {
+        scope.launch {
+            combine(_state, ajustesSos.tono) { estado, tono -> estado to tono }
+                .collectLatest { (estado, tono) ->
+                    if (estado == BodycamState.CONNECTED) sendCommand("SOS_TONE:${tono.name}")
+                }
+        }
+    }
+
+    /**
      * Ata la camara al agente que tiene la sesion abierta (workflow 33).
      *
      * La atadura es una declaracion firmada CON LA CLAVE DEL AGENTE, no con la del
@@ -703,8 +730,39 @@ class BodycamRepository(
      * con acercarse a la camara para dejar al agente sin atribucion en mitad de un
      * incidente, y la evidencia de ese rato no podria decir quien la grabo.
      */
-    fun desatar(motivo: BindingPeriferico.MotivoDeFin) {
-        val activo = _binding.value ?: return
+    /**
+     * El agente ha terminado con la camara (se cierra su sesion): se desata, se le
+     * retira el token prestado y se corta el enlace, por este orden.
+     *
+     * Cortar es lo que permite rotar la camara entre agentes: la W1 solo acepta un
+     * telefono a la vez, y el bucle de reconexion del telefono saliente la volveria
+     * a coger tras cualquier caida. Despues de esto no se vuelve a conectar sola:
+     * hace falta que un agente con sesion pulse conectar en el controlador.
+     *
+     * Lo que este grabando o emitiendo la camara sigue: vive en la W1, no en el
+     * enlace. La firma del fin se prepara aqui, en el hilo que llama, porque quien
+     * cierra la sesion retira la clave del agente justo despues.
+     */
+    fun soltar(motivo: BindingPeriferico.MotivoDeFin) {
+        val ordenDeFin = ordenDeDesatar(motivo)
+        val teniaToken = _enlaceAutenticado.value == EnlaceAutenticado.SI
+        scope.launch {
+            ordenDeFin?.let(::escribir)
+            if (teniaToken) escribir("TOKEN_CLEAR")
+            // Unos ms para que las dos lineas salgan del buffer antes de cerrar. Si
+            // se pierden, la W1 retira atadura y token igual al caerse el enlace.
+            delay(MARGEN_ANTES_DE_SOLTAR_MILLIS)
+            disconnect()
+            Log.i(TAG, "bodycam soltada al cerrar la sesion: ${motivo.name}")
+        }
+    }
+
+    /**
+     * Quita la atadura en vigor y devuelve la orden UNBIND firmada que hay que
+     * mandar a la camara, o null si no habia atadura o ya no se puede firmar.
+     */
+    private fun ordenDeDesatar(motivo: BindingPeriferico.MotivoDeFin): String? {
+        val activo = _binding.value ?: return null
         val credential = AppContainer.credentialRepository
         _binding.value = null
 
@@ -714,7 +772,7 @@ class BodycamRepository(
             // lo que se pierde es el aviso inmediato a la camara.
             Log.w(TAG, "sesion ya cerrada: la atadura de ${activo.bwcId} caducara sola")
             auditarDesatado(activo, motivo, firmado = false)
-            return
+            return null
         }
         val declaracion = BindingPeriferico.declaracionDeFin(
             bindingId = activo.bindingId,
@@ -723,15 +781,13 @@ class BodycamRepository(
         )
         val firma = credential.firmarRetoDeSesion(declaracion.toByteArray(Charsets.UTF_8))
         val codificador = Base64.getEncoder()
-        sendCommand(
-            listOf(
-                "UNBIND",
-                codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
-                codificador.encodeToString(firma),
-            ).joinToString(":"),
-        )
         Log.i(TAG, "atadura de ${activo.bwcId} deshecha: ${motivo.name}")
         auditarDesatado(activo, motivo, firmado = true)
+        return listOf(
+            "UNBIND",
+            codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
+            codificador.encodeToString(firma),
+        ).joinToString(":")
     }
 
     /** Si el fin no va firmado, la camara no se entera hasta que caduque: queda escrito. */
@@ -824,6 +880,9 @@ class BodycamRepository(
             line.startsWith("TOKEN_OK") -> Log.i(TAG, "la camara tiene el token")
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
             line.startsWith("BTN_") -> {
+                // Queda en el log porque es lo unico que dice, a posteriori, cuando
+                // se abrio o se cerro cada cosa en la camara (SOS, micro, grabacion).
+                Log.i(TAG, "Aviso de la camara: $line")
                 applyStateChange(line)
                 _buttonEvents.tryEmit(line)
             }
@@ -990,6 +1049,9 @@ class BodycamRepository(
 
     companion object {
         private const val TAG = "BodycamRepository"
+
+        // Espera entre las ultimas ordenes al soltar la camara y el cierre del socket.
+        private const val MARGEN_ANTES_DE_SOLTAR_MILLIS = 300L
 
         private const val FICHERO_PREFS = "aeria_bodycam"
         private const val CLAVE_MAC = "mac"

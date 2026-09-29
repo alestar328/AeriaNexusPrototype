@@ -47,7 +47,9 @@ fun TrustGate() {
             TrustState.ACTIVE, TrustState.OFFLINE_GRANTED -> AppNavHost()
 
             TrustState.LOCKED, TrustState.SESSION_EXPIRED -> LockScreen(
-                viewModel = viewModel { LockViewModel(identityRepository, AppContainer.iamClient) },
+                viewModel = viewModel {
+                    LockViewModel(identityRepository, AppContainer.iamClient, AppContainer.vigilanteDeCaducidad.estado)
+                },
             )
 
             // El asistente de alta lleva su propio progreso, asi que las dos ramas

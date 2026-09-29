@@ -113,6 +113,12 @@ fun MapScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    // Agente en SOS cuyo marcador se acaba de tocar. Se guarda el uid y no el
+    // marcador para que el dialogo lea siempre el estado vivo: si el SOS termina
+    // con el dialogo abierto, se cierra solo en lugar de ofrecer un directo muerto.
+    var uidAgenteTocado by remember { mutableStateOf<Int?>(null) }
+    val agenteTocado = uiState.remoteAgents.firstOrNull { it.uid == uidAgenteTocado && it.tieneSos }
+
     var hasLocationPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -195,7 +201,10 @@ fun MapScreen(
                             annotationAnchor { anchor(ViewAnnotationAnchor.CENTER) }
                         },
                     ) {
-                        RemoteAgentMarkerView(agente)
+                        RemoteAgentMarkerView(
+                            agente = agente,
+                            onClick = { uidAgenteTocado = agente.uid },
+                        )
                     }
                 }
             }
@@ -242,6 +251,17 @@ fun MapScreen(
                     }
                 }
             }
+        }
+
+        agenteTocado?.let { agente ->
+            SosLivestreamDialog(
+                agente = agente,
+                onOpenLivestream = { uid ->
+                    uidAgenteTocado = null
+                    onOpenLivestream(uid)
+                },
+                onDismiss = { uidAgenteTocado = null },
+            )
         }
 
         if (!hasLocationPermission) {
@@ -378,12 +398,19 @@ private fun RecenterButton(
 
 /**
  * Marcador de otro agente: punto dorado con anillo pulsante mientras emite;
- * gris y con la hora de su ultimo mensaje cuando pierde la senal.
+ * gris y con la hora de su ultimo mensaje cuando pierde la senal. Solo se puede
+ * tocar si el agente esta en SOS: abre el aviso para ver su directo.
  */
 @Composable
-private fun RemoteAgentMarkerView(agente: RemoteAgentMarker) {
+private fun RemoteAgentMarkerView(agente: RemoteAgentMarker, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .clickable(enabled = agente.tieneSos, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
             if (!agente.isStale) {
                 val pulso by rememberInfiniteTransition(label = "pulsoAgente").animateFloat(
                     initialValue = 0f,

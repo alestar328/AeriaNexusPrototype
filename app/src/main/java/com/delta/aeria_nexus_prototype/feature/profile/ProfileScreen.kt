@@ -58,6 +58,7 @@ import com.delta.aeria_nexus_prototype.ui.theme.RojoSuave
 import com.delta.aeria_nexus_prototype.ui.theme.SuperficiePresionada
 import com.delta.aeria_nexus_prototype.ui.theme.TextoPrincipal
 import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
+import com.delta.aeria_nexus_prototype.data.TonoSos
 import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 
 /** Perfil del agente: datos administrativos, idioma, dispositivos y la sesion. */
@@ -70,6 +71,8 @@ fun ProfileScreen(
     onOpenAuditLog: () -> Unit,
     /** Durante un SOS no se puede terminar el turno: la emergencia manda. */
     sosActivo: Boolean,
+    tonoSos: TonoSos,
+    onCambiarTonoSos: (TonoSos) -> Unit,
 ) {
     var confirmandoFinDeTurno by remember { mutableStateOf(false) }
 
@@ -134,6 +137,11 @@ fun ProfileScreen(
             "GPS is enabled by agency policy. Evidence is automatically geotagged. " +
                 "Officer breadcrumb tracking is admin-controlled.",
         )
+
+        SectionLabel("Emergency")
+        CardSurface {
+            SelectorTonoSos(tono = tonoSos, onCambiar = onCambiarTonoSos)
+        }
 
         // Al final y no arriba: son acciones de una vez por turno, y la de terminar
         // no debe quedar donde se pulsa buscando otra cosa.

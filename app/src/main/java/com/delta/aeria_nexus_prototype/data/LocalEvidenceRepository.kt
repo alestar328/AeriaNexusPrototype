@@ -16,6 +16,9 @@ import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -204,6 +207,11 @@ class LocalEvidenceRepository(private val context: Context) {
     private var recorder: MediaRecorder? = null
     private var audioTarget: MediaTarget? = null
 
+    private val _grabandoAudio = MutableStateFlow(false)
+
+    /** True mientras hay una nota de audio en curso. La mira el vigilante de caducidad. */
+    val grabandoAudio: StateFlow<Boolean> = _grabandoAudio.asStateFlow()
+
     // Scope de aplicacion, igual que en EvidenceUploader: cerrar una nota de audio
     // no puede depender de que siga viva la pantalla que la empezo.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -228,6 +236,7 @@ class LocalEvidenceRepository(private val context: Context) {
             nuevo.start()
             recorder = nuevo
             audioTarget = destino
+            _grabandoAudio.value = true
             true
         } catch (e: Exception) {
             Log.w(TAG, "No se pudo iniciar la grabacion de audio", e)
@@ -260,6 +269,7 @@ class LocalEvidenceRepository(private val context: Context) {
         val destino = audioTarget
         recorder = null
         audioTarget = null
+        _grabandoAudio.value = false
         return try {
             activo.stop()
             activo.release()

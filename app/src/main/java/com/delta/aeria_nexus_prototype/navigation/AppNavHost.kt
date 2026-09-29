@@ -4,7 +4,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,6 +32,9 @@ import com.delta.aeria_nexus_prototype.feature.gafas.GafasControlViewModel
 import com.delta.aeria_nexus_prototype.feature.incidentdetail.IncidentDetailScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListViewModel
+import com.delta.aeria_nexus_prototype.data.identity.FaseDeCaducidad
+import com.delta.aeria_nexus_prototype.feature.credencial.ALTO_BANDA_GRACIA
+import com.delta.aeria_nexus_prototype.feature.credencial.CredencialEnGraciaOverlay
 import com.delta.aeria_nexus_prototype.feature.livestream.LivestreamScreen
 import com.delta.aeria_nexus_prototype.feature.livestream.LivestreamViewModel
 import com.delta.aeria_nexus_prototype.feature.map.MapScreen
@@ -271,6 +277,7 @@ fun AppNavHost() {
 
         composable(Routes.PROFILE) {
             val sosActivo by AppContainer.agoraRepository.sosActive.collectAsStateWithLifecycle()
+            val tonoSos by AppContainer.ajustesSos.tono.collectAsStateWithLifecycle()
             ProfileScreen(
                 profile = repositorio.officerProfile,
                 onOpenVault = { navController.navigate(Routes.VAULT) },
@@ -280,6 +287,8 @@ fun AppNavHost() {
                 onEndShift = { AppContainer.identityRepository.terminarTurno() },
                 onOpenAuditLog = { navController.navigate(Routes.AUDIT_LOG) },
                 sosActivo = sosActivo,
+                tonoSos = tonoSos,
+                onCambiarTonoSos = AppContainer.ajustesSos::cambiarTono,
             )
         }
 
@@ -395,19 +404,33 @@ fun AppNavHost() {
     // Aviso de PTT: un companero esta comunicando por la bodycam. Se monta
     // DESPUES del SOS a proposito — si coinciden, la emergencia manda. Es una
     // banda superior, no un dialogo: no roba el foco ni tapa la pantalla.
-    // En el livestream va debajo de su barra superior: ahi es donde mas se habla
-    // (los companeros contestan al SOS) y taparia el boton de volver.
+    // En el livestream las bandas van debajo de su barra superior: ahi es donde mas
+    // se habla (los companeros contestan al SOS) y taparian volver y MUTED. Esa
+    // barra lleva ademas el hueco de la barra de estado, que cambia de un telefono
+    // a otro: con 60 dp fijos la banda caia encima (visto en el Samsung, 2026-09-29).
+    val altoBarraDeEstado = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val margenBandas = if (entradaActual?.destination?.route == Routes.LIVESTREAM) {
+        altoBarraDeEstado + ALTO_BARRA_DIRECTO
+    } else {
+        0.dp
+    }
+    val caducidad by AppContainer.vigilanteDeCaducidad.estado.collectAsStateWithLifecycle()
+    val enGracia = caducidad.fase == FaseDeCaducidad.EN_GRACIA
+    CredencialEnGraciaOverlay(visible = enGracia, margenSuperior = margenBandas)
     PttAvisoOverlay(
         viewModel = viewModel {
             PttAvisoViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
         },
-        margenSuperior = if (entradaActual?.destination?.route == Routes.LIVESTREAM) 60.dp else 0.dp,
+        margenSuperior = margenBandas + if (enGracia) ALTO_BANDA_GRACIA else 0.dp,
     )
 }
 
 /** Lee el argumento id de la ruta; todas las rutas de detalle lo requieren. */
 private fun androidx.navigation.NavBackStackEntry.requireId(): String =
     requireNotNull(arguments?.getString("id")) { "La ruta requiere el argumento id" }
+
+// Barra superior del directo: boton de 44 dp mas 8 dp de margen arriba y abajo.
+private val ALTO_BARRA_DIRECTO = 60.dp
 
 // Fundidos cortos: mas de 300 ms se siente lento en uso de campo.
 private const val FADE_IN_MILLIS = 220

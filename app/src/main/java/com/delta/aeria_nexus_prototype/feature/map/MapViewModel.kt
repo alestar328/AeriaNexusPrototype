@@ -29,7 +29,13 @@ data class RemoteAgentMarker(
     val isStale: Boolean,
     // Hora del ultimo mensaje recibido, mostrada solo cuando no hay senal.
     val lastSeenLabel: String,
-)
+    // Directos de SOS de este agente que se pueden abrir desde su marcador: el de
+    // su telefono y el de la bodycam que lleva. Null el que no este emitiendo.
+    val sosTelefonoUid: Int? = null,
+    val sosBodycamUid: Int? = null,
+) {
+    val tieneSos: Boolean get() = sosTelefonoUid != null || sosBodycamUid != null
+}
 
 /**
  * SOS vigente de otro agente, anclado a su posicion en el mapa. Persiste
@@ -136,9 +142,12 @@ class MapViewModel(
             }
         }
         viewModelScope.launch {
-            combine(agoraRepository.remoteAgents, tick) { agentes, _ -> agentes }
-                .collect { agentes ->
-                    val marcadores = agentes.values.map { it.toMarker() }
+            combine(
+                agoraRepository.remoteAgents,
+                agoraRepository.activeSosAlerts,
+                tick,
+            ) { agentes, alertas, _ -> agentes.values.map { it.toMarker(alertas) } }
+                .collect { marcadores ->
                     _uiState.update { it.copy(remoteAgents = marcadores) }
                 }
         }
@@ -150,7 +159,7 @@ class MapViewModel(
                 agoraRepository.activeSosAlerts,
                 agoraRepository.remoteAgents,
             ) { alertas, agentes ->
-                alertas.values.mapNotNull { it.toSosMarker(agentes[it.uid]) }
+                alertas.values.mapNotNull { it.toSosMarker(posicionDelEmisor(it.uid, agentes)) }
             }.collect { marcadores ->
                 _uiState.update { it.copy(activeSos = marcadores) }
             }
@@ -168,10 +177,17 @@ class MapViewModel(
         agoraRepository.dismissSignalCut(uid)
     }
 
+    /**
+     * Donde esta quien emite el directo [uid]: su propio telefono o, si es una
+     * bodycam, el telefono que anuncia llevarla.
+     */
+    private fun posicionDelEmisor(uid: Int, agentes: Map<Int, RemoteAgent>): RemoteAgent? =
+        agentes[uid] ?: agentes.values.firstOrNull { it.bodycamUid == uid }
+
     private fun SosAlert.toSosMarker(posicionViva: RemoteAgent?): SosMarker? {
         // La posicion de la red esta mas fresca que la de la alerta (el emisor
         // sigue compartiendo ubicacion durante el SOS); sin ninguna de las dos
-        // no hay donde anclar el marcador (caso bodycam, que no emite GPS).
+        // no hay donde anclar el marcador (bodycam sin telefono que la anuncie).
         val lat = posicionViva?.latitude ?: latitude ?: return null
         val lng = posicionViva?.longitude ?: longitude ?: return null
         return SosMarker(
@@ -198,7 +214,7 @@ class MapViewModel(
         )
     }
 
-    private fun RemoteAgent.toMarker(): RemoteAgentMarker {
+    private fun RemoteAgent.toMarker(alertas: Map<Int, SosAlert>): RemoteAgentMarker {
         val sinSenal = System.currentTimeMillis() - lastSeenMillis > STALE_AFTER_MILLIS
         return RemoteAgentMarker(
             uid = uid,
@@ -206,6 +222,8 @@ class MapViewModel(
             longitude = longitude,
             isStale = sinSenal,
             lastSeenLabel = if (sinSenal) "Last seen: ${formatClock(lastSeenMillis)}" else "",
+            sosTelefonoUid = uid.takeIf { it in alertas },
+            sosBodycamUid = bodycamUid?.takeIf { it in alertas },
         )
     }
 

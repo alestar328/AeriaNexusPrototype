@@ -33,6 +33,8 @@ enum class TipoEvento(val familia: String, val texto: String) {
     PIN_CAMBIADO("session", "PIN changed"),
     PIN_CAMBIO_FALLIDO("session", "PIN change could not be stored"),
     SESION_CERRADA("session", "Session closed"),
+    CREDENCIAL_EN_GRACIA("session", "Credential expired during a recording"),
+    CREDENCIAL_CADUCADA("session", "Credential expired: phone out of service"),
 
     BODYCAM_ENLACE("peripheral", "Bodycam link checked"),
     ATADURA_CREADA("peripheral", "Bodycam bound to officer"),
@@ -44,6 +46,9 @@ enum class TipoEvento(val familia: String, val texto: String) {
     BOVEDA_CONTRASENA_INCORRECTA("evidence", "Wrong vault password"),
     BOVEDA_CERRADA("evidence", "Evidence vault sealed"),
     EVIDENCIA_VISUALIZADA("evidence", "Evidence opened"),
+
+    SOS_MICROFONO("emergency", "SOS microphone switched"),
+    SOS_SILENCIO_ENTRANTE("emergency", "Other officers muted during SOS"),
 }
 
 /** Quien y desde donde, en el momento del evento (§14.1). */

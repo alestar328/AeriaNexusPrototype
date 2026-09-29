@@ -448,6 +448,20 @@ class IdentityRepository(
         }
     }
 
+    /**
+     * La credencial ha caducado y no se graba nada (workflow 53): se cierra la sesion
+     * como en [lock] y el telefono queda fuera de servicio. No se persiste, igual que
+     * los demas bloqueos: al reiniciar arranca en LOCKED y el vigilante vuelve a
+     * bloquearlo en cuanto mira la fecha.
+     */
+    fun bloquearPorCredencialCaducada() {
+        if (_status.value.state == TrustState.BLOCKED) return
+        if (sesionActual != null) lock(BindingPeriferico.MotivoDeFin.CADUCIDAD)
+        _status.update {
+            it.copy(state = TrustState.BLOCKED, blockReason = TrustBlockReason.CERTIFICATE_EXPIRED)
+        }
+    }
+
     /** El agente ha arrancado el alta del terminal (workflow 12, paso 1). */
     fun altaEnCurso() {
         _status.update { it.copy(state = TrustState.ENROLLING) }

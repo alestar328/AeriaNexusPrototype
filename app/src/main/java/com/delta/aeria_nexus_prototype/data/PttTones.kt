@@ -25,6 +25,9 @@ private const val TAG = "NexusTone"
  *   • [entra]     pitido agudo suelto      "otro ha abierto el canal"
  *   • [sale]      pitido medio suelto      "el otro ha soltado, canal libre"
  *   • [pisando]   tres pitidos agudos      "hay dos microfonos abiertos a la vez"
+ *   • [sosActivado]        dos iguales y uno agudo   "tu SOS ha salido"
+ *   • [silenciarEntrante]  bajada lenta              "ya no oyes a los demas"
+ *   • [abrirEntrante]      subida lenta              "vuelves a oir a los demas"
  *
  * La regla que separa unos de otros sin pensar: **dos notas son tuyas, una nota
  * es de otro, tres notas sois los dos.** [entra] y [sale] los dispara
@@ -46,6 +49,7 @@ object PttTones {
     private const val AMPLITUD    = 0.35   // el volumen se fija en la propia onda
     private const val AMPLITUD_RX = 0.22   // lo que llega de fuera suena mas bajo: el
                                            // pitido no debe tapar la primera palabra
+    private const val AMPLITUD_SOS_DISCRETO = 0.10
 
     /**
      * Los tonos suenan fuera del hilo que los pide y de uno en uno. Que no
@@ -80,6 +84,27 @@ object PttTones {
      * agente que habla no se enteraba de que le estaban pisando.
      */
     fun pisando() = reproducir(listOf(1760 to 60, 0 to 40, 1760 to 60, 0 to 40, 1760 to 60))
+
+    /**
+     * El SOS propio ha salido. Lo oye solo quien lo lanza, y con el volumen que el
+     * agente eligio en su perfil: un pitido en un escondite o con un rehen puede
+     * delatarle, por eso existe [TonoSos.OFF].
+     *
+     * Devuelve lo que dura, en ms, para que quien lo pide espere a que termine
+     * antes de abrir el microfono: si no, el pitido saldria en el directo.
+     */
+    fun sosActivado(tono: TonoSos): Long {
+        if (tono == TonoSos.OFF) return 0
+        val tramos = listOf(988 to 90, 0 to 40, 988 to 90, 0 to 40, 1480 to 160)
+        reproducir(tramos, if (tono == TonoSos.HIGH) AMPLITUD else AMPLITUD_SOS_DISCRETO)
+        return tramos.sumOf { it.second }.toLong()
+    }
+
+    /** Durante el SOS, las voces de los demas dejan de sonar en este aparato. */
+    fun silenciarEntrante() = reproducir(listOf(660 to 60, 0 to 40, 440 to 180))
+
+    /** Durante el SOS, las voces de los demas vuelven a sonar. */
+    fun abrirEntrante() = reproducir(listOf(440 to 60, 0 to 40, 660 to 180))
 
     /** tramos = pares (frecuencia en Hz, duracion en ms). Frecuencia 0 = silencio. */
     private fun reproducir(tramos: List<Pair<Int, Int>>, amplitud: Double = AMPLITUD) {

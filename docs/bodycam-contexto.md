@@ -104,6 +104,8 @@ IR_ON / IR_OFF  → OK:...
 LED:N           → OK:LED:N        (0=off, 1-6 rojo, 7 verde, 8 rojo parpadeo, 9 amarillo parpadeo, 10 azul)
 GPS_ON / GPS_OFF→ OK:...          (ver nota GPS)
 TORCH_ON / TORCH_OFF → OK:...
+SOS_TONE:OFF|LOW|HIGH → OK:SOS_TONE:<valor>  (tono de SOS de la W1; lo manda el telefono al conectar
+                  y al cambiarlo en el perfil; se guarda en la W1, por defecto LOW; desde 2026-09-29)
 ```
 
 ### Respuesta STATUS (JSON en una linea)
@@ -132,6 +134,19 @@ Interpretacion en el telefono (asi lo hace map_controller.dart y asi debe
 portarse): `BTN_STREAM_START` → activar video del uid 9001 + disparar el flujo
 SOS; `BTN_STREAM_STOP` → cerrar popup/flujo; `BTN_REC_*` → solo indicador REC,
 jamas SOS.
+
+**Desde el 2026-09-29 (SOS con directo):**
+- El telefono atado a la W1 anade `"bwc":<uid Agora de la W1>` a sus mensajes
+  `location` del data stream. Los demas telefonos atan asi el SOS de la W1 (que no
+  tiene GPS) al marcador de ese agente en el mapa, y al tocarlo abren su directo.
+- F2 en SOS: pulsacion simple = abrir/cerrar el micro, que arranca abierto;
+  doble pulsacion (< 600 ms) = silenciar/reabrir lo que entra, solo en el altavoz
+  de la W1. La simple se aplica al vencer la ventana. El firmware solo avisa al
+  SOLTAR F2 y a 1 s mantenido inyecta BACK, por eso no hay pulsacion larga.
+  Hecho en BodyCamServer el 2026-09-29, sin probar en la W1.
+- Desde entonces el campo "ptt" del STATUS y BTN_PTT_ON/OFF son el estado del
+  MICRO de la W1, lo abra el PTT o el SOS: al abrirse el micro del SOS llega un
+  BTN_PTT_ON aunque nadie haya tocado F2.
 
 ### Nota GPS de la bodycam (verificado 2026-06-02)
 

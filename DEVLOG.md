@@ -6,6 +6,125 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-09-29 (3) — El móvil suelta la W1 al cerrar sesión
+
+Encargo del usuario, transmitido por la sesión BC. Compila; **sin probar en aparato**.
+
+- **El problema:** al cerrar sesión solo se desataba y el RFCOMM seguía abierto. La W1 admite un
+  solo teléfono a la vez, y el del agente que se iba la volvía a coger tras cada caída, así que
+  bloqueaba la rotación de la cámara entre agentes.
+- **Ahora:** `BodycamRepository.soltar(motivo)` manda, en orden, UNBIND firmado, `TOKEN_CLEAR` si
+  el enlace estaba autenticado y, 300 ms después, `disconnect()`. Para garantizar el orden,
+  `escribir()` es la escritura síncrona y `sendCommand` solo la lanza en una corrutina.
+  `desatar()` desaparece.
+- **No reconecta sola:** nada llama a `connect()` al abrir la app; solo lo hace el controlador,
+  con sesión. La MAC se conserva.
+- La sesión se cierra en: fin de turno, caducidad (nunca grabando), PIN agotado al cambiarlo y
+  reintentar en BLOCKED. No se cierra al bloquearse la pantalla.
+- **Verificado en el Samsung y la W1 (17:31):** fin de turno → "bodycam soltada al cerrar la
+  sesion: FIN_DE_TURNO"; la W1 reabre su socket 1 s después, y en 75 s el Samsung no reconecta.
+  UNBIND y TOKEN_CLEAR no salieron porque en el piloto no hay atadura ni enlace autenticado.
+  **Siguen sin verificar** hasta tener un teléfono dado de alta contra el backend.
+
+**Pruebas del SOS con directo en el Samsung y la W1 (misma tarde):** verificados `SOS_TONE`, el
+tono, MIC/OTHERS, el restablecimiento al cancelar, el diario, el directo de la W1 con MUTED y el
+micro de la W1 en SOS. Arreglados: la banda de PTT tapaba la barra del directo y "OTHERS
+MUTED" se partía en dos líneas. Ahora el teléfono registra en el log los `BTN_*` de la cámara.
+Pendiente: la doble F2 y la pulsación simple en SOS, y el mapa, que necesita un segundo teléfono.
+
+---
+
+## 2026-09-29 (2) — SOS con directo: mapa, silencios, micro del emisor y tono
+
+Encargo del usuario. Compila y pasan los tests; **nada probado en aparato** (hace falta
+un segundo teléfono y la W1).
+
+**Decisiones del usuario:**
+- El PTT del receptor en el directo pasa a conmutador. El emisor por teléfono tiene
+  un botón de micro que arranca ABIERTO.
+- El SOS de la W1 se ata al círculo amarillo del teléfono que la lleva.
+- Tono de SOS configurable: OFF / DISCREET / LOUD, por defecto DISCREET, en Profile →
+  Emergency. Lo oye solo quien lanza el SOS (teléfono y W1).
+- W1: la pulsación larga de F2 no se puede medir (firmware: solo avisa al soltar, y a
+  1 s inyecta BACK). En su lugar, **doble F2** en SOS silencia lo que entra. La
+  pulsación simple en SOS abre y cierra el micro, que en la W1 también arranca abierto.
+  Encargado a BodyCamServer.
+
+**Móvil:**
+- Mapa: el círculo amarillo de un agente en SOS se puede tocar → diálogo "SOS active"
+  con VIEW LIVESTREAM (o dos botones si emite desde el teléfono y la bodycam).
+  `SosLivestreamDialog`. El teléfono atado manda `"bwc"` en sus `location`, y los SOS
+  de bodycam entran ahora también en `activeSosAlerts`.
+- Directo del receptor: `PttToggleButton` (extraído de Operations a
+  `ui/components`) y botón MUTED / SOUND ON (`adjustUserPlaybackSignalVolume`, solo
+  local; se deshace al salir de la pantalla).
+- Directo del emisor: MIC ON/OFF (`muteLocalAudioStream`, sigue publicado) y OTHERS
+  ON/MUTED (`adjustPlaybackSignalVolume(0)`, sin tocar suscripciones: la nube lo graba
+  todo). Con OTHERS MUTED tampoco suenan los pitidos de entra/sale. Los dos se
+  reinician al cancelar el SOS y quedan en el diario (`SOS_MICROFONO`,
+  `SOS_SILENCIO_ENTRANTE`).
+- Tono `PttTones.sosActivado`, gemelo del de la W1. Cámara y micro se publican AL
+  ACABAR el tono (~410 ms) para que no salga en el directo. La alerta sale al instante.
+- BT: `SOS_TONE:OFF|LOW|HIGH` en cada conexión y cada cambio (`AjustesSos`).
+
+**Por probar con dos teléfonos:**
+1. Tocar el círculo → diálogo → directo.
+2. Receptor: MUTED / SOUND ON; PTT conmutador que el emisor oye.
+3. Emisor: MIC OFF (el receptor deja de oírle), OTHERS MUTED (no oye el PTT del receptor).
+4. Tono en los tres niveles.
+5. SOS de la W1 en el círculo del teléfono atado.
+
+---
+
+## 2026-09-29 — Sesión AN: ancla del backend, PTT en el directo y caducidad de la credencial (wf 53)
+
+Nada de esto está probado en aparato: el Samsung no estuvo enchufado en toda la sesión.
+
+**AN-0 · El ancla de periféricos sale del backend** (commiteado en `2516769`)
+- `IamClient` lee `device_ca_pem` de `iam/devices/enroll` y de `iam/users/enroll`, y
+  `EnrollmentViewModel` lo guarda en `perifericos.ca.pem`. Si no viene, se deja la que hubiera.
+- Samsung, ya dado de alta: falta instalarle el ancla por adb con `peripheral_anchor`, sin repetir el alta.
+  Es la CA activa del backend: `CN=AeriaOne Device Identity CA, OU=QPD`, SHA-256 `AC:29:0D:…:A5:00`.
+  La W1 ya está dada de alta contra ella como `BWC-7D6F`.
+
+**PTT en el directo del SOS** (encargo del usuario vía BC; commiteado en `2516769`)
+- `LivestreamScreen`, solo el receptor: botón HOLD TO TALK de mantener pulsado, que usa
+  `iniciarPtt`/`terminarPtt`, con los mismos tonos y el aviso ámbar si otro pisa.
+  Se cierra al soltar, al cancelarse el gesto o al cerrarse el ViewModel.
+- La banda de "quién habla" (`PttAvisoOverlay`) baja 60 dp en el directo para no tapar el botón de volver.
+- Por probar con dos teléfonos: que la voz entrante suene por el altavoz del emisor mientras publica.
+
+**Wf 53 · Credencial que caduca en plena grabación** (sin commitear)
+- `PoliticaDeCaducidad` (pura, con `PoliticaDeCaducidadTest`) y `VigilanteDeCaducidad`.
+  Manda el primero que caduque, el del terminal o el del agente.
+- A 14 días o menos, aviso en la pantalla del PIN.
+- Caducada con una grabación en curso (cámara o audio del teléfono, SOS, bodycam o gafas):
+  gracia. No se corta nada, hay banda ámbar y evento `CREDENCIAL_EN_GRACIA`.
+- Caducada sin grabar: `BLOCKED / CERTIFICATE_EXPIRED` y evento `CREDENCIAL_CADUCADA`. Se cierra
+  la sesión y se desata la W1 con `CADUCIDAD`, motivo que ya existía, así que el protocolo no cambia.
+- Sin certificados (piloto con el simulador) no bloquea, y un fallo del Keystore tampoco.
+- **Decisiones por confirmar con el usuario:** bloqueado = sin SOS; la gracia no tiene tope;
+  la hora es la del reloj del teléfono, y la hora fiable es el wf 64.
+- Ojo: los teléfonos dados de alta con `tools/` llevan certificados de 30 días y se bloquearán al vencer.
+
+**Cierre del día.** El usuario generó las APK del piloto para el manager
+(`SIMULADOR_CONFIANZA_EN_RELEASE=true`; sin alta, el enlace queda NO_SOPORTADO y la W1 acepta los
+comandos en claro). Horas en el Excel, filas 59 y 60.
+
+**Para retomar mañana:**
+1. **BC-1:** instalar en el Samsung el ancla del backend por adb (`peripheral_anchor`, siempre con
+   `-s RZCY510MBBM`) y probar con BC el emparejamiento v2, el canal cifrado y la atadura a `BWC-7D6F`.
+   Hay que volver a atar, porque la de `BWC-896E` ya no vale. La subida (wf 40) espera a que la W1 tenga Wi-Fi.
+2. **Tarea principal: alta de la bodycam a través del móvil por BT** (`PROV_CSR` / `PROV_CERT`).
+   Toca protocolo, así que la hace una sola sesión en los dos repos. Antes, el usuario decide qué
+   backend publicado se usa y con qué dominio, y cómo recibe el móvil la dirección sin adb. Queda
+   abierto si `iam/devices/enroll` acepta el token de sesión del agente. Detalle en el DEVLOG de
+   BodyCamServer, entrada 2026-09-29.
+3. Probar en aparato el PTT del directo (voz por el altavoz del emisor) y el wf 53.
+4. Siguen abiertos AN-3 (wf 51), AN-4 (wf 66) y wf 46.
+
+---
+
 ## 2026-09-29 (PLAN) — Reparto del día: dos sesiones en paralelo, workflows sin backend
 
 Escrito el 28-sep por la noche. **El mismo texto está en el DEVLOG de los dos repos.**
