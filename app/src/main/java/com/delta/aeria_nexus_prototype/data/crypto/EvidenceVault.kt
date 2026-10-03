@@ -45,8 +45,8 @@ private const val TAG = "EvidenceVault"
  * ── Consecuencia que hay que tener presente ───────────────────────────────────
  *
  * Si se olvida la contraseña no hay forma de recuperar la evidencia local: es el
- * precio de que tampoco pueda recuperarla quien robe el teléfono. La copia que
- * recibe Nexus sigue siendo abrible por el servidor (ver [NexusKeyWrapper]), así que
+ * precio de que tampoco pueda recuperarla quien robe el teléfono. Lo único que
+ * queda es empezar de cero con [reiniciar]. La copia que recibe Nexus sigue siendo abrible por el servidor (ver [NexusKeyWrapper]), así que
  * la cadena de custodia no depende de esta contraseña.
  *
  * La contraseña nunca se guarda, ni en claro ni en hash: si es la correcta, el
@@ -58,10 +58,11 @@ object EvidenceVault {
     const val LONGITUD_MINIMA = 6
 
     /**
-     * Identificador de este destinatario en la cabecera del .fev. Permite saber si
-     * un fichero se cifró para esta bóveda sin tener que descifrarlo.
+     * Identificador de las bóvedas creadas antes de que existiera [reiniciar]: todas
+     * llevaban el mismo, porque en un teléfono solo podía haber habido una.
      */
-    const val WRAPPER_ID = "vault:v1"
+    private const val ID_SIN_SUFIJO = "vault:v1"
+    private const val ID_SUFIJO_BYTES = 4
 
     private const val FILE_NAME = "vault.key"
     private const val VERSION = 1
@@ -77,6 +78,17 @@ object EvidenceVault {
     private var archivo: File? = null
     private var publica: PublicKey? = null
 
+    /**
+     * Identificador de este destinatario en la cabecera del .fev. Permite saber si
+     * un fichero se cifró para esta bóveda sin tener que descifrarlo.
+     *
+     * Cada bóveda tiene el suyo. Si fuera fijo, tras un [reiniciar] la evidencia de
+     * la bóveda anterior parecería de la nueva y la lista ofrecería abrir ficheros
+     * que ya no se pueden descifrar.
+     */
+    var wrapperId: String = ID_SIN_SUFIJO
+        private set
+
     // La privada solo vive en memoria mientras la bóveda está desbloqueada; al
     // bloquear se suelta y hay que volver a teclear la contraseña.
     private var privada: PrivateKey? = null
@@ -91,7 +103,7 @@ object EvidenceVault {
     fun init(context: Context) {
         val fichero = File(context.filesDir, FILE_NAME)
         archivo = fichero
-        publica = if (fichero.isFile) leerPublica(fichero) else null
+        if (fichero.isFile) leerParteAbierta(fichero)
         _configurada.value = publica != null
     }
 
@@ -121,9 +133,12 @@ object EvidenceVault {
                 .generateKeyPair()
             val salt = ByteArray(SALT_BYTES).also { SecureRandom().nextBytes(it) }
             val protegida = cifrarConContrasena(par.private.encoded, contrasena, salt)
+            val sufijo = ByteArray(ID_SUFIJO_BYTES).also { SecureRandom().nextBytes(it) }
+            val id = "$ID_SIN_SUFIJO:" + sufijo.joinToString("") { "%02x".format(it) }
 
             val json = JSONObject().apply {
                 put("version", VERSION)
+                put("id", id)
                 put("salt", codificar(salt))
                 put("iterations", ITERACIONES)
                 put("private_key", codificar(DeviceKeyWrapper.evidencia.wrap(protegida)))
@@ -131,6 +146,7 @@ object EvidenceVault {
             }
             fichero.writeText(json.toString())
 
+            wrapperId = id
             publica = par.public
             privada = par.private
             _configurada.value = true
@@ -171,6 +187,26 @@ object EvidenceVault {
         }
     }
 
+    /**
+     * Borra la bóveda para poder crear otra con una contraseña nueva: la salida
+     * cuando la contraseña se olvida. Es destructivo. El par de claves se pierde, así
+     * que lo cifrado hasta ahora deja de poder abrirse en este teléfono; la copia de
+     * Nexus no depende de esta clave y no se ve afectada.
+     *
+     * No comprueba quién lo pide: de eso se encarga quien llama, con el PIN del agente.
+     */
+    fun reiniciar(): Boolean {
+        val fichero = archivo ?: return false
+        if (fichero.isFile && !fichero.delete()) {
+            Log.e(TAG, "no se pudo borrar vault.key: la bóveda sigue como estaba")
+            return false
+        }
+        bloquear()
+        publica = null
+        _configurada.value = false
+        return true
+    }
+
     /** Suelta la clave privada: a partir de aquí hace falta la contraseña otra vez. */
     fun bloquear() {
         privada = null
@@ -184,7 +220,7 @@ object EvidenceVault {
      */
     private val wrapper = object : KeyWrapper {
 
-        override val id: String = WRAPPER_ID
+        override val id: String get() = wrapperId
 
         override fun wrap(dek: ByteArray): ByteArray =
             rsaOaepWrap(requireNotNull(publica) { "bóveda sin configurar" }, dek)
@@ -205,13 +241,17 @@ object EvidenceVault {
         }
     }
 
-    private fun leerPublica(fichero: File): PublicKey? = try {
-        val json = JSONObject(fichero.readText())
-        val spki = decodificar(json.getString("public_key"))
-        KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(spki))
-    } catch (e: Exception) {
-        Log.e(TAG, "vault.key ilegible: ${e.message}", e)
-        null
+    /** Lo que se puede leer de vault.key sin contraseña: la pública y el identificador. */
+    private fun leerParteAbierta(fichero: File) {
+        try {
+            val json = JSONObject(fichero.readText())
+            val spki = decodificar(json.getString("public_key"))
+            publica = KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(spki))
+            wrapperId = json.optString("id", ID_SIN_SUFIJO)
+        } catch (e: Exception) {
+            Log.e(TAG, "vault.key ilegible: ${e.message}", e)
+            publica = null
+        }
     }
 
     /** blob = IV(12) ‖ ciphertext ‖ tag(16), con la clave derivada de la contraseña. */

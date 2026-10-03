@@ -45,6 +45,7 @@ enum class TipoEvento(val familia: String, val texto: String) {
     BOVEDA_ABIERTA("evidence", "Evidence vault unlocked"),
     BOVEDA_CONTRASENA_INCORRECTA("evidence", "Wrong vault password"),
     BOVEDA_CERRADA("evidence", "Evidence vault sealed"),
+    BOVEDA_REINICIADA("evidence", "Evidence vault reset after a forgotten password"),
     EVIDENCIA_VISUALIZADA("evidence", "Evidence opened"),
 
     SOS_MICROFONO("emergency", "SOS microphone switched"),

@@ -13,6 +13,9 @@ import com.delta.aeria_nexus_prototype.data.identity.PinLocal
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import com.delta.aeria_nexus_prototype.data.identity.VigilanteDeCaducidad
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
+import com.delta.aeria_nexus_prototype.data.transcript.MotorWhisper
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionesDeBodycam
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
@@ -73,6 +76,10 @@ object AppContainer {
         private set
     lateinit var proxyRepository: ProxyRepository
         private set
+    lateinit var transcripcionRepository: TranscripcionRepository
+        private set
+    lateinit var transcripcionesDeBodycam: TranscripcionesDeBodycam
+        private set
     lateinit var vigilanteDeCaducidad: VigilanteDeCaducidad
         private set
 
@@ -132,6 +139,29 @@ object AppContainer {
             aviso = AvisoDeGafas(appContext),
         )
         localEvidenceRepository = LocalEvidenceRepository(appContext)
+        // Una sola instancia de UploadSessions para los dos: sincroniza por
+        // instancia y guarda en un unico fichero.
+        val uploadSessions = UploadSessions(appContext)
+        evidenceUploader = EvidenceUploader(
+            context = appContext,
+            config = uploadConfig,
+            sessions = uploadSessions,
+            dao = dao,
+        )
+        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions)
+        // Antes que las gafas: lo que se baja de ellas tambien se transcribe.
+        transcripcionRepository = TranscripcionRepository(
+            motor = MotorWhisper(appContext),
+            evidencia = localEvidenceRepository,
+            uploader = evidenceUploader,
+        )
+        transcripcionesDeBodycam = TranscripcionesDeBodycam(bodycamRepository, localEvidenceRepository)
+        proxyRepository = ProxyRepository(
+            evidencia = localEvidenceRepository,
+            encoder = ProxyEncoder(appContext),
+            uploader = evidenceUploader,
+            transcripciones = transcripcionRepository,
+        )
         // Trae de las gafas a la boveda. Lo usa DescargaDeGafas, que es quien
         // orquesta encender el AP, unirse, listar y bajar. Construirlo aqui no
         // abre red ni consume nada.
@@ -139,6 +169,7 @@ object AppContainer {
             context = appContext,
             evidencia = localEvidenceRepository,
             enBruto = rawEvidenceRepository,
+            transcripciones = transcripcionRepository,
         )
         // Trae a la boveda lo que las gafas dejaron en su tarjeta. Necesita el
         // repositorio de medios, que se construye mas arriba con la boveda ya viva.
@@ -177,21 +208,6 @@ object AppContainer {
                 sesion = identityRepository.sesionActual,
             )
         }
-        // Una sola instancia de UploadSessions para los dos: sincroniza por
-        // instancia y guarda en un unico fichero.
-        val uploadSessions = UploadSessions(appContext)
-        evidenceUploader = EvidenceUploader(
-            context = appContext,
-            config = uploadConfig,
-            sessions = uploadSessions,
-            dao = dao,
-        )
-        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions)
-        proxyRepository = ProxyRepository(
-            evidencia = localEvidenceRepository,
-            encoder = ProxyEncoder(appContext),
-            uploader = evidenceUploader,
-        )
         incidentRepository.onIncidentSaved = { incidente ->
             evidenceUploader.reconcile()
             // El expediente sale cada vez que el incidente se guarda: al cerrarlo y

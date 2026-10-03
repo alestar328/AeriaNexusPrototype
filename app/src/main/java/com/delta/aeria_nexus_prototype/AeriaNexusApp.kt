@@ -30,6 +30,12 @@ class AeriaNexusApp : Application() {
         // por si algun dia el token sobrevive al proceso.
         AppContainer.reanudarSubidas()
         AppContainer.evidenceUploader.reconcile()
+        // Transcripciones a medias: va antes que los proxies porque limpia lo que dejo
+        // la app al morir, y el rescate de los proxies escribe en esa misma carpeta.
+        AppContainer.transcripcionRepository.reanudar()
+        // El agente lee en la boveda tambien lo que transcribe la bodycam: se trae en
+        // cuanto la camara avisa o, al reconectar, lo que diga su lista de subidas.
+        AppContainer.transcripcionesDeBodycam.arrancar()
         // Lo mismo para la copia ligera de los videos: si el proceso murio mientras se
         // hacia, el original sigue en claro esperandola y hay que terminarla.
         AppContainer.proxyRepository.reanudar()

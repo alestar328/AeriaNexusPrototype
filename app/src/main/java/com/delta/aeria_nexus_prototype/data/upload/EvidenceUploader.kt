@@ -64,6 +64,7 @@ class EvidenceUploader(
     // Proxies subiendo ahora mismo. Al arrancar coinciden la reanudacion y los
     // proxies que se rehacen, y un mismo fichero no puede ir en dos subidas a la vez.
     private val proxiesEnVuelo = ConcurrentHashMap.newKeySet<String>()
+    private val transcripcionesEnVuelo = ConcurrentHashMap.newKeySet<String>()
 
     /** Proxy de un video, ya cifrado, con lo que lo enlaza a su original (ver ProxyRepository). */
     data class ProxySellado(
@@ -98,6 +99,35 @@ class EvidenceUploader(
             proxy?.let { deliverProxy(it.sealed.file, it.sealed.cipherSha256) }
             deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label, EvidenceType.VIDEO)
         }
+    }
+
+    /** Lo que enlaza una transcripcion con su grabacion (TRANSCRIPT-FORMAT.md de BodyCamServer). */
+    data class DatosDeTranscripcion(
+        val transcriptOf: String,
+        val idioma: String?,
+        val estado: String,
+        val evidenceId: String?,
+        val incidentId: String?,
+        val mediaType: String,
+    )
+
+    /**
+     * Entrega una transcripcion recien cifrada, sin esperar a su grabacion: sale aunque
+     * el agente no suba el video, y el backend la casa con el cuando llegue.
+     */
+    fun enqueueTranscript(sealed: EvidenceCrypto.Sealed, datos: DatosDeTranscripcion) {
+        val json = JSONObject()
+            .put("transcript_of", datos.transcriptOf)
+            .put("transcript_language", datos.idioma ?: "")
+            .put("transcript_status", datos.estado)
+            .put("media_type", datos.mediaType)
+            .put("sha256_plain", sealed.plainSha256)
+        datos.evidenceId?.let { json.put("evidence_id", it) }
+        datos.incidentId?.let { json.put("incident_id", it) }
+        runCatching { datosDeTranscripcion(sealed.file).writeText(json.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
+        if (!config.enabled()) return
+        scope.launch { deliverTranscript(sealed.file) }
     }
 
     /** Proxy suelto, sin original detras: el que se rehace al arrancar la app. */
@@ -138,7 +168,11 @@ class EvidenceUploader(
             return
         }
         scope.launch {
-            // Los proxies primero, por lo mismo que en enqueueVideo.
+            // Las transcripciones antes que nada: pesan unos KB y son lo primero que el
+            // backend necesita de una grabacion (TRANSCRIPT-FORMAT.md §6).
+            transcriptsDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
+                ?.forEach { deliverTranscript(it) }
+            // Despues los proxies, por lo mismo que en enqueueVideo.
             proxiesDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
                 ?.forEach { fev ->
                     val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
@@ -147,8 +181,7 @@ class EvidenceUploader(
             val pendientes = evidenceDir()?.listFiles { f ->
                 f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) && !isDelivered(f)
             }?.sortedBy { it.lastModified() }.orEmpty()
-            if (pendientes.isEmpty()) return@launch
-            Log.d(TAG, "reanudando ${pendientes.size} evidencia(s) sin entregar")
+            if (pendientes.isNotEmpty()) Log.d(TAG, "reanudando ${pendientes.size} evidencia(s) sin entregar")
             pendientes.forEach { fev ->
                 // El hash del ciphertext es la huella de la sesión. No está en el recibo
                 // —si el fichero nunca llegó a subirse no hay recibo—, así que se recalcula.
@@ -256,6 +289,48 @@ class EvidenceUploader(
             proxiesEnVuelo.remove(fev.name)
         }
     }
+
+    /**
+     * Sube una transcripcion. No toca Room ni se borra al entregarse: es evidencia
+     * derivada, y su .fev es tambien la marca de que esa grabacion ya se transcribio.
+     */
+    private suspend fun deliverTranscript(fev: File) = withContext(Dispatchers.IO) {
+        if (!transcripcionesEnVuelo.add(fev.name)) return@withContext
+        try {
+            if (isDelivered(fev)) return@withContext
+            val datos = runCatching { JSONObject(datosDeTranscripcion(fev).readText()) }.getOrNull()
+            if (datos == null) {
+                Log.w(TAG, "${fev.name}: sin datos de su grabacion, no se puede enlazar — se deja")
+                return@withContext
+            }
+            val cipherSha256 = EvidenceCrypto.sha256(fev)
+            val metadata = metadataComun(
+                fev = fev,
+                cipherSha256 = cipherSha256,
+                plainSha256 = datos.optString("sha256_plain").ifBlank { null },
+                evidenceId = datos.optString("evidence_id").ifBlank { null },
+                incidentId = datos.optString("incident_id").ifBlank { null },
+            ) + mapOf(
+                "kind" to "transcript",
+                "transcript_of" to datos.getString("transcript_of"),
+                "transcript_language" to datos.optString("transcript_language"),
+                "transcript_status" to datos.getString("transcript_status"),
+                "media_type" to datos.getString("media_type"),
+            )
+            val outcome = uploader.upload(fev, cipherSha256, metadata)
+            writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
+            when {
+                outcome.delivered && outcome.verified == false ->
+                    Log.e(TAG, "${fev.name}: el servidor NO confirma el hash de la transcripcion")
+                outcome.delivered -> Log.d(TAG, "${fev.name} entregada")
+                else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
+            }
+        } finally {
+            transcripcionesEnVuelo.remove(fev.name)
+        }
+    }
+
+    private fun datosDeTranscripcion(fev: File) = File(fev.parentFile, fev.name + TRANSCRIPT_DATA_SUFFIX)
 
     private fun borrarProxy(fev: File) {
         if (fev.exists() && !fev.delete()) Log.w(TAG, "no se pudo borrar el proxy entregado ${fev.name}")
@@ -419,10 +494,16 @@ class EvidenceUploader(
         return File(base, LocalEvidenceRepository.PROXIES_FOLDER).takeIf { it.isDirectory }
     }
 
+    private fun transcriptsDir(): File? {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, LocalEvidenceRepository.TRANSCRIPTS_FOLDER).takeIf { it.isDirectory }
+    }
+
     private companion object {
         const val RECEIPT_SUFFIX = ".upload.json"
         const val PROXY_DATA_SUFFIX = ".proxy.json"
         const val EVIDENCE_DATA_SUFFIX = ".evidence.json"
+        const val TRANSCRIPT_DATA_SUFFIX = ".data.json"
         const val EVIDENCE_FOLDER = "evidence"
 
         /** TODO: sale de la sesión autenticada cuando exista login real (AUTH-001). */

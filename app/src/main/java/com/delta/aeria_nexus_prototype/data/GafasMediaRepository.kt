@@ -10,6 +10,7 @@ import android.os.Build
 import android.util.Log
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.model.EvidenceSource
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
 import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -95,6 +96,7 @@ class GafasMediaRepository(
     private val context: Context,
     private val evidencia: LocalEvidenceRepository,
     private val enBruto: RawEvidenceRepository,
+    private val transcripciones: TranscripcionRepository,
 ) {
 
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -317,8 +319,8 @@ class GafasMediaRepository(
     /**
      * Descarga un fichero de las gafas y lo deja **cifrado** en la boveda.
      *
-     * El claro vive lo que dura la descarga y lo borra EvidenceCrypto al sellar,
-     * igual que una captura del propio telefono. Si algo falla por el camino, el
+     * El claro vive lo que dura la descarga mas lo que tarda en sacarse su audio
+     * para la transcripcion, y se borra despues. Si algo falla por el camino, el
      * temporal se descarta: media descarga no es evidencia.
      *
      * La URL se construye con [ArchivoEnGafas.rutaDeDescarga] y la pasarela real
@@ -352,12 +354,15 @@ class GafasMediaRepository(
             }
 
             // Mismo punto de enganche que la camara del telefono: se cifra SIEMPRE
-            // al cerrar el destino, nunca durante la descarga.
-            val sellada = evidencia.seal(destino)
+            // al cerrar el destino, nunca durante la descarga. El claro aguanta lo
+            // justo para sacarle el audio a la transcripcion.
+            val sellada = evidencia.seal(destino, conservarClaro = true)
             if (sellada == null) {
                 Log.e(TAG, "${archivo.nombre} descargado pero SIN cifrar")
                 return@withContext ResultadoDescarga.Fallo("Downloaded unencrypted: check the vault")
             }
+            if (archivo.tipo == "video") transcribir(destino, sellada, archivo)
+            evidencia.discard(destino)
             // Queda EN BRUTO: cifrado y fechado, pero sin incidente. Quien decide
             // a que pertenece es el agente, al categorizarlo — las gafas entregan
             // su video cuando la grabacion ya termino, asi que cruzarlo por hora
@@ -372,6 +377,25 @@ class GafasMediaRepository(
             Log.d(TAG, "${archivo.nombre} en la boveda, sin categorizar: ${sellada.file.name}")
             ResultadoDescarga.Cifrada(archivo, sellada)
         }
+
+    /**
+     * Sin incidente: el video entra en bruto y el backend lo casa por hash. La hora
+     * es la de las gafas, sin sincronizar; el contrato ya la da por aproximada.
+     */
+    private suspend fun transcribir(
+        destino: LocalEvidenceRepository.MediaTarget,
+        sellada: EvidenceCrypto.Sealed,
+        archivo: ArchivoEnGafas,
+    ) {
+        val origen = TranscripcionRepository.Evidencia(
+            sha256Plain = sellada.plainSha256,
+            evidenceId = null,
+            incidentId = null,
+            grabadaPor = "falconone",
+            grabadaEnMillis = archivo.fechaMillis.takeIf { it > 0 },
+        )
+        transcripciones.preparar(destino.file, origen)
+    }
 
     private fun extension(nombre: String): String =
         nombre.substringAfterLast('.', "").lowercase().ifEmpty { "mp4" }

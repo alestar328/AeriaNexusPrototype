@@ -314,6 +314,7 @@ fun AppNavHost() {
                         enBruto = AppContainer.rawEvidenceRepository,
                         incidentes = AppContainer.incidentRepository,
                         auditoria = AppContainer.auditoria,
+                        identidad = AppContainer.identityRepository,
                     )
                 },
                 onBack = { navController.popBackStack() },
@@ -340,6 +341,7 @@ fun AppNavHost() {
                         AppContainer.localEvidenceRepository,
                         AppContainer.evidenceUploader,
                         AppContainer.proxyRepository,
+                        AppContainer.transcripcionRepository,
                         AppContainer.agoraRepository,
                     )
                 },

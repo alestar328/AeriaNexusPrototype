@@ -349,14 +349,15 @@ class IdentityRepository(
     }
 
     /**
-     * Comprueba el PIN actual antes de dejar cambiarlo (workflow 5).
+     * Comprueba el PIN actual antes de dejar cambiarlo (workflow 5) o de reiniciar
+     * la boveda de evidencia. [via] dice en el diario desde donde se pidio.
      *
      * Cada fallo cuenta contra el mismo limite que el desbloqueo. Si no contase, un
      * telefono perdido con la sesion abierta dejaria probar PINs sin limite desde
      * esta pantalla. Y agotar la tanda aqui cierra la sesion: quien no sabe el PIN
      * no deberia seguir dentro.
      */
-    fun comprobarPinActual(pin: String): CambioDePin {
+    fun comprobarPinActual(pin: String, via: String = "pin_change"): CambioDePin {
         if (isLockedOut()) return CambioDePin.BLOQUEADO
         if (pinLocal.verificar(pin)) {
             pinLocal.reiniciarIntentos()
@@ -367,7 +368,7 @@ class IdentityRepository(
         _status.update {
             it.copy(attemptsLeft = intentos.intentosRestantes, lockedOutUntil = intentos.bloqueadoHasta)
         }
-        auditarFallo(intentos, via = "pin_change")
+        auditarFallo(intentos, via = via)
         if (intentos.bloqueadoHasta > 0) {
             lock()
             return CambioDePin.BLOQUEADO

@@ -2,6 +2,7 @@ package com.delta.aeria_nexus_prototype.data
 
 import android.util.Log
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
 import java.io.File
@@ -23,6 +24,7 @@ class ProxyRepository(
     private val evidencia: LocalEvidenceRepository,
     private val encoder: ProxyEncoder,
     private val uploader: EvidenceUploader,
+    private val transcripciones: TranscripcionRepository,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -53,12 +55,14 @@ class ProxyRepository(
     /**
      * Rehace los proxies que no se terminaron porque la app murio a mitad. El .fev
      * del original ya existe y se entrega por su lado (EvidenceUploader.resumePending);
-     * aqui solo falta la copia, y el enlace con su original es el hash del claro.
+     * aqui falta la copia, y el enlace con su original es el hash del claro. Antes
+     * se saca su audio por si tampoco llego a transcribirse: despues el claro se borra.
      */
     fun reanudar() {
         scope.launch {
             evidencia.proxiesSinTerminar().forEach { it.delete() }
             evidencia.videosSinProxy().forEach { claro ->
+                transcripciones.prepararSiFalta(claro, grabadaPor = "phone")
                 Log.d(TAG, "rehaciendo el proxy de un video que se quedo a medias")
                 val proxy = hacerProxy(claro, proxyOf = EvidenceCrypto.sha256(claro))
                 if (!claro.delete()) Log.w(TAG, "no se pudo borrar el claro de un video ya cifrado")

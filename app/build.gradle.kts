@@ -1,3 +1,5 @@
+import java.net.URI
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Properties
@@ -40,6 +42,13 @@ val versionProperties = Properties().apply {
 val appVersionCode = versionProperties.getProperty("VERSION_CODE").toInt()
 val appVersionName: String = versionProperties.getProperty("VERSION_NAME")
 
+// Modelo de Whisper que va dentro del APK (decision del usuario, 2026-10-02:
+// base cuantizado a 5 bits, unos 57 MB). No esta en git: lo baja la tarea
+// descargarModeloWhisper, comprueba el hash y lo deja en los assets.
+val whisperModelo = "ggml-base-q5_1"
+val whisperModeloSha256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
+val whisperModeloUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$whisperModelo.bin"
+
 android {
     namespace = "com.delta.aeria_nexus_prototype"
     compileSdk = 36
@@ -57,6 +66,30 @@ android {
         buildConfigField("String", "AGORA_APP_ID", "\"$agoraAppId\"")
         buildConfigField("String", "PAIS_PERIFERICOS", "\"$paisPerifericos\"")
         buildConfigField("boolean", "SIMULADOR_CONFIANZA", "true")
+        buildConfigField("String", "WHISPER_MODELO", "\"$whisperModelo\"")
+        buildConfigField("String", "WHISPER_MODELO_SHA256", "\"$whisperModeloSha256\"")
+
+        // whisper.cpp solo para arm64: es lo que llevan los telefonos de campo, y
+        // en 32 bits transcribir tardaria mas que la grabacion. En el resto de ABIs
+        // la transcripcion sale como "failed" y la evidencia sigue igual.
+        externalNativeBuild {
+            cmake {
+                abiFilters += "arm64-v8a"
+            }
+        }
+    }
+
+    ndkVersion = "27.0.12077973"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+    androidResources {
+        // El modelo se copia una vez del APK a disco; sin comprimir no hay que
+        // descomprimir 57 MB que, ademas, apenas comprimen.
+        noCompress += "bin"
     }
 
     // Firma de release. La ruta y las contrasenas viven en local.properties, que
@@ -165,6 +198,72 @@ afterEvaluate {
             )
             println("APK generado con version $appVersionName (code $appVersionCode). Proxima version: $siguienteName (code $siguienteCode)")
         }
+    }
+}
+
+/**
+ * Baja el modelo de Whisper y lo deja en los assets del APK. Se guarda una copia
+ * en .gradle/ de la raiz (fuera de git) para que un clean no vuelva a bajar 57 MB.
+ * Si el hash no coincide, el build falla: un modelo cambiado cambia lo que se
+ * transcribe, y eso no puede pasar sin que nadie lo decida.
+ */
+abstract class DescargarModeloWhisper : DefaultTask() {
+    @get:Input abstract val url: Property<String>
+    @get:Input abstract val sha256: Property<String>
+    @get:Input abstract val nombre: Property<String>
+    @get:Internal abstract val cache: DirectoryProperty
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun descargar() {
+        val guardado = cache.file("${nombre.get()}.bin").get().asFile
+        if (!guardado.isFile || hash(guardado) != sha256.get()) {
+            guardado.parentFile.mkdirs()
+            val temporal = File(guardado.parentFile, guardado.name + ".part")
+            logger.lifecycle("Bajando el modelo de Whisper ${nombre.get()}...")
+            URI(url.get()).toURL().openStream().use { entrada ->
+                temporal.outputStream().use { salida -> entrada.copyTo(salida) }
+            }
+            val obtenido = hash(temporal)
+            if (obtenido != sha256.get()) {
+                temporal.delete()
+                throw GradleException("El modelo de Whisper no tiene el hash esperado: $obtenido")
+            }
+            guardado.delete()
+            temporal.renameTo(guardado)
+        }
+        val destino = outputDir.file("whisper/${nombre.get()}.bin").get().asFile
+        destino.parentFile.mkdirs()
+        guardado.copyTo(destino, overwrite = true)
+    }
+
+    private fun hash(fichero: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        fichero.inputStream().use { entrada ->
+            val buffer = ByteArray(1 shl 16)
+            while (true) {
+                val leidos = entrada.read(buffer)
+                if (leidos < 0) break
+                digest.update(buffer, 0, leidos)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
+val descargarModeloWhisper = tasks.register<DescargarModeloWhisper>("descargarModeloWhisper") {
+    url.set(whisperModeloUrl)
+    sha256.set(whisperModeloSha256)
+    nombre.set(whisperModelo)
+    cache.set(rootProject.layout.projectDirectory.dir(".gradle/whisper"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            descargarModeloWhisper,
+            DescargarModeloWhisper::outputDir,
+        )
     }
 }
 

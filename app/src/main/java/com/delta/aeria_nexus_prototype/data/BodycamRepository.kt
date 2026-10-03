@@ -68,6 +68,8 @@ data class SubidaDeEvidencia(
     val entregada: Boolean,
     val cancelada: Boolean,
     val pendiente: Boolean,
+    /** `none`, `working`, `ready` o `failed` (TRANSCRIPT-FORMAT.md §7 de BodyCamServer). */
+    val transcripcion: String = "none",
 )
 
 /**
@@ -237,6 +239,18 @@ class BodycamRepository(
     private val _commandResponses = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val commandResponses: SharedFlow<String> = _commandResponses.asSharedFlow()
 
+    // Lineas TRANSCRIPT_READY:, TRANSCRIPT: y TRANSCRIPT_ERROR: (TRANSCRIPT-FORMAT.md
+    // §7). Las atiende TranscripcionesDeBodycam; una sola puede pesar decenas de KB.
+    private val _lineasDeTranscripcion = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val lineasDeTranscripcion: SharedFlow<String> = _lineasDeTranscripcion.asSharedFlow()
+
+    /**
+     * Unidad conectada (`BWC-896E`), del campo unit_id del STATUS. Null si la camara
+     * aun no lo manda: sin ella, un INC_000032 no distingue de que camara es.
+     */
+    @Volatile var unidadConectada: String? = null
+        private set
+
     // Subidas de evidencia de la bodycam, de la respuesta UPLOADS: a UPLOAD_LIST.
     // No llega en el STATUS periodico a proposito: la lista puede tener decenas de
     // incidentes y no cambia sola cada 5 segundos, asi que se pide cuando se mira.
@@ -294,6 +308,7 @@ class BodycamRepository(
             .apply()
         // El numero era de la camara anterior; el de la nueva llega en su STATUS.
         uidAgoraBodycam = null
+        unidadConectada = null
         _bodycamElegida.value = dispositivo
     }
 
@@ -867,6 +882,7 @@ class BodycamRepository(
                     fileServerIp = estado.optString("file_server_ip").takeIf { it.isNotEmpty() }
                     fileServerPort = estado.optInt("file_server_port", fileServerPort)
                     uidAgoraBodycam = estado.optInt("stream_uid").takeIf { it > 0 }
+                    unidadConectada = estado.optString("unit_id").takeIf { it.isNotEmpty() }
                 } catch (e: Exception) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
@@ -875,6 +891,9 @@ class BodycamRepository(
             // Respuesta a UPLOAD_LIST. Cancelar o reanudar contesta OK:, no una
             // lista nueva: quien lo pida vuelve a llamar a pedirSubidas().
             line.startsWith("UPLOADS:") -> atenderListaDeSubidas(line)
+            // Va antes que OK:/ERROR: a proposito: TRANSCRIPT_ERROR lleva el incidente
+            // y no es la respuesta generica de ningun otro comando.
+            line.startsWith("TRANSCRIPT") -> _lineasDeTranscripcion.tryEmit(line)
             // TOKEN_OK / TOKEN_FAIL:<motivo> — respuesta a prestarToken().
             line.startsWith("TOKEN_FAIL") -> Log.e(TAG, "la camara rechazo el token: $line")
             line.startsWith("TOKEN_OK") -> Log.i(TAG, "la camara tiene el token")
@@ -916,6 +935,7 @@ class BodycamRepository(
                     entregada = o.optBoolean("delivered"),
                     cancelada = o.optBoolean("cancelled"),
                     pendiente = o.optBoolean("pending"),
+                    transcripcion = o.optString("transcript", "none"),
                 )
             }
         } catch (e: Exception) {

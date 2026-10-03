@@ -154,6 +154,54 @@ class LocalEvidenceRepository(private val context: Context) {
         return ficheros?.toList().orEmpty()
     }
 
+    /**
+     * Cifra una transcripcion y borra su claro. Va a transcripts/ por lo mismo que el
+     * proxy va a proxies/: lo que hay en evidence/ la boveda lo lista y lo sube como
+     * evidencia, y la transcripcion es una pieza aparte (kind=transcript).
+     */
+    suspend fun sealTranscript(plain: File): EvidenceCrypto.Sealed? = withContext(Dispatchers.IO) {
+        val carpeta = privateDir(TRANSCRIPTS_FOLDER) ?: return@withContext null
+        EvidenceCrypto.seal(plain, File(carpeta, plain.name + EvidenceCrypto.EXTENSION), borrarClaro = true)
+    }
+
+    /**
+     * Guarda cifrada una transcripcion que llega de la bodycam en claro por el canal
+     * Bluetooth. Va a transcripts/bodycam/, que la subida no mira: esas las sube la
+     * propia bodycam, y aqui solo se guardan para leerlas en la boveda.
+     */
+    suspend fun sealBodycamTranscript(json: String, nombre: String): EvidenceCrypto.Sealed? =
+        withContext(Dispatchers.IO) {
+            val carpeta = bodycamTranscriptsDir() ?: return@withContext null
+            val claro = File(carpeta, "$nombre.part")
+            claro.writeText(json, Charsets.UTF_8)
+            val sellada = EvidenceCrypto.seal(claro, File(carpeta, nombre + EvidenceCrypto.EXTENSION), borrarClaro = true)
+            // Si el cifrado falla el claro no se queda: se vuelve a pedir a la camara.
+            if (claro.exists()) claro.delete()
+            sellada
+        }
+
+    fun bodycamTranscriptsDir(): File? = privateDir(BODYCAM_TRANSCRIPTS_FOLDER)
+
+    /** Trabajos de transcripcion sin terminar: el audio ya decodificado y sus datos. */
+    fun transcriptsPendingDir(): File? = privateDir("$TRANSCRIPTS_FOLDER/pendientes")
+
+    fun transcriptsDir(): File? = privateDir(TRANSCRIPTS_FOLDER)
+
+    /**
+     * Capturas con [prefijo] que siguen en claro aunque su .fev ya existe: la app
+     * murio antes de sacar de ellas el audio para transcribir. Los videos del
+     * telefono no pasan por aqui, los recoge [videosSinProxy].
+     */
+    fun cifradasEnClaro(prefijo: String): List<File> {
+        val capturas = capturesDir() ?: return emptyList()
+        val evidencia = evidenceDir() ?: return emptyList()
+        val ficheros = capturas.listFiles { f ->
+            f.isFile && f.name.startsWith(prefijo) &&
+                File(evidencia, f.name + EvidenceCrypto.EXTENSION).isFile
+        }
+        return ficheros?.toList().orEmpty()
+    }
+
     /** Proxies en claro que se quedaron a medio escribir. No valen: se rehacen. */
     fun proxiesSinTerminar(): List<File> {
         val ficheros = capturesDir()?.listFiles { f -> f.name.endsWith(PROXY_SUFFIX) }
@@ -247,10 +295,13 @@ class LocalEvidenceRepository(private val context: Context) {
         }
     }
 
-    /** Detiene la grabacion y la cifra. Es el camino normal de una nota de audio. */
+    /**
+     * Detiene la grabacion y la cifra. Es el camino normal de una nota de audio. El
+     * claro se conserva para transcribirlo: lo borra quien lo transcribe.
+     */
     suspend fun stopAudioRecordingSealed(): SealedCapture? {
         val destino = stopAudioRecorder() ?: return null
-        return SealedCapture(destino, seal(destino))
+        return SealedCapture(destino, seal(destino, conservarClaro = true))
     }
 
     /**
@@ -294,6 +345,13 @@ class LocalEvidenceRepository(private val context: Context) {
 
         /** Proxies cifrados a la espera de subirse. La lee tambien EvidenceUploader. */
         const val PROXIES_FOLDER = "proxies"
+
+        /** Transcripciones cifradas. La lee tambien EvidenceUploader. */
+        const val TRANSCRIPTS_FOLDER = "transcripts"
+
+        /** Transcripciones de la bodycam, solo para leer, dentro de transcripts/. La lee tambien VaultRepository. */
+        const val BODYCAM_TRANSCRIPTS_SUBFOLDER = "bodycam"
+        private const val BODYCAM_TRANSCRIPTS_FOLDER = "$TRANSCRIPTS_FOLDER/$BODYCAM_TRANSCRIPTS_SUBFOLDER"
         private const val PROXY_SUFFIX = "_proxy.mp4"
 
         // Sin sistema de login todavia: agente fijo para nombrar la evidencia.

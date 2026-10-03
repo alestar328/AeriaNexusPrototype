@@ -10,6 +10,8 @@ import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import com.delta.aeria_nexus_prototype.data.model.EvidenceType
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionJson
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionesDeBodycam
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -43,6 +45,16 @@ class VaultRepository(
          * en la lista en vez de dejar una vista previa que nunca carga.
          */
         val openable: Boolean,
+        /** Ruta de su transcripcion dentro de transcripts/, o null si no tiene (aun). */
+        val transcript: String?,
+    )
+
+    /** Transcripcion de una grabacion de la bodycam: no tiene .fev de evidencia en el telefono. */
+    data class BodycamTranscript(
+        val transcript: String,
+        val incidentId: String,
+        val receivedAt: String,
+        val openable: Boolean,
     )
 
     /** Evidencia cifrada del dispositivo, de la mas reciente a la mas antigua. */
@@ -59,8 +71,57 @@ class VaultRepository(
                     bytes = fichero.length(),
                     capturedAt = FORMATO_FECHA.format(Date(fichero.lastModified())),
                     openable = isForThisVault(fichero),
+                    transcript = transcripcionDe(fichero.name),
                 )
             }
+    }
+
+    /** Transcripciones traidas de la bodycam, de la mas reciente a la mas antigua. */
+    fun listBodycamTranscripts(): List<BodycamTranscript> {
+        val carpeta = transcriptsDir()?.let { File(it, BODYCAM) } ?: return emptyList()
+        val ficheros = carpeta.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
+            ?: return emptyList()
+        return ficheros
+            .sortedByDescending { it.lastModified() }
+            .map { fichero ->
+                BodycamTranscript(
+                    transcript = "$BODYCAM/${fichero.name}",
+                    incidentId = TranscripcionesDeBodycam.incidenteDeFichero(fichero.name),
+                    receivedAt = FORMATO_FECHA.format(Date(fichero.lastModified())),
+                    openable = isForThisVault(fichero),
+                )
+            }
+    }
+
+    /**
+     * Descifra y lee una transcripcion ([ruta] dentro de transcripts/). Pesa unos KB:
+     * se lee entera y la copia en claro se borra en el acto, no espera a bloquear.
+     */
+    suspend fun readTranscript(ruta: String): TranscripcionJson.Leida? = withContext(Dispatchers.IO) {
+        val leida = descifrarTranscripcion(ruta)
+        auditoria.registrar(
+            TipoEvento.EVIDENCIA_VISUALIZADA,
+            listOf("evidence" to ruta, "result" to if (leida != null) "SHOWN" else "NOT_OPENED"),
+        )
+        leida
+    }
+
+    private fun descifrarTranscripcion(ruta: String): TranscripcionJson.Leida? {
+        if (!EvidenceVault.desbloqueada.value) return null
+        val cifrado = transcriptsDir()?.let { File(it, ruta) }?.takeIf { it.isFile } ?: return null
+        val claro = decryptedDir()?.let { File(it, cifrado.name.removeSuffix(EvidenceCrypto.EXTENSION)) } ?: return null
+        return try {
+            if (!EvidenceCrypto.open(cifrado, claro)) null else TranscripcionJson.leer(claro.readText(Charsets.UTF_8))
+        } finally {
+            claro.delete()
+        }
+    }
+
+    /** `video_x.mp4.fev` → `video_x.transcript.json.fev`, si existe. */
+    private fun transcripcionDe(nombreFev: String): String? {
+        val base = nombreFev.removeSuffix(EvidenceCrypto.EXTENSION).substringBeforeLast('.')
+        val nombre = "$base.transcript.json${EvidenceCrypto.EXTENSION}"
+        return nombre.takeIf { transcriptsDir()?.let { File(it, nombre).isFile } == true }
     }
 
     /**
@@ -112,7 +173,7 @@ class VaultRepository(
      * primeros cientos de bytes: no descifra nada ni necesita la contrasena.
      */
     private fun isForThisVault(fichero: File): Boolean =
-        EvidenceCrypto.readHeader(fichero)?.wraps?.any { it.first == EvidenceVault.WRAPPER_ID } == true
+        EvidenceCrypto.readHeader(fichero)?.wraps?.any { it.first == EvidenceVault.wrapperId } == true
 
     /** Tipo de evidencia segun el prefijo con el que la nombro la captura. */
     private fun typeOf(name: String): EvidenceType = when (name.substringBefore('_')) {
@@ -127,6 +188,11 @@ class VaultRepository(
         return File(base, EVIDENCE_FOLDER).takeIf { it.isDirectory }
     }
 
+    private fun transcriptsDir(): File? {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, LocalEvidenceRepository.TRANSCRIPTS_FOLDER).takeIf { it.isDirectory }
+    }
+
     private fun decryptedDir(): File? {
         val carpeta = File(context.cacheDir, DECRYPTED_FOLDER)
         return if (carpeta.isDirectory || carpeta.mkdirs()) carpeta else null
@@ -136,6 +202,7 @@ class VaultRepository(
         const val TAG = "VaultRepository"
         const val EVIDENCE_FOLDER = "evidence"
         const val DECRYPTED_FOLDER = "vault"
+        const val BODYCAM = LocalEvidenceRepository.BODYCAM_TRANSCRIPTS_SUBFOLDER
 
         val FORMATO_FECHA = SimpleDateFormat("dd MMM yyyy · HH:mm", Locale.US)
     }

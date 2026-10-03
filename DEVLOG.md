@@ -6,6 +6,97 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-10-03 — Reinicio de la bóveda cuando se olvida la contraseña
+
+El manager instaló la app, olvidó la contraseña de la bóveda y no había salida salvo borrar
+los datos de la app (que se lleva también la identidad). Compila; **nada probado en aparato**:
+probarlo destruye la bóveda del teléfono de pruebas y esa decisión es del usuario.
+
+**Decisión:** la contraseña sigue sin poder recuperarse. Lo que se añade es un reinicio
+destructivo autorizado con el PIN de identidad. No abre ninguna evidencia: el PIN solo evita
+que cualquiera con el teléfono le borre al agente lo que puede ver. La copia de Nexus no se
+toca, porque cada `.fev` lleva también el destinatario `srv:`.
+
+- **Flujo:** Evidence Vault → «Forgot password?» → aviso de lo que se pierde → PIN → se borra
+  `vault.key` y la caché descifrada → formulario de crear contraseña. Los `.fev` no se borran.
+- **PIN:** `IdentityRepository.comprobarPinActual(pin, via = "vault_reset")`, el mismo del
+  cambio de PIN. Los fallos cuentan contra el límite del desbloqueo y agotarlo cierra la sesión.
+- **Auditoría:** evento nuevo `BOVEDA_REINICIADA` con `unreadable_on_device` (cuántos ficheros
+  dejan de poder abrirse en el teléfono).
+- **Identificador por bóveda:** antes todas eran `vault:v1`, así que tras un reinicio lo antiguo
+  habría parecido de la bóveda nueva (OPEN que nunca carga). Ahora cada bóveda nueva es
+  `vault:v1:<8 hex>`, guardado en `vault.key`; las ya creadas siguen siendo `vault:v1`. Ni el
+  backend ni BodyCamServer leen ese identificador. `EvidenceVault.WRAPPER_ID` pasa a `wrapperId`.
+- Ficheros: `EvidenceVault.kt`, `VaultRepository.kt`, `VaultViewModel.kt`, `VaultScreen.kt`,
+  `VaultResetContent.kt` (nuevo), `AuditoriaLocal.kt`, `IdentityRepository.kt`, `AppNavHost.kt`.
+
+**Pendiente:**
+- Probar en aparato: reinicio con PIN bueno y malo, que lo antiguo salga `NO KEY`, que lo
+  capturado después se abra y que el evento aparezca en Profile > Audit log.
+- Segunda parte, con backend: que el servidor vuelva a envolver las claves de los `.fev`
+  antiguos para la bóveda nueva, pedido con la firma de `aeria.user.key` y solo con la
+  credencial vigente. Pide contrato nuevo en `aeria-contracts`.
+- Lo capturado entre el reinicio y la contraseña nueva queda solo para Nexus (`NO KEY`), igual
+  que antes de crear la primera bóveda.
+
+## 2026-10-02 — Transcripción de la evidencia con Whisper
+
+Encargo del usuario, coordinado con la sesión BodyCamServer (rama `dev_whisper_text`).
+Contrato común: `docs/TRANSCRIPT-FORMAT.md` y `docs/UPLOAD-PROTOCOL.md` §5-6 de BodyCamServer.
+Compila y pasan los tests; **nada probado en aparato** (no había ningún teléfono conectado).
+
+**Decisiones del usuario:** modelo `ggml-base-q5_1` dentro del APK (unos 57 MB); se transcriben
+los vídeos del teléfono, las notas de audio y los vídeos de las gafas al importarlos.
+Propuestas del móvil aceptadas en el contrato: se admite M4A, se añade `source.recorded_by`
+(phone/falconone/bodycam) e `incident_id` puede ser null.
+
+- **Nativo:** `app/src/main/cpp` (CMake + JNI). whisper.cpp v1.9.4 se baja con FetchContent,
+  fijado por hash. Va estático en una sola `libtranscripcion.so` (1,7 MB), solo arm64-v8a,
+  armv8.2+fp16+dotprod y siempre en Release. `WhisperNativo` comprueba la CPU antes de cargar
+  la librería; si no es compatible, el resultado es `status=failed`.
+- **Modelo:** la tarea `descargarModeloWhisper` lo baja, comprueba el sha256 y lo deja en los
+  assets. Guarda una copia en `.gradle/whisper/`, que no va a git. Se copia una vez a `noBackupFilesDir`.
+- **Flujo** (`data/transcript`): al cerrar la grabación se cifra conservando el claro. Después
+  `TranscripcionRepository.preparar` decodifica el audio a PCM de 16 kHz y el claro ya se puede
+  borrar. Una cola de uno en uno transcribe en trozos de 5 min, sella el JSON en
+  `transcripts/<base>.transcript.json.fev` y lo entrega con `kind=transcript`. **Cambio del
+  usuario del mismo día:** sale primero y sola, sin esperar a la evidencia y aunque no se suba
+  el vídeo. En la cola de reintentos va antes que los proxies y que la evidencia.
+- **Pantalla:** diálogo "TRANSCRIBING AUDIO" y después la hoja de clasificación. El tope de
+  espera es de 20 s (`TOPE_TRANSCRIPCION_MS`); lo que tarde más sigue en segundo plano.
+- **Recuperación:** el trabajo vive en `transcripts/pendientes` (PCM + `.job.json`) y se
+  repite entero al arrancar. Los claros que sobrevivieron a una muerte de la app se rescatan:
+  los vídeos desde `ProxyRepository.reanudar` y las notas y las gafas desde `TranscripcionRepository.reanudar`.
+- **Ojo:** el PCM es audio en claro dentro de la carpeta privada mientras espera turno.
+
+**Lectura en la bóveda (decisión del usuario, mismo día):** el agente lee en el móvil las
+transcripciones del teléfono y también las de la bodycam (§7 del contrato).
+- Bóveda: botón TEXT en cada vídeo o nota que tenga transcripción, y apartado "Bodycam
+  transcripts". `TranscriptDialog` muestra el origen (PHONE / FALCONONE / BODYCAM), el idioma
+  y los segmentos con su minuto. Para leerlas hay que desbloquear la bóveda; se descifran en
+  memoria, la copia en claro se borra al momento y cada apertura queda en el diario.
+- Bodycam (`TranscripcionesDeBodycam`): al conectar pide `UPLOAD_LIST` y solicita las
+  `"transcript":"ready"`; también atiende `TRANSCRIPT_READY:<id>`. Cada respuesta
+  `TRANSCRIPT:<id>:{json}` se cifra en cuanto llega en `transcripts/bodycam/` y no se sube
+  nunca. Los errores llegan como `TRANSCRIPT_ERROR:<id>:<motivo>`, que propuse para saber de qué incidente son.
+- La unidad sale del `unit_id` del STATUS, que BodyCamServer añadió hoy y no está probado.
+  Sin él, el móvil pide una vez por conexión cada transcripción "ready".
+- Ojo: al conectar, la `UPLOAD_LIST` puede salir antes del primer STATUS. Entonces la primera
+  vez vuelve a bajar las que ya tiene; es inofensivo.
+
+**Por probar en el Samsung:**
+1. Nota de audio corta y larga: diálogo, después la hoja; `adb logcat -s Transcripcion WhisperNativo MotorWhisper`.
+2. Vídeo del teléfono de más de 2 min: el tope salta y la transcripción llega después.
+3. Contenido del `.transcript.json.fev`, descifrado en BodyCamServer con la clave dev.
+4. Subida con `kind=transcript` sin red y después con red: tiene que salir antes que el vídeo.
+5. Matar la app transcribiendo y comprobar que se repite al arrancar.
+6. Vídeo de las gafas con `recorded_by=falconone` e `incident_id` null.
+7. Bóveda: TEXT en una nota y en un vídeo; bloquear con el diálogo abierto y comprobar que se cierra.
+8. Con la W1 en la APK de `dev_whisper_text`: grabar, esperar `TRANSCRIPT_READY` y verla en
+   "Bodycam transcripts"; desconectar, grabar, reconectar y comprobar que llega por `UPLOAD_LIST`.
+
+---
+
 ## 2026-09-29 (3) — El móvil suelta la W1 al cerrar sesión
 
 Encargo del usuario, transmitido por la sesión BC. Compila; **sin probar en aparato**.
