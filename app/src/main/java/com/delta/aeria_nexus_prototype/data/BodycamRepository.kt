@@ -19,11 +19,14 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +42,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.identity.BindingActivo
@@ -46,9 +50,11 @@ import com.delta.aeria_nexus_prototype.data.identity.BindingPeriferico
 import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
 import com.delta.aeria_nexus_prototype.data.identity.CanalCifrado
 import com.delta.aeria_nexus_prototype.data.identity.EmparejamientoDelTelefono
+import com.delta.aeria_nexus_prototype.data.identity.IamException
 import com.delta.aeria_nexus_prototype.data.identity.OficialRotulado
 import com.delta.aeria_nexus_prototype.data.identity.ResultadoEmparejamiento
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
+import com.delta.aeria_nexus_prototype.data.red.HttpEnRedLocal
 import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
@@ -185,6 +191,7 @@ class BodycamRepository(
 
     init {
         pasarTonoSos()
+        registrarAtaduraEnBackend()
     }
 
     // La MAC no es secreta (la W1 la anuncia a cualquiera que busque), por eso
@@ -242,6 +249,9 @@ class BodycamRepository(
     // Lineas TRANSCRIPT_READY:, TRANSCRIPT: y TRANSCRIPT_ERROR: (TRANSCRIPT-FORMAT.md
     // §7). Las atiende TranscripcionesDeBodycam; una sola puede pesar decenas de KB.
     private val _lineasDeTranscripcion = MutableSharedFlow<String>(extraBufferCapacity = 16)
+
+    // PREVIEW_TOKEN:<token>:<segundos> o PREVIEW_TOKEN_FAIL:<motivo>, ver pedirTokenDelVisor.
+    private val _respuestasTokenVisor = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val lineasDeTranscripcion: SharedFlow<String> = _lineasDeTranscripcion.asSharedFlow()
 
     /**
@@ -710,16 +720,22 @@ class BodycamRepository(
         }
 
         val ahora = System.currentTimeMillis()
-        // El mismo perfil que va en el manifiesto de los incidentes del telefono, para
-        // que el video de la camara y el incidente digan el mismo nombre.
-        val perfil = AppContainer.incidentRepository.officerProfile
+        // Lo que la camara rotula sale de AeriaOne, no de la app. Sin perfil recibido
+        // (telefono dado de alta antes del 9-oct-2026 y aun sin sesion acreditada) se
+        // rotula el identificador del agente: mejor eso que el nombre de otra persona.
+        val perfil = AppContainer.perfilDelAgente.actual()
+        val oficial = OficialRotulado(
+            nombre = perfil?.nombre ?: identidad.userId,
+            rango = perfil?.rango.orEmpty(),
+            placa = perfil?.placa.orEmpty(),
+        )
         val declaracion = BindingPeriferico.declaracion(
             bindingId = BindingPeriferico.nuevoId(),
             userId = identidad.userId,
             deviceId = identidad.deviceId,
             bwcId = bwcId,
             tenant = identidad.tenant,
-            oficial = OficialRotulado(perfil.name, perfil.rank, perfil.officerNum),
+            oficial = oficial,
             nonceDeLaSesion = nonceDeLaSesion,
             emitidoEn = ahora,
             caducaEn = ahora + BindingPeriferico.VALIDEZ_POR_DEFECTO_MILLIS,
@@ -735,6 +751,51 @@ class BodycamRepository(
                 codificador.encodeToString(certificado.encoded),
             ).joinToString(":"),
         )
+    }
+
+    /**
+     * Deja escrito en AeriaOne que camara lleva el agente (iam-session.md §6.1). Sin
+     * esto el backend no sabe a quien atribuir lo que sube la unidad.
+     *
+     * Se registra cuando hay atadura aceptada por la camara Y sesion: si el token
+     * llega despues (sin cobertura al desbloquear), se hace entonces. Un intento por
+     * atadura y por sesion; si falla por red, la siguiente lo repite.
+     */
+    private fun registrarAtaduraEnBackend() {
+        scope.launch {
+            combine(_binding, sesionBackend.actual) { atadura, _ -> atadura }
+                .collectLatest { atadura ->
+                    if (atadura == null || atadura.idEnBackend != null) return@collectLatest
+                    // La sesion restringida de un suspendido no trae el alcance de
+                    // emparejar: token() la oculta y no se llega a pedir.
+                    val token = sesionBackend.token() ?: return@collectLatest
+                    try {
+                        val id = AppContainer.iamClient.registrarAtadura(token, atadura)
+                        // Solo si sigue siendo la misma: el enlace pudo caerse entretanto.
+                        _binding.update { if (it?.bindingId == atadura.bindingId) it.copy(idEnBackend = id) else it }
+                        Log.i(TAG, "atadura de ${atadura.bwcId} registrada en AeriaOne: $id")
+                    } catch (e: IamException) {
+                        Log.w(TAG, "AeriaOne no registro la atadura de ${atadura.bwcId}: ${e.message}")
+                        // Un perfil suspendido o revocado se trata como en la subida;
+                        // cualquier otro code (insufficient_scope...) no toca el token.
+                        sesionBackend.rechazada(e.codigo)
+                    }
+                }
+        }
+    }
+
+    /** Avisa a AeriaOne de que la atadura ha terminado (§6.2). Si no llega, caduca sola. */
+    private fun terminarAtaduraEnBackend(atadura: BindingActivo) {
+        val id = atadura.idEnBackend ?: return
+        // El token se lee ya: quien cierra la sesion lo olvida justo despues.
+        val token = sesionBackend.token() ?: return
+        scope.launch {
+            try {
+                AppContainer.iamClient.terminarAtadura(token, id)
+            } catch (e: IamException) {
+                Log.w(TAG, "AeriaOne no cerro la atadura de ${atadura.bwcId}: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -780,6 +841,7 @@ class BodycamRepository(
         val activo = _binding.value ?: return null
         val credential = AppContainer.credentialRepository
         _binding.value = null
+        terminarAtaduraEnBackend(activo)
 
         if (!credential.puedeFirmarComoElAgente) {
             // Sin sesion no se puede firmar el fin. La atadura muere igual por
@@ -870,6 +932,7 @@ class BodycamRepository(
             return
         }
         when {
+            line.startsWith("PREVIEW_TOKEN") -> _respuestasTokenVisor.tryEmit(line)
             // STATUS:{json} — estado periodico de la bodycam.
             line.startsWith("STATUS:") -> {
                 try {
@@ -1004,24 +1067,55 @@ class BodycamRepository(
      */
     fun streamPreviewFrames(rotationDegrees: Float): Flow<Bitmap> = flow {
         val ip = fileServerIp ?: return@flow
-        var conexion: HttpURLConnection? = null
+        if (!HttpEnRedLocal.esIpPrivada(ip)) {
+            Log.w(TAG, "La bodycam anuncia una IP que no es de red local: no se abre el visor")
+            return@flow
+        }
         try {
-            conexion = URL("http://$ip:$fileServerPort/preview/stream").openConnection() as HttpURLConnection
-            conexion.connectTimeout = FRAME_TIMEOUT_MILLIS
-            conexion.readTimeout = STREAM_READ_TIMEOUT_MILLIS
-            if (conexion.responseCode != HttpURLConnection.HTTP_OK) return@flow
-            val entrada = BufferedInputStream(conexion.inputStream)
-            while (true) {
-                val bytes = leerFrameMultipart(entrada) ?: break
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?.let { emit(rotarFrame(it, rotationDegrees)) }
+            val ruta = pedirTokenDelVisor()?.let { "/preview/stream?token=$it" } ?: "/preview/stream"
+            val conexion = HttpEnRedLocal.get(
+                ip, fileServerPort, ruta,
+                FRAME_TIMEOUT_MILLIS, STREAM_READ_TIMEOUT_MILLIS,
+            ) ?: return@flow
+            conexion.use {
+                val entrada = BufferedInputStream(it.cuerpo)
+                while (true) {
+                    val bytes = leerFrameMultipart(entrada) ?: break
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        ?.let { frame -> emit(rotarFrame(frame, rotationDegrees)) }
+                }
             }
         } catch (e: IOException) {
             Log.w(TAG, "Stream del visor cortado: ${e.message}")
-        } finally {
-            conexion?.disconnect()
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * Token de un solo uso para abrir el visor (iam-session.md §6.3, AUTH-002): sin el,
+     * cualquiera en la misma wifi podria ver la camara. Se pide uno por conexion.
+     *
+     * Null si no hay canal cifrado (la camara solo lo da por el) o no contesta a tiempo.
+     * Entonces se abre sin token: la camara lo acepta mientras no lo exija, y cuando lo
+     * exija contestara 401 y el visor no abrira, que es lo correcto.
+     */
+    private suspend fun pedirTokenDelVisor(): String? {
+        if (canal == null) return null
+        val linea = coroutineScope {
+            // Escuchando antes de pedir: la respuesta puede llegar antes de que first() empiece.
+            val respuesta = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(ESPERA_TOKEN_VISOR_MILLIS) { _respuestasTokenVisor.first() }
+            }
+            sendCommand("PREVIEW_TOKEN")
+            respuesta.await()
+        }
+        val token = linea?.takeIf { it.startsWith("PREVIEW_TOKEN:") }
+            ?.removePrefix("PREVIEW_TOKEN:")
+            ?.substringBefore(':')
+            ?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }
+        // El token no va al log: vale para abrir el visor durante 60 s.
+        if (token == null) Log.w(TAG, "la camara no dio token del visor: ${linea?.substringBefore(':') ?: "sin respuesta"}")
+        return token
+    }
 
     /**
      * Lee un frame del stream MJPEG: cabeceras de la parte (de donde sale
@@ -1031,7 +1125,7 @@ class BodycamRepository(
     private fun leerFrameMultipart(entrada: BufferedInputStream): ByteArray? {
         var tamano = -1
         while (true) {
-            val linea = leerLinea(entrada) ?: return null
+            val linea = HttpEnRedLocal.leerLinea(entrada) ?: return null
             if (linea.startsWith("Content-Length:", ignoreCase = true)) {
                 tamano = linea.substringAfter(":").trim().toIntOrNull() ?: return null
             }
@@ -1046,17 +1140,6 @@ class BodycamRepository(
             leidos += n
         }
         return datos
-    }
-
-    /** Linea de texto terminada en \n (sin el \r\n), o null si el stream acabo. */
-    private fun leerLinea(entrada: BufferedInputStream): String? {
-        val bytes = StringBuilder()
-        while (true) {
-            val b = entrada.read()
-            if (b < 0) return null
-            if (b == '\n'.code) return bytes.toString().trimEnd('\r')
-            bytes.append(b.toChar())
-        }
     }
 
     // Cada fuente de la bodycam entrega el frame con su propia orientacion;
@@ -1100,6 +1183,9 @@ class BodycamRepository(
         // La W1 empuja un frame cada ~150 ms; si en 5 s no llega nada, el
         // enlace esta muerto y conviene cortar para que el visor reintente.
         private const val STREAM_READ_TIMEOUT_MILLIS = 5_000
+
+        // La camara contesta al momento; si tarda mas, se abre el visor sin token.
+        private const val ESPERA_TOKEN_VISOR_MILLIS = 3_000L
 
         // Rotacion de los frames segun la fuente, ajustadas en campo:
         // visor de foto (2026-07-12: con 90 quedaba girada a la derecha).

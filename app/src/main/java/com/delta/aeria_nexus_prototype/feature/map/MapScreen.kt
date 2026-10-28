@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -117,6 +118,7 @@ fun MapScreen(
     // marcador para que el dialogo lea siempre el estado vivo: si el SOS termina
     // con el dialogo abierto, se cierra solo en lugar de ofrecer un directo muerto.
     var uidAgenteTocado by remember { mutableStateOf<Int?>(null) }
+    var historialAbierto by remember { mutableStateOf(false) }
     val agenteTocado = uiState.remoteAgents.firstOrNull { it.uid == uidAgenteTocado && it.tieneSos }
 
     var hasLocationPermission by remember {
@@ -204,6 +206,7 @@ fun MapScreen(
                         RemoteAgentMarkerView(
                             agente = agente,
                             onClick = { uidAgenteTocado = agente.uid },
+                            onDismissStale = { viewModel.dismissStaleAgent(agente.uid) },
                         )
                     }
                 }
@@ -253,6 +256,17 @@ fun MapScreen(
             }
         }
 
+        if (historialAbierto) {
+            SosHistoryDialog(
+                items = uiState.sosHistory,
+                total = uiState.sosTotal,
+                fromServer = uiState.sosHistoryFromServer,
+                loading = uiState.sosHistoryLoading,
+                onRefresh = viewModel::refreshSosHistory,
+                onDismiss = { historialAbierto = false },
+            )
+        }
+
         agenteTocado?.let { agente ->
             SosLivestreamDialog(
                 agente = agente,
@@ -281,34 +295,46 @@ fun MapScreen(
         // Banners de SOS activos: fijos en pantalla, visibles sin importar
         // donde este la camara. Tocar el banner vuela a la posicion del
         // emisor; VIEW LIVE abre su livestream directo.
-        if (uiState.activeSos.isNotEmpty()) {
+        if (uiState.sosBanners.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                uiState.activeSos.forEach { sos ->
+                uiState.sosBanners.forEach { sos ->
                     SosBanner(
                         sos = sos,
                         onLocate = {
                             flyToPosition(viewportState, sos.longitude, sos.latitude)
                         },
                         onOpenLivestream = { onOpenLivestream(sos.uid) },
+                        onDismiss = { viewModel.dismissSosBanner(sos.sessionKey) },
                     )
                 }
             }
         }
 
-        RecenterButton(
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = 140.dp),
-            enabled = uiState.gpsReady,
-            onClick = {
-                flyToPosition(viewportState, uiState.longitude, uiState.latitude)
-            },
-        )
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SosHistoryButton(
+                total = uiState.sosTotal,
+                onClick = {
+                    historialAbierto = true
+                    viewModel.refreshSosHistory()
+                },
+            )
+            RecenterButton(
+                enabled = uiState.gpsReady,
+                onClick = {
+                    flyToPosition(viewportState, uiState.longitude, uiState.latitude)
+                },
+            )
+        }
 
         StatusPanel(
             uiState = uiState,
@@ -375,12 +401,11 @@ private fun PermissionRequestCard(modifier: Modifier = Modifier, onRequest: () -
 
 @Composable
 private fun RecenterButton(
-    modifier: Modifier = Modifier,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
     Box(
-        modifier = modifier
+        modifier = Modifier
             .size(48.dp)
             .clip(CircleShape)
             .background(Superficie.copy(alpha = 0.9f))
@@ -397,12 +422,59 @@ private fun RecenterButton(
 }
 
 /**
+ * Abre la lista de SOS registrados. El numero es cuantos ha habido en total, no
+ * los que quedan por ver: la lista no se vacia nunca.
+ */
+@Composable
+private fun SosHistoryButton(total: Int, onClick: () -> Unit) {
+    Box {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .background(Superficie.copy(alpha = 0.9f))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = "SOS history, $total recorded",
+                tint = RojoCritico,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        if (total > 0) {
+            Text(
+                text = if (total > 99) "99+" else "$total",
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 6.dp, y = (-4).dp)
+                    .background(RojoCritico, RoundedCornerShape(10.dp))
+                    .border(1.5.dp, Color.White, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
+/**
  * Marcador de otro agente: punto dorado con anillo pulsante mientras emite;
  * gris y con la hora de su ultimo mensaje cuando pierde la senal. Solo se puede
  * tocar si el agente esta en SOS: abre el aviso para ver su directo.
+ *
+ * El marcador gris no caduca solo: si el agente se cae del canal sin salir (sin red,
+ * app cerrada a la fuerza) no se borra, y como vuelve con otro uid el viejo se
+ * quedaria para siempre. Por eso lleva su X.
  */
 @Composable
-private fun RemoteAgentMarkerView(agente: RemoteAgentMarker, onClick: () -> Unit) {
+private fun RemoteAgentMarkerView(
+    agente: RemoteAgentMarker,
+    onClick: () -> Unit,
+    onDismissStale: () -> Unit,
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
@@ -435,15 +507,20 @@ private fun RemoteAgentMarkerView(agente: RemoteAgentMarker, onClick: () -> Unit
             )
         }
         if (agente.isStale) {
-            Text(
-                text = agente.lastSeenLabel,
-                color = Color.White,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
+            Row(
                 modifier = Modifier
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
-            )
+                    .padding(start = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = agente.lastSeenLabel,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                BotonCerrar(descripcion = "Remove last known position", onClick = onDismissStale)
+            }
         }
     }
 }
@@ -458,6 +535,7 @@ private fun SosBanner(
     sos: SosMarker,
     onLocate: () -> Unit,
     onOpenLivestream: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -504,6 +582,7 @@ private fun SosBanner(
                 letterSpacing = 1.sp,
             )
         }
+        BotonCerrar(descripcion = "Hide this SOS banner", onClick = onDismiss, tint = Color.White)
     }
 }
 
@@ -616,20 +695,7 @@ private fun SignalCutTooltip(corte: SignalCutMarker, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onDismiss),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = "Dismiss signal-cut alert",
-                    tint = TextoSecundario,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
+            BotonCerrar(descripcion = "Dismiss signal-cut alert", onClick = onDismiss)
         }
         Spacer(Modifier.height(4.dp))
         // Punto sobre la ultima posicion conocida del emisor; el anchor BOTTOM
@@ -639,6 +705,25 @@ private fun SignalCutTooltip(corte: SignalCutMarker, onDismiss: () -> Unit) {
                 .size(12.dp)
                 .background(RojoSuave, CircleShape)
                 .border(2.dp, Color.White, CircleShape),
+        )
+    }
+}
+
+/** X de cerrar de los avisos del mapa; el mismo tamano de toque en todos. */
+@Composable
+private fun BotonCerrar(descripcion: String, onClick: () -> Unit, tint: Color = TextoSecundario) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Close,
+            contentDescription = descripcion,
+            tint = tint,
+            modifier = Modifier.size(16.dp),
         )
     }
 }

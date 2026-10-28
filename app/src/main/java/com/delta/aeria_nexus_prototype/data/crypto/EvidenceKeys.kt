@@ -164,6 +164,9 @@ class DeviceKeyWrapper private constructor(private val alias: String) {
 
         /** Protege el verificador del PIN del agente (workflow 4). Otra clave, a propósito. */
         val identidad = DeviceKeyWrapper("aeria_identity_v1")
+
+        /** Protege la clave de la base de Room ([com.delta.aeria_nexus_prototype.data.local.BaseCifrada]). */
+        val baseDeDatos = DeviceKeyWrapper("aeria_database_v1")
     }
 }
 

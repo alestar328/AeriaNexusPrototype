@@ -4,13 +4,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.BatteryRepository
+import com.delta.aeria_nexus_prototype.data.FinDeSos
+import com.delta.aeria_nexus_prototype.data.HistorialDelBackend
+import com.delta.aeria_nexus_prototype.data.HistorialSos
 import com.delta.aeria_nexus_prototype.data.LocationRepository
+import com.delta.aeria_nexus_prototype.data.OrigenSos
+import com.delta.aeria_nexus_prototype.data.RegistroSos
+import com.delta.aeria_nexus_prototype.data.SosDelBackend
 import com.delta.aeria_nexus_prototype.data.model.RemoteAgent
 import com.delta.aeria_nexus_prototype.data.model.SosAlert
 import com.delta.aeria_nexus_prototype.data.model.SosCancel
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +51,8 @@ data class RemoteAgentMarker(
  */
 data class SosMarker(
     val uid: Int,
+    // Identifica esta emergencia: cerrar su banner no oculta la siguiente del mismo agente.
+    val sessionKey: String,
     val officer: String,
     val latitude: Double,
     val longitude: Double,
@@ -62,6 +71,17 @@ data class SignalCutMarker(
     val cutTimeLabel: String,
 )
 
+/** Una fila del historial de SOS, ya con los textos que se pintan. */
+data class SosHistoryItem(
+    val key: String,
+    val officer: String,
+    val sourceLabel: String,
+    val dateLabel: String,
+    val startLabel: String,
+    val endLabel: String,
+    val isActive: Boolean,
+)
+
 data class MapUiState(
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
@@ -71,6 +91,16 @@ data class MapUiState(
     val batteryPercent: Int = 0,
     val remoteAgents: List<RemoteAgentMarker> = emptyList(),
     val activeSos: List<SosMarker> = emptyList(),
+    // Los SOS vigentes cuyo banner no ha cerrado el usuario. El tooltip del mapa
+    // sigue aunque se cierre el banner, mientras la emergencia dure.
+    val sosBanners: List<SosMarker> = emptyList(),
+    val sosHistory: List<SosHistoryItem> = emptyList(),
+    // Cuantos SOS ha habido: el total de AeriaOne si se ha podido leer, si no los
+    // que ha visto este telefono.
+    val sosTotal: Int = 0,
+    // False mientras la lista sea la copia local de este telefono.
+    val sosHistoryFromServer: Boolean = false,
+    val sosHistoryLoading: Boolean = false,
     val signalCuts: List<SignalCutMarker> = emptyList(),
     // Agentes conectados al canal, incluido este telefono (0 = sin conexion).
     val connectedUsers: Int = 0,
@@ -84,12 +114,16 @@ class MapViewModel(
     private val locationRepository: LocationRepository,
     private val batteryRepository: BatteryRepository,
     private val agoraRepository: AgoraRepository,
+    private val historialSos: HistorialSos,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MapUiState())
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
 
     private var started = false
+
+    // Sesiones SOS cuyo banner ha cerrado el usuario en esta pantalla.
+    private val bannersCerrados = MutableStateFlow<Set<String>>(emptySet())
 
     init {
         // La bateria no requiere permisos: se observa desde el arranque.
@@ -158,11 +192,40 @@ class MapViewModel(
             combine(
                 agoraRepository.activeSosAlerts,
                 agoraRepository.remoteAgents,
-            ) { alertas, agentes ->
-                alertas.values.mapNotNull { it.toSosMarker(posicionDelEmisor(it.uid, agentes)) }
-            }.collect { marcadores ->
-                _uiState.update { it.copy(activeSos = marcadores) }
+                bannersCerrados,
+            ) { alertas, agentes, cerrados ->
+                val marcadores = alertas.values.mapNotNull { it.toSosMarker(posicionDelEmisor(it.uid, agentes)) }
+                marcadores to marcadores.filter { it.sessionKey !in cerrados }
+            }.collect { (marcadores, banners) ->
+                _uiState.update { it.copy(activeSos = marcadores, sosBanners = banners) }
             }
+        }
+        viewModelScope.launch {
+            combine(
+                historialSos.registros,
+                historialSos.delBackend,
+                agoraRepository.activeSosAlerts,
+                agoraRepository.sosActive,
+            ) { registros, delBackend, alertas, sosPropio ->
+                historialParaPintar(registros, delBackend, alertas.keys, sosPropio)
+            }.collect { historial ->
+                _uiState.update {
+                    it.copy(
+                        sosHistory = historial.filas,
+                        sosTotal = historial.total,
+                        sosHistoryFromServer = historial.delServidor,
+                    )
+                }
+            }
+        }
+        // El contador se pone al dia al abrir el mapa y con cada SOS que empieza o
+        // termina, sin sondear al backend cada pocos segundos.
+        refreshSosHistory()
+        viewModelScope.launch {
+            agoraRepository.incomingSos.collect { refrescarTrasUnMomento() }
+        }
+        viewModelScope.launch {
+            agoraRepository.incomingSosCancel.collect { refrescarTrasUnMomento() }
         }
         viewModelScope.launch {
             agoraRepository.sosSignalCuts.collect { cortes ->
@@ -175,6 +238,32 @@ class MapViewModel(
     /** Quita el aviso de corte de senal del agente [uid] cuando el usuario lo toca. */
     fun dismissSignalCut(uid: Int) {
         agoraRepository.dismissSignalCut(uid)
+    }
+
+    /** Vuelve a pedir el historial a AeriaOne; se llama tambien al abrir la lista. */
+    fun refreshSosHistory() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(sosHistoryLoading = true) }
+            historialSos.actualizarDelBackend()
+            _uiState.update { it.copy(sosHistoryLoading = false) }
+        }
+    }
+
+    // El aviso al backend sale a la vez que el del canal: se le deja un margen
+    // para que el SOS ya este apuntado cuando se le pregunta.
+    private suspend fun refrescarTrasUnMomento() {
+        delay(ESPERA_AVISO_BACKEND_MILLIS)
+        refreshSosHistory()
+    }
+
+    /** Cierra el banner de un SOS; el tooltip del mapa sigue mientras dure. */
+    fun dismissSosBanner(sessionKey: String) {
+        bannersCerrados.update { it + sessionKey }
+    }
+
+    /** Quita el marcador gris "Last seen" de un agente del que ya no llega nada. */
+    fun dismissStaleAgent(uid: Int) {
+        agoraRepository.olvidarAgente(uid)
     }
 
     /**
@@ -192,6 +281,7 @@ class MapViewModel(
         val lng = posicionViva?.longitude ?: longitude ?: return null
         return SosMarker(
             uid = uid,
+            sessionKey = sessionKey,
             officer = officer,
             latitude = lat,
             longitude = lng,
@@ -227,6 +317,73 @@ class MapViewModel(
         )
     }
 
+    private class HistorialPintado(val filas: List<SosHistoryItem>, val total: Int, val delServidor: Boolean)
+
+    private fun historialParaPintar(
+        registros: List<RegistroSos>,
+        delBackend: HistorialDelBackend?,
+        uidsEnSos: Set<Int>,
+        sosPropio: Boolean,
+    ): HistorialPintado {
+        if (delBackend != null) {
+            return HistorialPintado(delBackend.items.map { it.toHistoryItem() }, delBackend.total, delServidor = true)
+        }
+        return HistorialPintado(registros.map { it.toHistoryItem(uidsEnSos, sosPropio) }, registros.size, delServidor = false)
+    }
+
+    private fun SosDelBackend.toHistoryItem(): SosHistoryItem {
+        val finTexto = when {
+            live -> "Active"
+            stoppedAtMillis == null -> "No end recorded"
+            reason == "signal_lost" -> "Signal lost ${formatClock(stoppedAtMillis)}"
+            else -> "Ended ${formatClock(stoppedAtMillis)}"
+        }
+        return SosHistoryItem(
+            key = sosId,
+            officer = listOf(officerCode, officerName).filter { it.isNotBlank() }.joinToString(" — "),
+            sourceLabel = if (source == "bodycam") "Bodycam" else "Phone",
+            dateLabel = formatDate(startedAtMillis),
+            startLabel = formatClock(startedAtMillis),
+            endLabel = finTexto,
+            isActive = live,
+        )
+    }
+
+    /**
+     * Un registro sin fin solo se pinta como activo si el SOS sigue vivo de verdad:
+     * si la app se cerro en mitad de uno, su fin no llego a apuntarse.
+     */
+    private fun RegistroSos.toHistoryItem(uidsEnSos: Set<Int>, sosPropio: Boolean): SosHistoryItem {
+        val activo = fin == null && when (origen) {
+            OrigenSos.ESTE_TELEFONO -> sosPropio
+            else -> uid in uidsEnSos
+        }
+        val finTexto = when {
+            activo -> "Active"
+            fin == FinDeSos.TERMINADO && finMillis != null -> "Ended ${formatClock(finMillis)}"
+            fin == FinDeSos.SENAL_PERDIDA && finMillis != null -> "Signal lost ${formatClock(finMillis)}"
+            else -> "No end recorded"
+        }
+        return SosHistoryItem(
+            key = clave,
+            officer = officer,
+            sourceLabel = when (origen) {
+                OrigenSos.ESTE_TELEFONO -> "This phone"
+                OrigenSos.TELEFONO -> "Phone"
+                OrigenSos.BODYCAM -> "Bodycam"
+            },
+            dateLabel = formatDate(inicioMillis),
+            startLabel = formatClock(inicioMillis),
+            endLabel = finTexto,
+            isActive = activo,
+        )
+    }
+
+    private fun formatDate(millis: Long): String =
+        Instant.ofEpochMilli(millis)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.ENGLISH))
+
     private fun formatClock(millis: Long): String =
         Instant.ofEpochMilli(millis)
             .atZone(ZoneId.systemDefault())
@@ -237,5 +394,6 @@ class MapViewModel(
         // Los companeros emiten cada 1 s en movimiento mas un heartbeat de 3 s:
         // 7 s de silencio equivalen a dos heartbeats perdidos.
         private const val STALE_AFTER_MILLIS = 7_000L
+        private const val ESPERA_AVISO_BACKEND_MILLIS = 3_000L
     }
 }

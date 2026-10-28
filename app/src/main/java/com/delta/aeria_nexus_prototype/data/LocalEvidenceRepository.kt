@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
+import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -16,11 +17,13 @@ import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * Almacen local de la evidencia capturada con el propio telefono cuando la
@@ -31,8 +34,8 @@ import kotlinx.coroutines.withContext
  * queda en el dispositivo es el .fev, que solo se puede volver a abrir con la
  * contrasena de la boveda (ver EvidenceVault) o desde el servidor.
  *
- * Nombres descriptivos: tipo, agente y fecha; el agente fijo agent_007 se
- * reemplazara cuando exista login real.
+ * Nombres descriptivos: tipo y fecha. Sin el agente (EVD-002): el nombre viaja como
+ * metadato y no prueba quien grabo; eso lo dice la sesion con la que se sube.
  */
 class LocalEvidenceRepository(private val context: Context) {
 
@@ -45,6 +48,20 @@ class LocalEvidenceRepository(private val context: Context) {
 
     /** Captura ya cerrada, con el resultado del cifrado (null si no se pudo cifrar). */
     data class SealedCapture(val target: MediaTarget, val sealed: EvidenceCrypto.Sealed?)
+
+    /** A que incidente pertenece una captura. Es lo que la subida manda con ella. */
+    data class Procedencia(
+        val evidenceId: String,
+        val incidentId: String?,
+        val label: String,
+        val type: EvidenceType,
+    )
+
+    /**
+     * A quien se entrega una captura que se cifro al reintentar, cuando ya nadie la
+     * esperaba. Lo pone AppContainer: la subida se crea despues que este repositorio.
+     */
+    var alCifrarTarde: ((EvidenceCrypto.Sealed, Procedencia) -> Unit)? = null
 
     fun createPhotoTarget(): MediaTarget? = createTarget("photo", "jpg")
 
@@ -79,11 +96,11 @@ class LocalEvidenceRepository(private val context: Context) {
     private fun createTarget(type: String, extension: String): MediaTarget? {
         val carpeta = capturesDir() ?: return null
         val fecha = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss-SSS", Locale.US).format(Date())
-        var nombre = "${type}_${AGENT_ID}_$fecha.$extension"
+        var nombre = "${type}_$fecha.$extension"
         var archivo = File(carpeta, nombre)
         var repeticion = 1
         while (archivo.exists()) {
-            nombre = "${type}_${AGENT_ID}_${fecha}_$repeticion.$extension"
+            nombre = "${type}_${fecha}_$repeticion.$extension"
             archivo = File(carpeta, nombre)
             repeticion++
         }
@@ -102,22 +119,113 @@ class LocalEvidenceRepository(private val context: Context) {
      * cifrado hace disco y CPU y nunca puede correr en el hilo principal (una
      * grabacion de 20 min tarda unos 5 s).
      *
-     * Si el cifrado falla el original se queda donde esta, sin cifrar, y el fallo
-     * queda en el log: perder la evidencia seria peor que tenerla en claro dentro
-     * de la carpeta privada de la app.
+     * Si el cifrado falla el original se queda donde esta, sin cifrar: perder la
+     * evidencia seria peor que tenerla en claro dentro de la carpeta privada de la
+     * app. Pero no se queda asi (CRY-001): se reintenta en segundo plano unas veces y,
+     * si la app muere antes, al arrancar ([sellarLasQueFallaron]).
      */
-    suspend fun seal(target: MediaTarget, conservarClaro: Boolean = false): EvidenceCrypto.Sealed? =
+    suspend fun seal(target: MediaTarget, conservarClaro: Boolean = false): EvidenceCrypto.Sealed? {
+        val sellada = sellar(target.file, conservarClaro)
+        if (sellada == null) reintentarMasTarde(target.file, conservarClaro)
+        return sellada
+    }
+
+    private suspend fun sellar(claro: File, conservarClaro: Boolean): EvidenceCrypto.Sealed? =
         withContext(Dispatchers.IO) {
             val carpeta = evidenceDir() ?: run {
                 Log.w(TAG, "Sin carpeta privada para el .fev: la evidencia queda sin cifrar")
                 return@withContext null
             }
             EvidenceCrypto.seal(
-                plain = target.file,
-                dest = File(carpeta, target.name + EvidenceCrypto.EXTENSION),
+                plain = claro,
+                dest = File(carpeta, claro.name + EvidenceCrypto.EXTENSION),
                 borrarClaro = EvidenceCrypto.DELETE_PLAINTEXT && !conservarClaro,
             )
         }
+
+    /**
+     * Lo que suele hacer fallar el cifrado (disco lleno, el Keystore que tarda en
+     * responder) se arregla solo en minutos. Se deja de intentar si el claro ya no
+     * esta o si alguien ya lo cifro.
+     */
+    private fun reintentarMasTarde(claro: File, conservarClaro: Boolean) {
+        scope.launch {
+            for (espera in ESPERAS_REINTENTO_MILLIS) {
+                delay(espera)
+                if (!claro.isFile || tieneFev(claro)) return@launch
+                val sellada = sellar(claro, conservarClaro)
+                if (sellada != null) {
+                    Log.i(TAG, "${claro.name} cifrada al reintentar")
+                    entregarTarde(claro, sellada)
+                    return@launch
+                }
+            }
+            Log.e(TAG, "${claro.name} sigue sin cifrar: se reintenta al arrancar")
+        }
+    }
+
+    /**
+     * Cifra las capturas que se quedaron en claro sin su .fev porque el cifrado fallo
+     * y la app murio antes de reintentarlo. Solo al arrancar, antes de que haya nada
+     * capturando: con la app en marcha, una grabacion en curso tambien esta en
+     * captures/ sin .fev, y cifrarla a medias la cortaria.
+     *
+     * Las fotos se cifran y se borran. Audio y video conservan el claro, igual que en
+     * la captura normal, para que la recuperacion de la transcripcion y del proxy
+     * ([cifradasEnClaro], [videosSinProxy]) los recoja despues y los borre.
+     */
+    suspend fun sellarLasQueFallaron() {
+        val capturas = capturesDir() ?: return
+        val sinCifrar = capturas.listFiles { f ->
+            f.isFile && !f.name.endsWith(PROXY_SUFFIX) && !f.name.endsWith(SUFIJO_PROCEDENCIA) && !tieneFev(f)
+        }.orEmpty()
+        sinCifrar.forEach { claro ->
+            val esFoto = claro.name.startsWith("photo_")
+            val sellada = sellar(claro, conservarClaro = !esFoto) ?: return@forEach
+            Log.i(TAG, "${claro.name} cifrada al arrancar")
+            entregarTarde(claro, sellada)
+        }
+    }
+
+    /**
+     * Apunta junto al claro a que incidente pertenece una captura que no se pudo
+     * cifrar. Se hace en el momento del fallo, cuando el incidente aun se conoce: el
+     * reintento puede llegar tras un reinicio, y sin esto la captura llegaria al
+     * backend sin enlace.
+     */
+    fun anotarParaElReintento(target: MediaTarget, procedencia: Procedencia) {
+        val datos = JSONObject()
+            .put("evidence_id", procedencia.evidenceId)
+            .put("label", procedencia.label)
+            .put("type", procedencia.type.name)
+        procedencia.incidentId?.let { datos.put("incident_id", it) }
+        runCatching { procedenciaDe(target.file).writeText(datos.toString()) }
+            .onFailure { Log.e(TAG, "no se pudo apuntar el incidente de ${target.name}: ${it.message}") }
+    }
+
+    /**
+     * Sin procedencia apuntada (una captura de antes de este cambio, o las gafas, que
+     * van sin incidente) no se encola aqui: la subida de lo pendiente la manda igual,
+     * sin incident_id.
+     */
+    private fun entregarTarde(claro: File, sellada: EvidenceCrypto.Sealed) {
+        val fichero = procedenciaDe(claro)
+        val datos = runCatching { JSONObject(fichero.readText()) }.getOrNull() ?: return
+        fichero.delete()
+        val tipo = EvidenceType.entries.find { it.name == datos.optString("type") } ?: return
+        val procedencia = Procedencia(
+            evidenceId = datos.optString("evidence_id"),
+            incidentId = datos.optString("incident_id").ifBlank { null },
+            label = datos.optString("label"),
+            type = tipo,
+        )
+        alCifrarTarde?.invoke(sellada, procedencia)
+    }
+
+    private fun procedenciaDe(claro: File) = File(claro.path + SUFIJO_PROCEDENCIA)
+
+    private fun tieneFev(claro: File): Boolean =
+        evidenceDir()?.let { File(it, claro.name + EvidenceCrypto.EXTENSION).isFile } == true
 
     /**
      * Donde se escribe en claro el proxy de [original]: junto a el, en captures/, y
@@ -353,8 +461,9 @@ class LocalEvidenceRepository(private val context: Context) {
         const val BODYCAM_TRANSCRIPTS_SUBFOLDER = "bodycam"
         private const val BODYCAM_TRANSCRIPTS_FOLDER = "$TRANSCRIPTS_FOLDER/$BODYCAM_TRANSCRIPTS_SUBFOLDER"
         private const val PROXY_SUFFIX = "_proxy.mp4"
+        private const val SUFIJO_PROCEDENCIA = ".procedencia.json"
 
-        // Sin sistema de login todavia: agente fijo para nombrar la evidencia.
-        private const val AGENT_ID = "agent_007"
+        /** Reintentos del cifrado que fallo: al minuto, a los 5 y a los 15. */
+        private val ESPERAS_REINTENTO_MILLIS = listOf(60_000L, 4 * 60_000L, 10 * 60_000L)
     }
 }

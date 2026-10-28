@@ -312,13 +312,17 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+    implementation(libs.zxing.core)
     implementation(libs.androidx.media3.transformer)
     implementation(libs.androidx.media3.effect)
     // Base de datos local: los incidents creados en campo sobreviven al cierre de la app.
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+    // Cifrado en reposo de la base de Room (CRY-002). Ver data/local/BaseCifrada.kt.
+    implementation(libs.sqlcipher.android)
     testImplementation(libs.junit)
+    testImplementation(libs.org.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -62,7 +62,7 @@ import kotlinx.coroutines.delay
 
 /** Pestanas principales de la barra de navegacion inferior. */
 enum class MainTab(val label: String, val icon: ImageVector) {
-    OPERATIONS("Operations", Icons.Filled.Bolt),
+    OPERATIONS("Ops", Icons.Filled.Bolt),
     MAP("Map", Icons.Filled.Map),
     INCIDENTS("Incidents", Icons.Filled.Description),
     PROFILE("Profile", Icons.Filled.Person),

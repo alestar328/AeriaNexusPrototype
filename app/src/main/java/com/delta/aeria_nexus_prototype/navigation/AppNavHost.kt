@@ -15,7 +15,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.AppContainer
+import com.delta.aeria_nexus_prototype.data.BodycamState
+import com.delta.aeria_nexus_prototype.data.GafasState
+import com.delta.aeria_nexus_prototype.feature.profile.FichaDelAgente
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerScreen
@@ -260,6 +264,7 @@ fun AppNavHost() {
                         AppContainer.locationRepository,
                         AppContainer.batteryRepository,
                         AppContainer.agoraRepository,
+                        AppContainer.historialSos,
                     )
                 },
                 onOpenLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
@@ -278,8 +283,26 @@ fun AppNavHost() {
         composable(Routes.PROFILE) {
             val sosActivo by AppContainer.agoraRepository.sosActive.collectAsStateWithLifecycle()
             val tonoSos by AppContainer.ajustesSos.tono.collectAsStateWithLifecycle()
+            val confianza by AppContainer.identityRepository.status.collectAsStateWithLifecycle()
+            val bodycam by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
+            val gafas by AppContainer.gafasRepository.state.collectAsStateWithLifecycle()
+            // Nada de datos de ejemplo: lo que AeriaOne no ha mandado no se ensena.
+            val identidad = confianza.identity
+            val perfil = AppContainer.perfilDelAgente.actual()
+            val userId = identidad?.userId.orEmpty()
             ProfileScreen(
-                profile = repositorio.officerProfile,
+                profile = FichaDelAgente(
+                    nombre = perfil?.nombre?.takeIf { it.isNotBlank() } ?: userId,
+                    userId = userId,
+                    placa = perfil?.placa.orEmpty(),
+                    rango = perfil?.rango.orEmpty(),
+                    unidad = perfil?.unidad.orEmpty(),
+                    tenant = AppContainer.almacenDeInvitacion.actual()?.tenant.orEmpty(),
+                    deviceId = identidad?.deviceId.orEmpty(),
+                    bodycamConectada = bodycam == BodycamState.CONNECTED,
+                    gafasConectadas = gafas == GafasState.CONNECTED,
+                    versionDeLaApp = BuildConfig.VERSION_NAME,
+                ),
                 onOpenVault = { navController.navigate(Routes.VAULT) },
                 onChangePin = { navController.navigate(Routes.CHANGE_PIN) },
                 // TrustGate cambia a la pantalla de bloqueo en cuanto el estado pasa a

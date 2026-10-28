@@ -87,6 +87,10 @@ class EnrollmentRepository(private val context: Context) {
         return runCatching { Pem.leerCertificados(fichero.readText()).firstOrNull() }.getOrNull()
     }
 
+    /** El ancla tal como se guardo, para compararla con la huella del QR de alta. */
+    fun anclaDePerifericosPem(): String? =
+        File(carpeta, FICHERO_ANCLA).takeIf { it.isFile }?.readText()
+
     fun instalarAnclaDePerifericos(pem: String): X509Certificate {
         val ancla = Pem.leerCertificados(pem).firstOrNull()
             ?: error("El PEM del ancla no trae ningun certificado")

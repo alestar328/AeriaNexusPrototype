@@ -30,6 +30,7 @@ import com.delta.aeria_nexus_prototype.data.GafasSondaListado
 import com.delta.aeria_nexus_prototype.data.identity.TrustBlockReason
 import com.delta.aeria_nexus_prototype.data.identity.TrustState
 import com.delta.aeria_nexus_prototype.navigation.TrustGate
+import com.delta.aeria_nexus_prototype.ui.components.AvisoBaseEnCuarentena
 import com.delta.aeria_nexus_prototype.ui.theme.AeriaNexusPrototypeTheme
 
 private const val TAG_ALTA = "AeriaAlta"
@@ -83,6 +84,7 @@ class MainActivity : ComponentActivity() {
                 // La app ya no arranca operativa: TrustGate decide si se ve la
                 // navegacion, la pantalla de PIN o un terminal fuera de servicio.
                 TrustGate()
+                AvisoBaseEnCuarentena()
             }
         }
     }
@@ -167,7 +169,7 @@ class MainActivity : ComponentActivity() {
  * gafas, para poder probar la categorizacion sin tener el protocolo resuelto.
  *
  *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es import_raw last
- *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es import_raw video_agent_007_2026-09-09_10-11-12.mp4.fev  *         --el recorded_at 1757404272000
+ *     adb shell am start -n com.delta.aeria_nexus_prototype/.MainActivity  *         --es import_raw video_2026-09-09_10-11-12-000.mp4.fev  *         --el recorded_at 1757404272000
  *
  * `last` coge el .fev mas reciente. Sin `recorded_at` la fila queda **sin fecha de
  * grabacion**, que es el caso que hay que ver funcionando: es lo que pasara con un

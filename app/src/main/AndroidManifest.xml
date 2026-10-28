@@ -51,13 +51,17 @@
          No se distribuye por Play, asi que este permiso no necesita justificacion. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- usesCleartextTraffic: el servidor HTTP de la bodycam W1 (visor remoto
-         y descarga de grabaciones) es http:// en la red WiFi local; sin esto
-         Android bloquea la conexion. El trafico a internet sigue siendo TLS. -->
+    <!-- networkSecurityConfig: sin http en release (COM-004); en depuracion se
+         permite hacia el backend de desarrollo. El visor de la W1 en la wifi local
+         va aparte, ver data/red/HttpEnRedLocal.kt.
+         allowBackup=false y reglas que lo excluyen todo: la identidad (Device ID,
+         agente, QR de alta) es de ESTE telefono y sus claves no salen del Keystore.
+         Restaurada en otro, el telefono se presentaba con el Device ID de otro
+         terminal y AeriaOne le negaba la sesion (2026-10-19). -->
     <application
         android:name=".AeriaNexusApp"
-        android:allowBackup="true"
-        android:usesCleartextTraffic="true"
+        android:allowBackup="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

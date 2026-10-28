@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -50,11 +51,27 @@ import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
 @Composable
 fun EnrollmentScreen(viewModel: EnrollmentViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    EnrollmentContent(uiState = uiState, onIniciar = viewModel::iniciar)
+    if (uiState.escaneando) {
+        EscanerDeQr(onLeido = viewModel::onQrLeido, onCancelar = viewModel::cerrarEscaner)
+        return
+    }
+    EnrollmentContent(
+        uiState = uiState,
+        onIniciar = viewModel::onBotonPrincipal,
+        onAgenteIdChange = viewModel::onAgenteIdChange,
+        onEscanear = viewModel::abrirEscaner,
+        onSinQr = viewModel::iniciar,
+    )
 }
 
 @Composable
-private fun EnrollmentContent(uiState: EnrollmentUiState, onIniciar: () -> Unit) {
+private fun EnrollmentContent(
+    uiState: EnrollmentUiState,
+    onIniciar: () -> Unit,
+    onAgenteIdChange: (String) -> Unit = {},
+    onEscanear: () -> Unit = {},
+    onSinQr: () -> Unit = {},
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -83,10 +100,15 @@ private fun EnrollmentContent(uiState: EnrollmentUiState, onIniciar: () -> Unit)
             // Tras un fallo se sigue viendo la lista: el paso en rojo dice que fallo
             // y por que, y eso es lo que hay que dictar por radio a soporte.
             val hayProgreso = uiState.pasos.any { it.estado != PasoEstado.PENDIENTE }
-            if (uiState.iniciada || hayProgreso) {
-                ListaDePasos(uiState)
-            } else {
-                Presentacion(mensajeError = uiState.mensajeError)
+            when {
+                uiState.pideAgente -> FormularioDelAgente(
+                    agenteId = uiState.agenteId,
+                    error = uiState.errorDeAgenteId,
+                    onAgenteIdChange = onAgenteIdChange,
+                    onContinuar = onIniciar,
+                )
+                uiState.iniciada || hayProgreso -> ListaDePasos(uiState)
+                else -> Presentacion(mensajeError = uiState.mensajeError, hayQr = uiState.hayQr)
             }
         }
 
@@ -101,18 +123,37 @@ private fun EnrollmentContent(uiState: EnrollmentUiState, onIniciar: () -> Unit)
                 colors = ButtonDefaults.buttonColors(containerColor = AzulPrimario),
             ) {
                 Text(
-                    text = if (uiState.mensajeError != null) "TRY AGAIN" else "ENROLL THIS PHONE",
+                    text = textoDelBoton(uiState),
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,
                 )
             }
+            BotonSecundario(uiState, onEscanear = onEscanear, onSinQr = onSinQr)
         }
     }
 }
 
+/**
+ * Otro QR cuando ya hay uno guardado, y el alta sin QR que solo existe en
+ * depuracion con upload.conf. Nada de esto se ofrece en una version final sin QR.
+ */
 @Composable
-private fun Presentacion(mensajeError: String?) {
+private fun BotonSecundario(uiState: EnrollmentUiState, onEscanear: () -> Unit, onSinQr: () -> Unit) {
+    val (texto, accion) = when {
+        uiState.pideQrNuevo -> return
+        uiState.pideAgente -> "SCAN ENROLLMENT QR" to onEscanear
+        uiState.hayQr -> "SCAN A DIFFERENT QR" to onEscanear
+        uiState.permiteSinQr -> "ENROLL WITHOUT QR (DEBUG)" to onSinQr
+        else -> return
+    }
+    TextButton(onClick = accion, modifier = Modifier.fillMaxWidth()) {
+        Text(texto, color = TextoSecundario, fontSize = 13.sp, letterSpacing = 1.sp)
+    }
+}
+
+@Composable
+private fun Presentacion(mensajeError: String?, hayQr: Boolean) {
     Icon(
         Icons.Filled.PhonelinkSetup,
         contentDescription = null,
@@ -135,6 +176,16 @@ private fun Presentacion(mensajeError: String?) {
         fontSize = 15.sp,
         lineHeight = 22.sp,
     )
+    if (!hayQr) {
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "Ask your supervisor to show your enrollment QR in AeriaOne, then scan it. " +
+                "After that you only choose your PIN.",
+            color = TextoPrincipal,
+            fontSize = 15.sp,
+            lineHeight = 22.sp,
+        )
+    }
     Spacer(Modifier.height(16.dp))
     Text(
         // El telefono es del agente. Decirlo antes de empezar, no en una politica
@@ -174,6 +225,14 @@ private fun ListaDePasos(uiState: EnrollmentUiState) {
 
         uiState.pasos.forEach { paso -> FilaPaso(paso) }
     }
+}
+
+private fun textoDelBoton(uiState: EnrollmentUiState): String = when {
+    uiState.pideAgente -> "CONTINUE"
+    uiState.pideQrNuevo -> "SCAN NEW QR"
+    !uiState.hayQr -> "SCAN ENROLLMENT QR"
+    uiState.mensajeError != null -> "TRY AGAIN"
+    else -> "ENROLL THIS PHONE"
 }
 
 private fun tituloDe(uiState: EnrollmentUiState): String = when {
@@ -220,11 +279,27 @@ private fun EnrollmentFalloPreview() {
                 fase = FaseAlta.AGENTE,
                 mensajeError = "AeriaOne answered 404: No hay ningun perfil dado de alta",
                 pasos = listOf(
-                    PasoAlta("Officer identity", PasoEstado.AVISO, "cmendez.aeriaone.com · provided locally, must exist in AeriaOne"),
+                    PasoAlta("Officer identity", PasoEstado.AVISO, "cmendez.aeriaone.com · typed by the officer, must exist in AeriaOne"),
                     PasoAlta("Officer key pair in secure hardware", PasoEstado.HECHO, "Trusted execution environment · separate from the device key"),
                     PasoAlta("Certificate request", PasoEstado.HECHO, "PKCS#10 · ECDSA P-256 · SHA-256"),
                     PasoAlta("Submit to AeriaOne", PasoEstado.FALLIDO, "AeriaOne answered 404: No hay ningun perfil dado de alta"),
                 ),
+            ),
+            onIniciar = {},
+        )
+    }
+}
+
+@Preview(name = "Identificador del agente", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
+@Composable
+private fun EnrollmentAgentePreview() {
+    AeriaNexusPrototypeTheme {
+        EnrollmentContent(
+            uiState = EnrollmentUiState(
+                fase = FaseAlta.AGENTE,
+                pideAgente = true,
+                agenteId = "cmendez.aeriaone",
+                errorDeAgenteId = EnrollmentViewModel.ERROR_DE_FORMATO,
             ),
             onIniciar = {},
         )

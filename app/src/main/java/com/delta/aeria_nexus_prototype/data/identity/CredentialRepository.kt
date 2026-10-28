@@ -29,9 +29,23 @@ class CredentialRepository(private val context: Context) {
 
     private val prefs = context.getSharedPreferences("aeria_credential", Context.MODE_PRIVATE)
 
-    /** Paso 6: par de claves del agente. Sin reto de atestacion, ver [ClaveEnKeystore]. */
-    fun generarClave(): NivelClave {
-        ClaveEnKeystore.agente.generarPar()
+    /**
+     * Paso 6: par de claves del agente. Sin reto de atestacion, ver [ClaveEnKeystore].
+     *
+     * Si un intento anterior de ESTE agente se quedo sin certificado, se reutiliza su
+     * par. Es lo que pide el contrato (iam-session.md §4.2): si la respuesta del alta
+     * se pierde, AeriaOne solo vuelve a entregar la credencial a quien repite con la
+     * misma clave; con un par nuevo contesta 409 y hace falta un administrador.
+     */
+    fun generarClave(userId: String): NivelClave {
+        val pendienteDe = prefs.getString(CLAVE_PAR_PENDIENTE_DE, null)
+        if (pendienteDe != userId || !ClaveEnKeystore.agente.existe()) {
+            // Se olvida antes de generar: si esto se corta a medias no queda apuntado
+            // un par que ya no es el que hay en el Keystore.
+            prefs.edit().remove(CLAVE_PAR_PENDIENTE_DE).apply()
+            ClaveEnKeystore.agente.generarPar()
+            prefs.edit().putString(CLAVE_PAR_PENDIENTE_DE, userId).apply()
+        }
         return ClaveEnKeystore.agente.nivelDeLaClave()
     }
 
@@ -68,7 +82,10 @@ class CredentialRepository(private val context: Context) {
         require(nombreComun == userIdEsperado) {
             "El certificado viene a nombre de $nombreComun y no de $userIdEsperado"
         }
-        prefs.edit().putString(CLAVE_USER_ID, userIdEsperado).apply()
+        prefs.edit()
+            .putString(CLAVE_USER_ID, userIdEsperado)
+            .remove(CLAVE_PAR_PENDIENTE_DE)
+            .apply()
         return delAgente
     }
 
@@ -129,5 +146,8 @@ class CredentialRepository(private val context: Context) {
 
     private companion object {
         const val CLAVE_USER_ID = "user_id"
+
+        /** Agente para el que se genero un par que aun no tiene certificado. */
+        const val CLAVE_PAR_PENDIENTE_DE = "pending_key_user_id"
     }
 }

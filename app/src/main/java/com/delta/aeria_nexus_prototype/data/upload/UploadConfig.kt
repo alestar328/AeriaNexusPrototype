@@ -2,8 +2,11 @@ package com.delta.aeria_nexus_prototype.data.upload
 
 import android.content.Context
 import android.util.Log
+import com.delta.aeria_nexus_prototype.BuildConfig
+import com.delta.aeria_nexus_prototype.data.identity.AlmacenDeInvitacion
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import java.io.File
+import java.net.HttpURLConnection
 
 private const val TAG = "FalconUploadCfg"
 
@@ -27,12 +30,17 @@ private const val TAG = "FalconUploadCfg"
  * La credencial NO esta en el fichero: es el token de la sesion que se abre con el PIN
  * ([SesionBackend]). Sin sesion no se sube nada, y lo pendiente sale al abrirla.
  *
- * El destino por defecto queda **vacío a propósito**: una app sin `upload.conf` no debe
- * empezar a mandar evidencia a un sitio que nadie ha confirmado.
+ * Desde el alta por QR (iam-session.md §4.4) el servidor sale del QR escaneado. El
+ * fichero solo cuenta en compilaciones de depuracion, y ahi manda sobre el QR; en una
+ * version final se ignora: desviar la evidencia no puede costar un `adb push`.
+ *
+ * El destino por defecto queda **vacío a propósito**: una app sin QR ni `upload.conf` no
+ * debe empezar a mandar evidencia a un sitio que nadie ha confirmado.
  */
 class UploadConfig(
     private val context: Context,
     private val sesion: SesionBackend,
+    private val invitacion: AlmacenDeInvitacion,
 ) {
 
     private val confFile: File?
@@ -44,6 +52,7 @@ class UploadConfig(
      * entero de prueba.
      */
     private fun conf(): Map<String, String> {
+        if (!BuildConfig.DEBUG) return emptyMap()
         val file = confFile ?: return emptyMap()
         if (!file.isFile) return emptyMap()
         return try {
@@ -62,7 +71,9 @@ class UploadConfig(
 
     /** Siempre con barra final: la URL de creación es un directorio, no un recurso. */
     fun baseUrl(): String {
-        val raw = conf()["base_url"]?.takeIf { it.isNotBlank() } ?: DEFAULT_BASE_URL
+        val raw = conf()["base_url"]?.takeIf { it.isNotBlank() }
+            ?: invitacion.actual()?.baseUrl
+            ?: DEFAULT_BASE_URL
         return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
     }
 
@@ -72,7 +83,8 @@ class UploadConfig(
      * un servidor que nadie ha confirmado.
      */
     fun apiUrl(): String {
-        val raw = conf()["api_url"].orEmpty()
+        val raw = conf()["api_url"]?.takeIf { it.isNotBlank() }
+            ?: invitacion.actual()?.apiUrl.orEmpty()
         return if (raw.isBlank() || raw.endsWith("/")) raw else "$raw/"
     }
 
@@ -81,6 +93,19 @@ class UploadConfig(
      * fichero: el backend rechaza cualquier cosa que no haya emitido el mismo.
      */
     fun token(): String? = sesion.token()
+
+    /** Para los avisos de SOS, que un agente suspendido tambien puede mandar. */
+    fun tokenParaSos(): String? = sesion.tokenParaSos()
+
+    /**
+     * El backend ha contestado 401 o 403 a una peticion con ese token. Si el motivo es
+     * que el perfil esta suspendido o revocado, la sesion se descarta y se avisa al agente.
+     */
+    fun avisarSiRechazo(conexion: HttpURLConnection, codigoHttp: Int) {
+        if (codigoHttp == HttpURLConnection.HTTP_UNAUTHORIZED || codigoHttp == HttpURLConnection.HTTP_FORBIDDEN) {
+            sesion.rechazada(conexion.getHeaderField("X-Error-Code"))
+        }
+    }
 
     fun chunkBytes(): Int =
         conf()["chunk_bytes"]?.toIntOrNull()?.takeIf { it in 64 * 1024..64 * 1024 * 1024 }
@@ -94,6 +119,9 @@ class UploadConfig(
         }
         return true
     }
+
+    /** El servidor sale de upload.conf y no del QR. Solo puede pasar en depuracion. */
+    fun apiDesdeFichero(): Boolean = !conf()["api_url"].isNullOrBlank()
 
     fun describe(): String = "base_url=${baseUrl()} chunk=${chunkBytes() / 1024} KB"
 

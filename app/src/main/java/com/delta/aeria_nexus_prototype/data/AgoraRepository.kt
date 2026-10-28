@@ -38,6 +38,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 /**
@@ -58,6 +59,7 @@ class AgoraRepository(
     private val locationRepository: LocationRepository,
     private val sosNotifier: SosNotifier,
     private val ajustesSos: AjustesSos,
+    private val historialSos: HistorialSos,
     // Uid de Agora de la bodycam enlazada a este telefono, si la hay. Viaja en cada
     // mensaje de posicion para que los demas aten el SOS de la camara (que no
     // tiene GPS) al marcador de este agente en el mapa.
@@ -112,6 +114,19 @@ class AgoraRepository(
 
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
+
+    // Ultima vez que se oyo el "emergency" de cada telefono en SOS. Si deja de
+    // llegar, el SOS se da por cortado aunque no llegue su cancelacion: se pierde
+    // si el emisor se queda sin red, se le cierra la app o se le apaga el telefono.
+    // Lo leen el hilo de Agora y la vigilancia, por eso es concurrente.
+    private val ultimoLatidoSos = ConcurrentHashMap<Int, Long>()
+
+    // SOS de la bodycam propia que este telefono le ha avisado al backend, por uid
+    // de la camara → sos_id. Solo el telefono que la lleva lo avisa: si lo hicieran
+    // todos los del canal, el backend apuntaria la misma emergencia una vez por
+    // cada telefono.
+    private val sosBodycamEnBackend = ConcurrentHashMap<Int, String>()
+    private var ultimoLatidoBodycamMillis = 0L
 
     // Bodycams que estan publicando video en el canal, por uid. Que una bodycam
     // transmita ES su senal de SOS: asi funciona su boton fisico 133 y tambien el
@@ -317,6 +332,7 @@ class AgoraRepository(
             }
             // Un emisor que se desconecta equivale a un livestream cortado.
             _remoteVideoStopped.value = uid
+            if (!esBodycam(uid)) cortarSosSinAviso(uid, System.currentTimeMillis())
             // Solo se quita el marcador si el agente salio del canal a proposito.
             // En una caida transitoria (tunel, sin cobertura) se conserva la
             // ultima posicion conocida y el mapa lo pinta como "sin senal".
@@ -435,6 +451,7 @@ class AgoraRepository(
 
         startLocationSharingIfPermitted()
         startLocationHeartbeat()
+        startVigilanciaSos()
     }
 
     private fun opcionesDelCanal() = ChannelMediaOptions().apply {
@@ -545,12 +562,29 @@ class AgoraRepository(
         sosId = UUID.randomUUID().toString()
         ultimoLatidoBackendMillis = System.currentTimeMillis()
         sosNotifier.inicio(sosId, CHANNEL_ID, miUid, officer, lastLatitude, lastLongitude)
+        historialSos.registrarInicio(
+            RegistroSos(
+                clave = "$miUid@$sosStartedAtMillis",
+                uid = miUid,
+                officer = officer,
+                origen = OrigenSos.ESTE_TELEFONO,
+                inicioMillis = sosStartedAtMillis,
+            ),
+        )
         startSosHeartbeat()
     }
 
     /** Quita del mapa el aviso de corte de senal del agente [uid]. */
     fun dismissSignalCut(uid: Int) {
         _sosSignalCuts.update { it - uid }
+    }
+
+    /**
+     * Quita del mapa el marcador gris de un agente del que ya no llega nada. Si
+     * vuelve a mandar su posicion, reaparece solo.
+     */
+    fun olvidarAgente(uid: Int) {
+        _remoteAgents.update { it - uid }
     }
 
     /** Cancela el SOS propio: corta el livestream y avisa a los receptores. */
@@ -562,6 +596,7 @@ class AgoraRepository(
         _sosActive.value = false
         sendSosCancel()
         sosNotifier.fin(sosId, "cancelled")
+        historialSos.registrarFin(miUid, System.currentTimeMillis(), FinDeSos.TERMINADO)
         stopCameraPublish()
         _microSosCerrado.value = false
         if (_entranteSilenciado.value) alternarSilencioEntrante()
@@ -874,8 +909,12 @@ class AgoraRepository(
             )
             _activeSosAlerts.update { it + (uid to alerta) }
             _incomingSos.tryEmit(alerta)
+            historialSos.registrarInicio(alerta.aRegistro(OrigenSos.BODYCAM))
+            avisarSosDeBodycamAlBackend(uid)
         } else {
             _activeSosAlerts.update { it - uid }
+            historialSos.registrarFin(uid, ahora, FinDeSos.TERMINADO)
+            sosBodycamEnBackend.remove(uid)?.let { sosNotifier.fin(it, "cancelled") }
             // Este corte no se fija en el mapa (sosSignalCuts): la bodycam no
             // emite GPS, asi que no hay posicion donde anclar el aviso.
             _incomingSosCancel.tryEmit(
@@ -888,6 +927,32 @@ class AgoraRepository(
                 ),
             )
         }
+    }
+
+    private fun avisarSosDeBodycamAlBackend(uid: Int) {
+        if (uid != uidBodycamPropia()) return
+        val id = UUID.randomUUID().toString()
+        sosBodycamEnBackend[uid] = id
+        ultimoLatidoBodycamMillis = System.currentTimeMillis()
+        sosNotifier.inicio(
+            sosId = id,
+            channel = CHANNEL_ID,
+            uid = uid,
+            officer = sosOfficer.ifBlank { BODYCAM_OFFICER },
+            // La camara no tiene GPS: va la posicion de este telefono, que la lleva puesta.
+            latitude = lastLatitude,
+            longitude = lastLongitude,
+            bwcId = bwcDelUid(uid),
+        )
+    }
+
+    /** El backend da el SOS por perdido a los 30 s sin latido; la bodycam no late sola. */
+    private fun latirSosDeBodycam() {
+        if (sosBodycamEnBackend.isEmpty()) return
+        val ahora = System.currentTimeMillis()
+        if (ahora - ultimoLatidoBodycamMillis < BACKEND_HEARTBEAT_MILLIS) return
+        ultimoLatidoBodycamMillis = ahora
+        sosBodycamEnBackend.values.forEach { sosNotifier.latido(it) }
     }
 
     private fun startLocationSharingIfPermitted() {
@@ -1048,6 +1113,8 @@ class AgoraRepository(
                 // El SOS queda fijado para el mapa mientras no se cancele; los
                 // reenvios del heartbeat solo refrescan el mismo valor.
                 _activeSosAlerts.update { it + (remoteUid to alerta) }
+                ultimoLatidoSos[remoteUid] = System.currentTimeMillis()
+                historialSos.registrarInicio(alerta.aRegistro(OrigenSos.TELEFONO))
                 // Solo la primera vez que se ve una sesion se alerta al usuario;
                 // los reenvios del heartbeat de esa misma sesion se ignoran.
                 if (seenSosKeys.add(sessionKey)) {
@@ -1077,12 +1144,74 @@ class AgoraRepository(
                     latitude = mensaje.optDoubleOrNull("lat"),
                     longitude = mensaje.optDoubleOrNull("lng"),
                 )
-                _activeSosAlerts.update { it - remoteUid }
-                _incomingSosCancel.tryEmit(cancelacion)
-                _sosSignalCuts.update { it + (remoteUid to cancelacion) }
+                cerrarSosRemoto(cancelacion, FinDeSos.TERMINADO)
             }
         }
     }
+
+    /**
+     * Quita el SOS de otro telefono: se cierran su popup y su banner y queda en el
+     * mapa el aviso de corte, con la hora, hasta que el usuario lo cierre.
+     */
+    private fun cerrarSosRemoto(cancelacion: SosCancel, fin: FinDeSos) {
+        val uid = cancelacion.uid
+        ultimoLatidoSos.remove(uid)
+        historialSos.registrarFin(uid, cancelacion.timestampMillis, fin)
+        if (uid in _activeSosAlerts.value) {
+            _activeSosAlerts.update { it - uid }
+            _incomingSosCancel.tryEmit(cancelacion)
+            _sosSignalCuts.update { it + (uid to cancelacion) }
+        } else if (uid in _sosSignalCuts.value) {
+            // La cancelacion llega despues de haberlo dado por perdido: solo se
+            // corrige la hora. Si el usuario ya cerro el aviso, no se le reabre.
+            _sosSignalCuts.update { it + (uid to cancelacion) }
+        }
+    }
+
+    /** Da por cortado el SOS del telefono [uid] sin que haya llegado su cancelacion. */
+    private fun cortarSosSinAviso(uid: Int, ultimaNoticiaMillis: Long) {
+        val alerta = _activeSosAlerts.value[uid] ?: return
+        val posicion = _remoteAgents.value[uid]
+        cerrarSosRemoto(
+            SosCancel(
+                officer = alerta.officer,
+                uid = uid,
+                timestampMillis = ultimaNoticiaMillis,
+                latitude = posicion?.latitude ?: alerta.latitude,
+                longitude = posicion?.longitude ?: alerta.longitude,
+            ),
+            FinDeSos.SENAL_PERDIDA,
+        )
+    }
+
+    /**
+     * Cada pocos segundos mira que SOS de telefono han dejado de oirse. Mientras este
+     * telefono este fuera del canal no se puede saber si siguen: se espera a volver
+     * a entrar y se les da el mismo margen desde ese momento.
+     */
+    private fun startVigilanciaSos() {
+        scope.launch {
+            while (isActive) {
+                delay(VIGILANCIA_SOS_MILLIS)
+                latirSosDeBodycam()
+                val ahora = System.currentTimeMillis()
+                ultimoLatidoSos.forEach { (uid, ultimo) ->
+                    when {
+                        !_isConnected.value -> ultimoLatidoSos[uid] = ahora
+                        ahora - ultimo > SOS_SIN_LATIDO_MILLIS -> cortarSosSinAviso(uid, ultimo)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun SosAlert.aRegistro(origen: OrigenSos) = RegistroSos(
+        clave = sessionKey,
+        uid = uid,
+        officer = officer,
+        origen = origen,
+        inicioMillis = startedAtMillis,
+    )
 
     companion object {
         private const val TAG = "AgoraRepository"
@@ -1106,6 +1235,10 @@ class AgoraRepository(
         // pisan. Quitarlo cuando no quede ninguna W1 con la version antigua.
         private const val UID_BODYCAM_ANTIGUO = 9001
 
+        /** BWC de la bodycam que entra con [uid]: el uid es 10000 + su sufijo hexadecimal. */
+        fun bwcDelUid(uid: Int): String? =
+            if (uid in PRIMER_UID_BODYCAM..ULTIMO_UID_BODYCAM) "BWC-%04X".format(uid - PRIMER_UID_BODYCAM) else null
+
         /** True si [uid] es una bodycam y no un telefono ni el grabador en la nube. */
         fun esBodycam(uid: Int): Boolean =
             uid == UID_BODYCAM_ANTIGUO || uid in PRIMER_UID_BODYCAM..ULTIMO_UID_BODYCAM
@@ -1116,6 +1249,11 @@ class AgoraRepository(
         private const val LOCATION_SEND_INTERVAL_MILLIS = 1_000L
         private const val HEARTBEAT_INTERVAL_MILLIS = 3_000L
         private const val BACKEND_HEARTBEAT_MILLIS = 10_000L
+
+        // El emisor reanuncia su SOS cada 3 s (HEARTBEAT_INTERVAL_MILLIS): 10 s
+        // sin oirlo son tres reenvios perdidos seguidos.
+        private const val SOS_SIN_LATIDO_MILLIS = 10_000L
+        private const val VIGILANCIA_SOS_MILLIS = 2_000L
 
         // Volumen de reproduccion por defecto de Agora (0-400).
         private const val VOLUMEN_NORMAL = 100

@@ -5,13 +5,16 @@ import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.ContextoDeAuditoria
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
+import com.delta.aeria_nexus_prototype.data.identity.AlmacenDeInvitacion
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
 import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
+import com.delta.aeria_nexus_prototype.data.identity.PerfilDelAgente
 import com.delta.aeria_nexus_prototype.data.identity.PinLocal
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import com.delta.aeria_nexus_prototype.data.identity.VigilanteDeCaducidad
+import com.delta.aeria_nexus_prototype.data.local.BaseCifrada
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.transcript.MotorWhisper
 import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
@@ -21,6 +24,9 @@ import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import com.delta.aeria_nexus_prototype.data.upload.UploadSessions
 import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 
 /**
@@ -28,6 +34,20 @@ import kotlinx.coroutines.flow.combine
  * en AeriaNexusApp; no se usa ningun framework de inyeccion.
  */
 object AppContainer {
+    private val _avisoBaseEnCuarentena = MutableStateFlow(false)
+
+    /**
+     * La base local no se pudo abrir y se aparto (ver BaseCifrada): el agente tiene que
+     * saber que los incidentes que hubiera en este telefono ya no estan. Sigue en true
+     * en cada arranque hasta que lo confirma.
+     */
+    val avisoBaseEnCuarentena: StateFlow<Boolean> = _avisoBaseEnCuarentena.asStateFlow()
+
+    fun confirmarAvisoBaseEnCuarentena(context: Context) {
+        BaseCifrada.avisoVisto(context.applicationContext)
+        _avisoBaseEnCuarentena.value = false
+    }
+
     lateinit var incidentRepository: IncidentRepository
         private set
     lateinit var locationRepository: LocationRepository
@@ -35,6 +55,7 @@ object AppContainer {
     lateinit var batteryRepository: BatteryRepository
         private set
     lateinit var agoraRepository: AgoraRepository
+    lateinit var historialSos: HistorialSos
         private set
     lateinit var bodycamRepository: BodycamRepository
         private set
@@ -64,11 +85,15 @@ object AppContainer {
         private set
     lateinit var enrollmentRepository: EnrollmentRepository
         private set
+    lateinit var perfilDelAgente: PerfilDelAgente
+        private set
     lateinit var credentialRepository: CredentialRepository
         private set
     lateinit var pinLocal: PinLocal
         private set
     lateinit var iamClient: IamClient
+        private set
+    lateinit var almacenDeInvitacion: AlmacenDeInvitacion
         private set
     lateinit var evidenceUploader: EvidenceUploader
         private set
@@ -96,12 +121,16 @@ object AppContainer {
         // Una sola instancia de Room: build() no es singleton, y abrir dos sobre el
         // mismo fichero significa dos pools de conexiones y dos rastreadores de
         // invalidacion peleandose por el mismo WAL.
-        val db = IncidentDatabase.build(appContext)
+        val db = IncidentDatabase.build(appContext) { apartada ->
+            auditoria.registrar(TipoEvento.BASE_EN_CUARENTENA, listOf("file" to apartada.name))
+        }
+        _avisoBaseEnCuarentena.value = BaseCifrada.hayAvisoPendiente(appContext)
         val dao = db.incidentDao()
-        // Un solo upload.conf para la subida, los avisos del SOS y el IAM. El token con
-        // el que se sube lo pone la sesion que se abre con el PIN.
+        // Un solo destino para la subida, los avisos del SOS y el IAM: el del QR de alta
+        // (o upload.conf en depuracion). El token lo pone la sesion que se abre con el PIN.
         val sesionBackend = SesionBackend()
-        val uploadConfig = UploadConfig(appContext, sesionBackend)
+        almacenDeInvitacion = AlmacenDeInvitacion(appContext)
+        val uploadConfig = UploadConfig(appContext, sesionBackend, almacenDeInvitacion)
         iamClient = IamClient(uploadConfig)
         locationRepository = LocationRepository(appContext)
         incidentRepository = IncidentRepository(dao, locationRepository)
@@ -110,11 +139,13 @@ object AppContainer {
         batteryRepository = BatteryRepository(appContext)
         ajustesSos = AjustesSos(appContext)
         bodycamRepository = BodycamRepository(appContext, sesionBackend, ajustesSos)
+        historialSos = HistorialSos(appContext, HistorialSosBackend(uploadConfig))
         agoraRepository = AgoraRepository(
             context = appContext,
             locationRepository = locationRepository,
             sosNotifier = SosNotifier(appContext, uploadConfig),
             ajustesSos = ajustesSos,
+            historialSos = historialSos,
             // Solo con el enlace vivo: una bodycam de la que no llega nada no se
             // puede ofrecer como la camara de este agente.
             uidBodycamPropia = {
@@ -147,7 +178,13 @@ object AppContainer {
             config = uploadConfig,
             sessions = uploadSessions,
             dao = dao,
+            // perfilDelAgente se crea mas abajo; la lambda solo se llama al subir.
+            placaDelAgente = { perfilDelAgente.actual()?.placa },
         )
+        // Lo que se cifra al reintentar (el cifrado fallo al capturar) sale con su incidente.
+        localEvidenceRepository.alCifrarTarde = { sellada, p ->
+            evidenceUploader.enqueue(sellada, p.evidenceId, p.incidentId, p.label, p.type)
+        }
         manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions)
         // Antes que las gafas: lo que se baja de ellas tambien se transcribe.
         transcripcionRepository = TranscripcionRepository(
@@ -185,6 +222,7 @@ object AppContainer {
         pinLocal = PinLocal(appContext)
         enrollmentRepository = EnrollmentRepository(appContext)
         credentialRepository = CredentialRepository(appContext)
+        perfilDelAgente = PerfilDelAgente(appContext)
         // Va detras de los anteriores: el desbloqueo autoriza la clave del agente y
         // firma el reto del backend, asi que los necesita ya construidos.
         identityRepository = IdentityRepository(
@@ -193,6 +231,7 @@ object AppContainer {
             credential = credentialRepository,
             iam = iamClient,
             sesionBackend = sesionBackend,
+            perfilDelAgente = perfilDelAgente,
             auditoria = auditoria,
         )
         // Quien actua y desde donde, para cada evento. Se lee en el momento de
@@ -277,5 +316,7 @@ object AppContainer {
         // preferencias seguiria mostrando a que agente y a que terminal pertenecio
         // este telefono despues de haber destruido su identidad.
         identityRepository.deshacerAlta()
+        // El QR apunta al servidor y al agente de la identidad que se acaba de destruir.
+        almacenDeInvitacion.borrar()
     }
 }

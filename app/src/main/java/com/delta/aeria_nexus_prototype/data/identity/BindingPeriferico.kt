@@ -152,6 +152,9 @@ data class BindingActivo(
     val userId: String,
     val bwcId: String,
     val caducaEn: Long,
+
+    /** `binding_id` con el que AeriaOne la registro; null mientras no lo haya hecho. */
+    val idEnBackend: String? = null,
 ) {
     fun caducado(ahora: Long = System.currentTimeMillis()): Boolean = ahora > caducaEn
 }

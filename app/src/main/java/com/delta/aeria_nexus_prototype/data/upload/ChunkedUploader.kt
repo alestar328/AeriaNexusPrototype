@@ -2,6 +2,7 @@ package com.delta.aeria_nexus_prototype.data.upload
 
 import android.util.Base64
 import android.util.Log
+import com.delta.aeria_nexus_prototype.data.red.ConexionBackend
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
@@ -26,7 +27,7 @@ private const val TAG = "FalconChunk"
  *   crear      POST base/          → 201 + Location: URL de la sesión
  *   preguntar  HEAD sesión         → 200 + Upload-Offset: por dónde va el servidor
  *   mandar     PATCH sesión        → 204 + Upload-Offset: nuevo punto de reanudación
- *   verificar  GET sesión/status   → 200 + JSON con complete/verified
+ *   verificar  GET sesión/status   → 200 + JSON con complete/verified y el recibo firmado
  *
  * La verificación no es decorativa: el `.fev` viaja cifrado, así que el hash es lo **único**
  * que el servidor puede comprobar sin tener ninguna clave.
@@ -53,6 +54,9 @@ class ChunkedUploader(
      * [verified] es tri-estado a propósito: `true` el servidor confirmó el hash, `false` lo
      * contradijo —eso es un incidente de integridad, no un fallo de red— y `null` no se
      * pronunció, que es lo que hará un backend que aún no implemente la verificación.
+     *
+     * [receipt] es el recibo firmado por el servidor (receipt-schema.md), o null si no
+     * llegó. Es lo único que autoriza a borrar una copia local, no [verified].
      */
     data class Outcome(
         val delivered: Boolean,
@@ -60,7 +64,11 @@ class ChunkedUploader(
         val sessionUrl: String?,
         val bytesSent: Long,
         val error: String? = null,
+        val receipt: JSONObject? = null,
     )
+
+    /** Lo que contesta `GET sesión/status`: la verificación y el recibo, si los hay. */
+    data class Status(val verified: Boolean?, val receipt: JSONObject?)
 
     /**
      * Sube [file] y no vuelve hasta entregarlo o agotar los reintentos.
@@ -90,6 +98,9 @@ class ChunkedUploader(
             if (url != null) " — reanudando sesión existente" else "")
 
         while (failures < MAX_CONSECUTIVE_FAILURES) {
+            // La sesion puede cerrarse o ser rechazada a mitad de subida: sin token no
+            // tiene sentido gastar los reintentos, se retoma al abrir la siguiente.
+            if (config.token() == null) return Outcome(false, null, url, sent, SIN_SESION)
             try {
                 if (url == null) {
                     url = create(total, metadata)
@@ -114,10 +125,11 @@ class ChunkedUploader(
                 }
 
                 if (at >= total) {
-                    val verified = verify(url)
+                    val status = status(url)
                     sessions.forget(fingerprint)
-                    Log.d(TAG, "${file.name} entregado — verificación: ${describe(verified)}")
-                    return Outcome(true, verified, url, sent)
+                    Log.d(TAG, "${file.name} entregado — verificación: ${describe(status.verified)}" +
+                        ", recibo: ${status.receipt?.optString("status") ?: "ninguno"}")
+                    return Outcome(true, status.verified, url, sent, receipt = status.receipt)
                 }
 
                 val end = minOf(at + chunk, total)
@@ -160,7 +172,10 @@ class ChunkedUploader(
         return try {
             conn.outputStream.close()
             val code = conn.responseCode
-            if (code != 201) throw UploadException("create devolvió $code ${errorBody(conn)}")
+            if (code != 201) {
+                config.avisarSiRechazo(conn, code)
+                throw UploadException("create devolvió $code ${errorBody(conn)}")
+            }
             val location = conn.getHeaderField("Location")
                 ?: throw UploadException("create sin cabecera Location")
             // Location puede ser relativa —el spec lo permite— y resolverla a mano contra
@@ -179,7 +194,10 @@ class ChunkedUploader(
                 200, 204 -> conn.getHeaderField("Upload-Offset")?.toLongOrNull()
                     ?: throw UploadException("HEAD sin Upload-Offset")
                 404, 410 -> -1L
-                else -> throw UploadException("HEAD devolvió $code")
+                else -> {
+                    config.avisarSiRechazo(conn, code)
+                    throw UploadException("HEAD devolvió $code")
+                }
             }
         } finally {
             conn.disconnect()
@@ -231,7 +249,10 @@ class ChunkedUploader(
                 409 -> throw OffsetConflict(
                     conn.getHeaderField("Upload-Offset")?.toLongOrNull() ?: -1L
                 )
-                else -> throw UploadException("PATCH devolvió $code ${errorBody(conn)}")
+                else -> {
+                    config.avisarSiRechazo(conn, code)
+                    throw UploadException("PATCH devolvió $code ${errorBody(conn)}")
+                }
             }
         } finally {
             conn.disconnect()
@@ -239,24 +260,32 @@ class ChunkedUploader(
     }
 
     /**
-     * GET sesión/status → ¿el servidor confirma el hash?
+     * GET sesión/status → ¿el servidor confirma el hash, y con qué recibo?
      *
-     * Extensión propia, no forma parte de tus. Devuelve null si el servidor no la
-     * implementa: un backend que solo hable tus estándar sigue funcionando, solo que sin
-     * confirmación de integridad.
+     * Extensión propia, no forma parte de tus. Sin respuesta útil devuelve todo a null:
+     * un backend que solo hable tus estándar sigue funcionando, solo que sin confirmación
+     * de integridad y sin recibo, y entonces no se borra nada.
+     *
+     * Pública porque el recibo puede no llegar con la subida (red, servidor antiguo) y
+     * hay que volver a pedirlo más tarde con la URL guardada.
      */
-    private fun verify(url: String): Boolean? {
+    fun status(url: String): Status {
         val conn = open(URL("$url/status"), "GET")
         return try {
-            if (conn.responseCode != 200) {
-                Log.w(TAG, "el servidor no implementa /status (${conn.responseCode})")
-                return null
+            val code = conn.responseCode
+            if (code != 200) {
+                config.avisarSiRechazo(conn, code)
+                Log.w(TAG, "el servidor no implementa /status ($code)")
+                return Status(null, null)
             }
             val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-            if (json.isNull("verified")) null else json.getBoolean("verified")
+            Status(
+                verified = if (json.isNull("verified")) null else json.getBoolean("verified"),
+                receipt = json.optJSONObject("receipt"),
+            )
         } catch (e: Exception) {
             Log.w(TAG, "no se pudo leer el estado de la subida: ${e.message}")
-            null
+            Status(null, null)
         } finally {
             conn.disconnect()
         }
@@ -265,7 +294,7 @@ class ChunkedUploader(
     // ── Internos ──────────────────────────────────────────────────────────────
 
     private fun open(url: URL, method: String): HttpURLConnection =
-        (url.openConnection() as HttpURLConnection).apply {
+        ConexionBackend.abrir(url).apply {
             requestMethod = method
             useCaches = false
             instanceFollowRedirects = false

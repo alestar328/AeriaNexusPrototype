@@ -74,11 +74,30 @@ class ActiveIncidentViewModel(
      * Manda a Nexus la captura recien cifrada. Se encola y vuelve: la transferencia
      * corre en el scope de la aplicacion, no en el del ViewModel, porque salir de la
      * pantalla no debe cortar una subida de 40 MB. Sube el .fev, nunca el original.
+     *
+     * Sin cifrar no se sube nada: se apunta a que incidente pertenece [destino] para
+     * que el reintento del cifrado la entregue enlazada. Sin [destino] (foto de la
+     * bodycam) no hay fichero en este telefono.
      */
-    private fun entregar(sellada: EvidenceCrypto.Sealed?, evidencia: EvidenceRecord) {
-        val s = sellada ?: return   // sin cifrar no hay nada que entregar
-        uploader.enqueue(s, evidencia.id, activeIncident.value?.id, evidencia.label, evidencia.type)
+    private fun entregar(
+        sellada: EvidenceCrypto.Sealed?,
+        evidencia: EvidenceRecord,
+        destino: LocalEvidenceRepository.MediaTarget? = null,
+    ) {
+        val incidentId = activeIncident.value?.id
+        if (sellada == null) {
+            destino?.let { localEvidence.anotarParaElReintento(it, procedenciaDe(evidencia)) }
+            return
+        }
+        uploader.enqueue(sellada, evidencia.id, incidentId, evidencia.label, evidencia.type)
     }
+
+    private fun procedenciaDe(evidencia: EvidenceRecord) = LocalEvidenceRepository.Procedencia(
+        evidenceId = evidencia.id,
+        incidentId = activeIncident.value?.id,
+        label = evidencia.label,
+        type = evidencia.type,
+    )
 
     /** True cuando no hay bodycam: video y foto se capturan con el telefono. */
     val usesPhoneCapture: Boolean get() = !bodycamRepository.isConnected
@@ -211,6 +230,7 @@ class ActiveIncidentViewModel(
                 mediaUri = sellada?.file?.name,
                 hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
                 sellada = sellada,
+                destino = destino,
             )
         }
     }
@@ -314,6 +334,7 @@ class ActiveIncidentViewModel(
             mediaUri = sellada?.file?.name,
         )
         if (sellada == null) {
+            entregar(null, video, destino)
             _uiState.update { it.copy(pendingEvidence = video) }
             return
         }
@@ -347,6 +368,7 @@ class ActiveIncidentViewModel(
         mediaUri: String?,
         hash: String = IncidentRepository.fakeHash(),
         sellada: EvidenceCrypto.Sealed? = null,
+        destino: LocalEvidenceRepository.MediaTarget? = null,
     ) {
         val grabando = activeIncident.value?.isRecording == true
         val foto = EvidenceRecord(
@@ -361,7 +383,7 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Photo captured", TimelineEntryType.PHOTO)
         _uiState.update { it.copy(pendingEvidence = foto) }
-        entregar(sellada, foto)
+        entregar(sellada, foto, destino)
     }
 
     /**
@@ -403,7 +425,7 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Audio note added — $duracion", TimelineEntryType.AUDIO)
         // La entrega a Nexus no espera a la clasificacion, igual que en foto y video.
-        entregar(capturada.sealed, nota)
+        entregar(capturada.sealed, nota, capturada.target)
         val sellada = capturada.sealed
         if (sellada == null) {
             // Sin cifrar, el claro es la unica copia de la nota: se queda.

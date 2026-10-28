@@ -6,11 +6,11 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import java.io.File
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
- * Base de datos local de la app. Pendiente para produccion: los datos de
- * incidentes son sensibles y hoy se guardan sin cifrar; antes de un despliegue
- * real hay que migrar a SQLCipher o equivalente.
+ * Base de datos local de la app. Va cifrada con SQLCipher: ver [BaseCifrada].
  */
 @Database(
     entities = [
@@ -69,9 +69,21 @@ abstract class IncidentDatabase : RoomDatabase() {
             }
         }
 
-        fun build(context: Context): IncidentDatabase =
-            Room.databaseBuilder(context, IncidentDatabase::class.java, "aeria_nexus.db")
+        private const val NOMBRE = "aeria_nexus.db"
+
+        /**
+         * La primera vez tras actualizar cifra la base en claro que hubiera. Se hace
+         * aqui, en el arranque, porque Room no puede abrirla hasta que este cifrada; con
+         * los pocos incidentes de un telefono tarda milisegundos y solo pasa una vez.
+         */
+        fun build(context: Context, alPonerEnCuarentena: (File) -> Unit): IncidentDatabase {
+            val clave = BaseCifrada.preparar(context, NOMBRE, alPonerEnCuarentena)
+            return Room.databaseBuilder(context, IncidentDatabase::class.java, NOMBRE)
+                // false: que no borre la clave tras la primera apertura. Room puede cerrar
+                // y volver a abrir la base con el mismo factory, y sin clave fallaria.
+                .openHelperFactory(SupportOpenHelperFactory(clave, null, false))
                 .addMigrations(MIGRACION_1_2, MIGRACION_2_3)
                 .build()
+        }
     }
 }

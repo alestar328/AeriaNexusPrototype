@@ -52,7 +52,37 @@ data class TrustStatus(
     val origenDeSesion: OrigenDeSesion = OrigenDeSesion.NINGUNA,
     /** Quien emitio el reto que se firmo al entrar, si lo hubo. */
     val emisorDelReto: String? = null,
+    /** AeriaOne ha cortado el acceso del agente; la sesion sigue, pero solo en local. */
+    val corteDelPerfil: CorteDelPerfil? = null,
 )
+
+/**
+ * Los rechazos de AeriaOne que no se arreglan reintentando (iam-session.md §5.7).
+ *
+ * Decision del 9-oct-2026: no bloquean la app. Se descarta el token, se deja de
+ * reintentar y se le dice al agente, que sigue grabando en local; la evidencia se
+ * queda en el telefono hasta que alguien con sesion valida la suba.
+ */
+enum class CorteDelPerfil(val codigo: String, val conservaElSos: Boolean = false) {
+    /** Un administrador lo ha suspendido desde el panel. Es reversible. */
+    SUSPENDIDO("profile_suspended", conservaElSos = true),
+
+    /** El perfil esta revocado. Es definitivo. */
+    REVOCADO("profile_revoked"),
+
+    /** Algo de la cadena (certificado, terminal, instancia) esta revocado. */
+    IDENTIDAD_REVOCADA("identity_revoked"),
+
+    /**
+     * La version de la app esta por debajo de la minima o vetada (iam-session.md §5.9).
+     * Una app vieja tiene que poder pedir ayuda: el SOS sigue con la sesion restringida.
+     */
+    APP_DESFASADA("app_update_required", conservaElSos = true);
+
+    companion object {
+        fun desdeCodigo(codigo: String?): CorteDelPerfil? = entries.firstOrNull { it.codigo == codigo }
+    }
+}
 
 /** Resultado de intentar desbloquear con el PIN. */
 enum class UnlockResult { OK, WRONG_PIN, LOCKED_OUT }
@@ -102,6 +132,7 @@ class IdentityRepository(
     private val credential: CredentialRepository,
     private val iam: IamClient,
     private val sesionBackend: SesionBackend,
+    private val perfilDelAgente: PerfilDelAgente,
     private val auditoria: AuditoriaLocal,
 ) {
 
@@ -162,6 +193,12 @@ class IdentityRepository(
     private val _status = MutableStateFlow(leerEstadoGuardado())
     val status: StateFlow<TrustStatus> = _status.asStateFlow()
 
+    init {
+        // La subida y los avisos de SOS tambien pueden enterarse de un corte: llega como
+        // 401 en cualquier peticion con el token.
+        sesionBackend.alRechazar = { codigo -> CorteDelPerfil.desdeCodigo(codigo)?.let(::cortarPorPerfil) }
+    }
+
     /**
      * Aviso de que la sesion se cierra, para que quien tenga ataduras vivas las
      * deshaga (workflow 34). Lo cablea AppContainer.
@@ -219,6 +256,8 @@ class IdentityRepository(
                 lockedOutUntil = 0L,
                 origenDeSesion = OrigenDeSesion.SOLO_LOCAL,
                 emisorDelReto = null,
+                // Cada desbloqueo vuelve a preguntar: una suspension se puede levantar.
+                corteDelPerfil = null,
             )
         }
         mantenerAcreditada(sesion)
@@ -247,7 +286,9 @@ class IdentityRepository(
         mantenimiento = scope.launch {
             var fallos = 0
             while (isActive && sesionActual == sesion) {
-                val vigente = sesionBackend.actual.value
+                // La restringida de un suspendido no cuenta como vigente: lo que este
+                // bucle busca es la sesion completa.
+                val vigente = sesionBackend.actual.value?.takeUnless { it.soloSos }
                 val ahora = System.currentTimeMillis()
                 if (vigente != null && ahora < vigente.caducaEnMillis - MARGEN_DE_RENOVACION_MILLIS) {
                     // A pasos de un minuto contra el reloj de pared: delay no avanza con
@@ -260,6 +301,9 @@ class IdentityRepository(
 
                 if (acreditar(sesion, identidad, renovando = vigente != null)) {
                     fallos = 0
+                } else if (_status.value.corteDelPerfil != null) {
+                    // Suspendido o revocado: insistir no lo arregla y gasta bateria y datos.
+                    return@launch
                 } else {
                     fallos++
                     delay(esperaTrasFallo(fallos))
@@ -278,22 +322,93 @@ class IdentityRepository(
      */
     private fun acreditar(sesion: String, identidad: ProvisionedIdentity, renovando: Boolean): Boolean = try {
         val reto = iam.pedirReto(PropositoDelReto.LOGIN, identidad.userId)
-        val firma = credential.firmarRetoDeSesion(reto.nonce)
-        val emitida = iam.abrirSesion(
-            reto = reto,
-            firma = firma,
-            deviceId = identidad.deviceId,
-            appInstanceId = identidad.appInstanceId,
-            appVersion = BuildConfig.VERSION_NAME,
-        )
-        guardarSiSigueAbierta(sesion, emitida, reto.emisor, renovando)
+        guardarSiSigueAbierta(sesion, responderReto(reto, identidad, soloSos = false), reto.emisor, renovando)
     } catch (e: Exception) {
         Log.e(TAG, "AeriaOne no ha acreditado la sesion: ${e.message}")
         auditoria.registrar(
             TipoEvento.SESION_NO_ACREDITADA,
             listOf("reason" to e.message, "renewal" to renovando.toString()),
         )
+        CorteDelPerfil.desdeCodigo((e as? IamException)?.codigo)?.let(::cortarPorPerfil)
         false
+    }
+
+    private fun responderReto(reto: RetoEmitido, identidad: ProvisionedIdentity, soloSos: Boolean): SesionEmitida =
+        iam.abrirSesion(
+            reto = reto,
+            firma = credential.firmarRetoDeSesion(reto.nonce),
+            // El del certificado y no el guardado: si las preferencias no casan con el
+            // Keystore (copia restaurada, simulador) el backend contesta 403 y sin
+            // sesion no llega ni el SOS. Paso el 2026-10-19 con DEV-92A71C, el de ejemplo.
+            deviceId = deviceIdDelCertificado() ?: identidad.deviceId,
+            appInstanceId = identidad.appInstanceId,
+            appVersion = BuildConfig.VERSION_NAME,
+            soloSos = soloSos,
+        )
+
+    /**
+     * AeriaOne ha dicho que este agente no puede operar. La sesion local sigue —se
+     * puede grabar y la camara sigue atada—, pero sin token: no se sube nada, y la
+     * bodycam pierde el suyo porque sigue a [SesionBackend].
+     */
+    private fun cortarPorPerfil(corte: CorteDelPerfil) {
+        if (sesionActual == null || _status.value.corteDelPerfil == corte) return
+        mantenimiento?.cancel()
+        mantenimiento = null
+        // No hace falta cerrarlo en el backend: ya lo ha cerrado el.
+        sesionBackend.olvidar()
+        auditoria.registrar(TipoEvento.SESION_NO_ACREDITADA, listOf("reason" to corte.codigo))
+        _status.update {
+            it.copy(origenDeSesion = OrigenDeSesion.SOLO_LOCAL, emisorDelReto = null, corteDelPerfil = corte)
+        }
+        Log.w(TAG, "AeriaOne ha cortado el acceso del agente: ${corte.codigo}")
+        // Suspender o quedarse sin actualizar quita el acceso a la evidencia, no la
+        // posibilidad de pedir ayuda.
+        val sesion = sesionActual
+        if (corte.conservaElSos && sesion != null) {
+            scope.launch { pedirSesionSoloSos(sesion) }
+        }
+    }
+
+    /**
+     * La sesion restringida de un agente suspendido o con la app desfasada
+     * (iam-session.md §5.8 y §5.9): su token
+     * solo vale para los avisos de SOS, del telefono y de la bodycam, que lo recibe
+     * prestado como cualquier otro. Es un solo intento; el siguiente llega con el
+     * proximo desbloqueo o con el boton del aviso.
+     */
+    private fun pedirSesionSoloSos(sesion: String) {
+        val identidad = _status.value.identity ?: return
+        try {
+            val reto = iam.pedirReto(PropositoDelReto.LOGIN, identidad.userId)
+            val emitida = responderReto(reto, identidad, soloSos = true)
+            if (!emitida.soloSos) {
+                // Lo han reactivado entre una peticion y la otra: es una sesion completa.
+                _status.update { it.copy(corteDelPerfil = null) }
+                if (guardarSiSigueAbierta(sesion, emitida, reto.emisor, renovando = false)) {
+                    mantenerAcreditada(sesion)
+                }
+                return
+            }
+            if (sesionActual != sesion || _status.value.corteDelPerfil?.conservaElSos != true) {
+                runCatching { iam.cerrarSesion(emitida.token) }
+                return
+            }
+            sesionBackend.guardar(emitida)
+            Log.i(TAG, "sesion restringida al SOS concedida por ${reto.emisor}")
+        } catch (e: Exception) {
+            Log.w(TAG, "sin sesion para el SOS del agente suspendido: ${e.message}")
+        }
+    }
+
+    /**
+     * El agente pide comprobar si el corte sigue en pie (boton del aviso). Es un solo
+     * intento por pulsacion: si AeriaOne vuelve a rechazarlo, el bucle se para otra vez.
+     */
+    fun comprobarCorte() {
+        val sesion = sesionActual ?: return
+        _status.update { it.copy(corteDelPerfil = null) }
+        mantenerAcreditada(sesion)
     }
 
     /**
@@ -316,6 +431,7 @@ class IdentityRepository(
         }
         val anterior = sesionBackend.actual.value?.token
         sesionBackend.guardar(emitida)
+        guardarPerfil(emitida.perfil, _status.value.identity?.userId)
         anterior?.let { viejo ->
             runCatching { iam.cerrarSesion(viejo) }
                 .onFailure { Log.w(TAG, "no se pudo cerrar el token anterior: ${it.message}") }
@@ -431,7 +547,9 @@ class IdentityRepository(
         // de un agente que ya no esta de servicio.
         sesionBackend.olvidar()?.let { token ->
             scope.launch {
-                runCatching { iam.cerrarSesion(token) }
+                // La camara se acaba de soltar (alCerrarSesion): que AeriaOne cierre
+                // tambien la atadura, por si el aviso suelto llega tarde o no salio.
+                runCatching { iam.cerrarSesion(token, cerrarAtaduras = true) }
                     .onFailure { Log.w(TAG, "no se pudo cerrar la sesion en AeriaOne: ${it.message}") }
             }
         }
@@ -442,6 +560,7 @@ class IdentityRepository(
         _status.update {
             it.copy(
                 state = TrustState.LOCKED,
+                corteDelPerfil = null,
                 blockReason = null,
                 origenDeSesion = OrigenDeSesion.NINGUNA,
                 emisorDelReto = null,
@@ -497,7 +616,8 @@ class IdentityRepository(
      * El identificador sale del nombre comun del certificado que emitio la CA, no
      * de una constante: es el primer dato de la identidad que ya no nos inventamos.
      */
-    fun credencialCompletada(userId: String) {
+    fun credencialCompletada(userId: String, perfil: PerfilRecibido?) {
+        guardarPerfil(perfil, userId)
         prefs.edit()
             .putBoolean(CLAVE_CREDENCIAL, true)
             .putString(CLAVE_USER_ID, userId)
@@ -511,6 +631,19 @@ class IdentityRepository(
                 identity = (estado.identity ?: identidadBase()).copy(userId = userId),
             )
         }
+    }
+
+    /**
+     * Guarda el perfil que entrega AeriaOne en el alta y en cada sesion. Un backend
+     * anterior al 9-oct-2026 no lo manda, y entonces se conserva el que hubiera.
+     *
+     * Los perfiles antiguos, creados por consola, pueden venir sin nombre: se usa el
+     * identificador del agente, que es lo que pide el contrato como reserva.
+     */
+    private fun guardarPerfil(perfil: PerfilRecibido?, userId: String?) {
+        if (perfil == null) return
+        val nombre = perfil.nombre.ifBlank { userId.orEmpty() }
+        perfilDelAgente.guardar(perfil.copy(nombre = nombre))
     }
 
     /** El agente ya ha elegido su PIN (workflow 4). Con esto el alta esta completa. */
@@ -531,6 +664,7 @@ class IdentityRepository(
             .apply()
         // La proxima alta es otra instancia: no hereda nada de la anterior.
         ficheroDeInstancia.delete()
+        perfilDelAgente.borrar()
         _status.update {
             it.copy(state = TrustState.NOT_PROVISIONED, blockReason = null, identity = null)
         }
@@ -577,6 +711,14 @@ class IdentityRepository(
         }
     }
 
+    /**
+     * El nombre comun del certificado que AeriaOne emitio a este terminal. Antes del
+     * alta el Keystore guarda uno provisional de Android, que no lleva el prefijo.
+     */
+    private fun deviceIdDelCertificado(): String? =
+        runCatching { ClaveEnKeystore.terminal.commonNameDelCertificado() }.getOrNull()
+            ?.takeIf { it.startsWith("DEV-") }
+
     private fun leerEstadoGuardado(): TrustStatus {
         val terminalDadoDeAlta = prefs.getBoolean(CLAVE_PROVISIONADA, false)
         val credencialEmitida = prefs.getBoolean(CLAVE_CREDENCIAL, false)
@@ -584,7 +726,9 @@ class IdentityRepository(
         // Device ID y agente son los que emitieron el alta y la CA; si no hay
         // (identidad forzada desde el simulador) se cae a los de ejemplo.
         val identidad = identidadBase().copy(
-            deviceId = prefs.getString(CLAVE_DEVICE_ID, null) ?: IDENTIDAD_DEMO.deviceId,
+            deviceId = deviceIdDelCertificado()
+                ?: prefs.getString(CLAVE_DEVICE_ID, null)
+                ?: IDENTIDAD_DEMO.deviceId,
             userId = prefs.getString(CLAVE_USER_ID, null) ?: IDENTIDAD_DEMO.userId,
         )
         val estado = when {

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- COM-004: nada en http. El backend va siempre por TLS (el QR de alta rechaza
+     un servidor sin https fuera de depuracion) y su pinning esta en
+     data/red/ConexionBackend.kt, porque el dominio no se conoce al compilar.
+     La unica excepcion, el visor de la W1 en la wifi local, no pasa por aqui:
+     ver data/red/HttpEnRedLocal.kt.
+     En depuracion se sustituye por src/debug/res/xml/network_security_config.xml. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

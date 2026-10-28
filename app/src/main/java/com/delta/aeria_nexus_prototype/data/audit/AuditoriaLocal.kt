@@ -24,6 +24,7 @@ private const val TAG = "AeriaAuditoria"
 enum class TipoEvento(val familia: String, val texto: String) {
     AUDITORIA_INICIADA("security", "Audit log started"),
     AUDITORIA_REINICIADA("security", "Audit log restarted without its key"),
+    BASE_EN_CUARENTENA("security", "Local database quarantined: its key could not be read"),
 
     SESION_ABIERTA("session", "Session opened"),
     SESION_ACREDITADA("session", "Session accredited by AeriaOne"),

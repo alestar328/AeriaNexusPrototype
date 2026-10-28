@@ -5,10 +5,9 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.delta.aeria_nexus_prototype.data.red.ConexionBackend
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,10 +44,13 @@ class SosNotifier(
         officer: String,
         latitude: Double?,
         longitude: Double?,
+        // La bodycam no habla con el backend: su SOS lo avisa el telefono que la
+        // lleva, con source=bodycam, el uid de la camara y su BWC.
+        bwcId: String? = null,
     ) {
         val cuerpo = JSONObject()
             .put("sos_id", sosId)
-            .put("source", "phone")
+            .put("source", if (bwcId != null) "bodycam" else "phone")
             .put("channel", channel)
             .put("uid", uid)
             .put("officer_code", officer)
@@ -58,6 +60,7 @@ class SosNotifier(
         // Sin posicion se omiten: un 0.0 es un punto real en el golfo de Guinea.
         latitude?.let { cuerpo.put("latitude", it) }
         longitude?.let { cuerpo.put("longitude", it) }
+        bwcId?.let { cuerpo.put("bwc_id", it) }
         enviar("sos/start", cuerpo, reintentos = REINTENTOS)
     }
 
@@ -91,7 +94,7 @@ class SosNotifier(
     }
 
     private fun post(url: String, cuerpo: JSONObject): Boolean {
-        val conexion = URL(url).openConnection() as HttpURLConnection
+        val conexion = ConexionBackend.abrir(url)
         return try {
             conexion.requestMethod = "POST"
             conexion.connectTimeout = TIMEOUT_MILLIS
@@ -100,9 +103,11 @@ class SosNotifier(
             conexion.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             // Sin sesion el aviso sale igual: que el backend lo rechace queda en su
             // log, y retenerlo aqui retrasaria la grabacion de una emergencia.
-            config.token()?.let { conexion.setRequestProperty("Authorization", "Bearer $it") }
+            config.tokenParaSos()?.let { conexion.setRequestProperty("Authorization", "Bearer $it") }
             conexion.outputStream.use { it.write(cuerpo.toString().toByteArray(Charsets.UTF_8)) }
-            conexion.responseCode in 200..299
+            val codigo = conexion.responseCode
+            config.avisarSiRechazo(conexion, codigo)
+            codigo in 200..299
         } catch (e: IOException) {
             false
         } finally {

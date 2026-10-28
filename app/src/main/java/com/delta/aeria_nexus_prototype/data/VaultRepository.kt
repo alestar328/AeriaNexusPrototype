@@ -149,7 +149,7 @@ class VaultRepository(
         val cifrado = evidenceDir()?.let { File(it, name) }?.takeIf { it.isFile } ?: return null
         val carpeta = decryptedDir() ?: return null
 
-        // El .fev es "video_agente_fecha.mp4.fev": quitarle el sufijo devuelve el
+        // El .fev es "video_fecha.mp4.fev": quitarle el sufijo devuelve el
         // nombre original, y con el la extension que necesita el reproductor.
         val claro = File(carpeta, name.removeSuffix(EvidenceCrypto.EXTENSION))
         if (!claro.isFile && !EvidenceCrypto.open(cifrado, claro)) return null

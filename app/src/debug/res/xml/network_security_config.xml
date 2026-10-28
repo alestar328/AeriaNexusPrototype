@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solo en depuracion: permite http hacia el backend de desarrollo, que corre en la
+     wifi de la oficina sin TLS (upload.conf o un QR de prueba). Su IP cambia, asi
+     que no se puede fijar un dominio. Una release usa la de src/main, sin http. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

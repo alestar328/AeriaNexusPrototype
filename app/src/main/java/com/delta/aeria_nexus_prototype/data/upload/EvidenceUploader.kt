@@ -18,6 +18,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "FalconUpload"
@@ -34,6 +35,13 @@ private const val TAG = "FalconUpload"
  *
  * Solo cuando el servidor **no contradice** el hash. `verified == false` es un incidente
  * de integridad, no un fallo de red: se deja constancia y no se borra nada.
+ *
+ * ── Qué autoriza a borrar ─────────────────────────────────────────────────────
+ *
+ * Entregado no basta. Una copia local (hoy, el proxy) solo se borra con el **recibo
+ * firmado del servidor** en `accepted` y su `sha256_received` igual al hash propio
+ * (receipt-schema.md §5). Si el recibo no llegó con la subida se vuelve a pedir en
+ * [resumePending]; el recibo entero se guarda dentro del `.upload.json`.
  *
  * ── Dónde vive la verdad ──────────────────────────────────────────────────────
  *
@@ -56,6 +64,8 @@ class EvidenceUploader(
     private val config: UploadConfig,
     private val sessions: UploadSessions,
     private val dao: IncidentDao,
+    /** Placa del agente de la sesion, si se conoce. Se lee al subir, no al crear esto. */
+    private val placaDelAgente: () -> String?,
 ) {
 
     private val uploader = ChunkedUploader(config, sessions)
@@ -228,7 +238,7 @@ class EvidenceUploader(
         writeReceipt(fev, cipherSha256, outcome, evidenceId)
 
         when {
-            outcome.delivered && outcome.verified == false -> {
+            outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) -> {
                 Log.e(TAG, "${fev.name}: el servidor NO confirma el hash — revisar")
                 evidenceId?.let { setSync(it, SyncState.FAILED) }
             }
@@ -245,9 +255,9 @@ class EvidenceUploader(
     }
 
     /**
-     * Sube un proxy y, en cuanto el servidor no contradice su hash, lo borra: el proxy
-     * no es evidencia, es una copia para el backend, y a partir de ahi la unica copia
-     * es la suya. El recibo se queda como constancia de la entrega.
+     * Sube un proxy y, en cuanto el servidor firma que lo ha aceptado, lo borra: el
+     * proxy no es evidencia, es una copia para el backend, y a partir de ahi la unica
+     * copia es la suya. El recibo se queda como constancia de la entrega.
      *
      * No toca Room: el proxy comparte evidence_id con su original, y marcar esa fila
      * como entregada por el proxy diria que ha llegado el video cuando no es asi.
@@ -256,7 +266,8 @@ class EvidenceUploader(
         if (!proxiesEnVuelo.add(fev.name)) return@withContext
         try {
             if (isDelivered(fev)) {
-                borrarProxy(fev)
+                // Ya subido: solo falta, si no llego entonces, el recibo que deja borrarlo.
+                if (aceptado(reciboDelServidor(fev), cipherSha256)) borrarProxy(fev)
                 return@withContext
             }
             val datos = runCatching { JSONObject(datosDeProxy(fev).readText()) }.getOrNull()
@@ -280,9 +291,11 @@ class EvidenceUploader(
             val outcome = uploader.upload(fev, cipherSha256, metadata)
             writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
             when {
-                outcome.delivered && outcome.verified == false ->
+                outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) ->
                     Log.e(TAG, "${fev.name}: el servidor NO confirma el hash del proxy — se conserva")
-                outcome.delivered -> borrarProxy(fev)
+                outcome.delivered && aceptado(outcome.receipt, cipherSha256) -> borrarProxy(fev)
+                outcome.delivered ->
+                    Log.w(TAG, "${fev.name} entregado sin recibo aceptado — se conserva hasta tenerlo")
                 else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
             }
         } finally {
@@ -320,7 +333,7 @@ class EvidenceUploader(
             val outcome = uploader.upload(fev, cipherSha256, metadata)
             writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
             when {
-                outcome.delivered && outcome.verified == false ->
+                outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) ->
                     Log.e(TAG, "${fev.name}: el servidor NO confirma el hash de la transcripcion")
                 outcome.delivered -> Log.d(TAG, "${fev.name} entregada")
                 else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
@@ -402,8 +415,14 @@ class EvidenceUploader(
         put("crypto_format", "FEVD1")
         put("source", "phone")
         put("device_model", Build.MODEL)
-        put("officer_code", AGENT_ID)
-        put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
+        // Solo como dato: el backend atribuye por la sesion (upload-protocol.md §5.1).
+        // Sin placa conocida se omite; nunca un valor inventado.
+        placaDelAgente()?.takeIf { it.isNotBlank() }?.let { put("officer_code", it) }
+        // En UTC: con la 'Z' delante de la hora local el backend calculaba el desfase
+        // del reloj con la zona horaria entera de mas (receipt-schema.md §6).
+        put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("UTC") }
+            .format(Date()))
         plainSha256?.let { put("sha256_plain", it) }
         incidentId?.let { put("incident_id", it) }
         evidenceId?.let { put("evidence_id", it) }
@@ -430,8 +449,13 @@ class EvidenceUploader(
                 val entregado = json.optBoolean("delivered")
                 val verificado = if (json.isNull("verified_by_server")) null
                                  else json.optBoolean("verified_by_server")
+                val fallo = falloDeIntegridad(
+                    verificado,
+                    json.optJSONObject("server_receipt"),
+                    json.optString("sha256_uploaded"),
+                )
                 val estado = when {
-                    entregado && verificado == false -> SyncState.FAILED
+                    entregado && fallo -> SyncState.FAILED
                     entregado -> SyncState.VERIFIED
                     else -> SyncState.PENDING_SYNC
                 }
@@ -477,10 +501,55 @@ class EvidenceUploader(
             put("session_url", outcome.sessionUrl ?: JSONObject.NULL)
             put("endpoint", config.baseUrl())
             put("at_epoch_ms", System.currentTimeMillis())
+            // Entero, tal como llego: es la prueba de entrega que verificara un auditor.
+            put("server_receipt", outcome.receipt ?: JSONObject.NULL)
             outcome.error?.let { put("error", it) }
         }
         runCatching { receiptOf(fev).writeText(receipt.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudo escribir el recibo de ${fev.name}: ${it.message}") }
+    }
+
+    /**
+     * El recibo firmado de una subida ya entregada. Si no llego con ella —servidor
+     * antiguo, red caida justo al final— se vuelve a pedir con la URL guardada y se
+     * anade al `.upload.json`. Null mientras el servidor no lo de.
+     */
+    private fun reciboDelServidor(fev: File): JSONObject? {
+        val fichero = receiptOf(fev)
+        val local = runCatching { JSONObject(fichero.readText()) }.getOrNull() ?: return null
+        local.optJSONObject("server_receipt")?.let { return it }
+        val url = local.optString("session_url").takeIf { it.isNotBlank() && it != "null" } ?: return null
+        if (config.token() == null) return null
+        val status = uploader.status(url)
+        val recibo = status.receipt ?: return null
+        local.put("server_receipt", recibo)
+        status.verified?.let { local.put("verified_by_server", it) }
+        runCatching { fichero.writeText(local.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudo guardar el recibo de ${fev.name}: ${it.message}") }
+        Log.d(TAG, "${fev.name}: recibo del servidor recuperado (${recibo.optString("status")})")
+        return recibo
+    }
+
+    /**
+     * La regla para borrar una copia local (receipt-schema.md §5): el servidor ha
+     * firmado `accepted` sobre los mismos bytes que se subieron. Sin recibo, nunca.
+     */
+    private fun aceptado(recibo: JSONObject?, cipherSha256: String): Boolean =
+        recibo != null &&
+            recibo.optString("status") == "accepted" &&
+            recibo.optString("sha256_received").equals(cipherSha256, ignoreCase = true)
+
+    /**
+     * El servidor ha recibido otros bytes que los que se subieron: por `verified`, por
+     * el recibo en `integrity_failed`, o por un `sha256_received` distinto del propio.
+     * Es un incidente, no un fallo de red: se conserva todo y se marca.
+     */
+    private fun falloDeIntegridad(verified: Boolean?, recibo: JSONObject?, cipherSha256: String): Boolean {
+        if (verified == false) return true
+        if (recibo == null) return false
+        if (recibo.optString("status") == "integrity_failed") return true
+        val recibido = recibo.optString("sha256_received")
+        return recibido.isNotBlank() && !recibido.equals(cipherSha256, ignoreCase = true)
     }
 
     /** Misma carpeta que usa LocalEvidenceRepository para los .fev. */
@@ -505,8 +574,5 @@ class EvidenceUploader(
         const val EVIDENCE_DATA_SUFFIX = ".evidence.json"
         const val TRANSCRIPT_DATA_SUFFIX = ".data.json"
         const val EVIDENCE_FOLDER = "evidence"
-
-        /** TODO: sale de la sesión autenticada cuando exista login real (AUTH-001). */
-        const val AGENT_ID = "agent_007"
     }
 }
