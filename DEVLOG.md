@@ -6,6 +6,42 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-11-01 — Revisión del Seguimiento IAM contra el código (para el backend, sin código)
+
+Encargo de la sesión del backend (aeria-nexus-0a): contrastar `Seguimiento-IAM-AeriaOne.xlsx`
+(congelado al 25-sep) con el código de hoy y contar qué queda del cifrado. **El xlsx no se toca**:
+lo edita el backend para añadir la columna Backend. La lista de filas que cambian se le mandó por mensaje.
+
+- Pasan a Parcial: wf 25, 53 y 65; IAM-07 e IAM-09. En Catalogo-68, el 27 pasa a Hecho y el 28 y el 29 a Parcial.
+  Probados en aparato: 3, 12, 27 y la sesión del 28 (Redmi, 19 y 27-oct).
+- **Hallazgos nuevos:** el manifiesto `phone-incident/1` y la placa del SOS/PTT siguen saliendo de
+  `OfficerSampleData.profile` (Carlos Mendez / P-4471); `SosNotifier` manda `device_id = ANDROID_ID`
+  y no el DEV-xxxx del certificado; el teléfono no verifica la firma del recibo del servidor.
+- Cifrado: nada nuevo desde el 25-oct. No hay pruebas formales en aparato; el 27-oct, el alta https
+  contra Azure sirve solo de indicio. El canal BT v2 sigue en modo transición, FLAG_SECURE
+  sigue en «todavía no» y el PCM de Whisper sigue aplazado.
+
+**Mismo día, segunda tanda (aeria-contracts CHANGELOG 2026-11-01 y (2)):**
+- Recibo `key_rejected`: el teléfono ya cumple (`EvidenceUploader.aceptado()` solo borra con
+  `accepted`). Pero lo mostraría como subido: hay que pintarlo como rechazado antes de encender
+  `EVIDENCE_REJECT_DEV_KEYS`.
+- Propuestas leídas y comentadas al backend, **sin implementar** (esperan al usuario):
+  `evidence-seal.md` (verificar la firma sobre los bytes de `seal`, quién es el `principal` en el
+  teléfono, gafas, sellado tardío) y `sos-and-proxy.md` §2.7 (con el certificado de Agora, el SOS
+  pasa a depender del backend; uid aleatorio del teléfono; token y clave de la W1 por el canal v2;
+  rotación de la clave a medianoche UTC).
+- El seguimiento ya lo actualizó el backend (hoja `Revision-2026-11-01`, D9-D11); copia previa en
+  `Seguimiento-IAM-AeriaOne.backup-2026-11-01.xlsx`.
+
+- Tercera tanda: el backend reescribió `evidence-seal.md` y §2.7 con estos puntos. Quedan
+  abiertos la rotación de la clave de Agora y qué recibe una sesión `sos_only`. Si el SOS puede
+  depender del backend es la decisión 7 del documento del usuario.
+
+**Próximo paso:** que el usuario decida (1) arreglar el agente de ejemplo del manifiesto y el SOS
+(va antes que el sello), (2) el sello y (3) Agora con tokens.
+
+---
+
 ## 2026-10-27 — Primera alta por QR contra el servidor de Azure (nexus.aeriaone.com)
 
 Sin cambios de código en la app; diagnóstico junto a la sesión del backend.
