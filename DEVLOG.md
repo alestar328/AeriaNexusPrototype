@@ -6,6 +6,35 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-11-01 — Label de la status line de Claude Code
+
+Creado `.claude/statusline-label` (líneas: `App Movil` / `celeste` / `blue`) para que la status
+line global (`~/.claude/statusline.ps1`) muestre "App Movil" en azul sobre celeste en este repo.
+Sin cambios en la app. Pendiente: decidir si `.claude/` se sube a git o se ignora.
+
+### Diagnóstico para el backend: baja definitiva de usuario (offboard)
+
+Consulta de la sesión del backend; solo se respondió, sin tocar código. Se leyó la rama
+`origin/dev_back_connection` (b1aa978): `main` está desfasada respecto al trabajo real.
+- `profile_revoked`: `CorteDelPerfil.REVOCADO` deja la sesión solo local, sin token y con el aviso
+  ProfileCutDialog. No pide `sos_only` y no borra nada. En subida y SOS solo se detecta si el 401/403
+  trae la cabecera `X-Error-Code`.
+- La evidencia pendiente del revocado se queda en el teléfono. Si entra otro agente, se sube con
+  su sesión y con su `officer_code`, porque la placa se toma al subir. Hay que sellar la autoría al
+  capturar.
+- No hay un "retirar solo al agente" alcanzable desde la app. El asistente sí reutiliza el
+  terminal con un QR del mismo servidor, pero no se llega a él.
+- No se consulta `/api/iam/revocations` ni `/api/iam/identity`.
+
+Pendiente en la app (si se encarga): retirar al agente conservando el terminal y sellar la
+autoría de la evidencia al capturar.
+
+**Encargado por el backend el mismo día**, a la espera de que el usuario lo apruebe. Se hará en
+dev_back_connection: sidecar con la autoría al capturar (`officer_user_id` + `officer_code` en
+Upload-Metadata) y "retirar agente" en ProfileCutDialog. El backend ya lo acepta (iam-session.md §9.6).
+
+---
+
 ## 2026-09-15 (5) — PTT pisado: tono y aviso cuando dos agentes hablan a la vez
 
 ### Por qué (petición del usuario)
