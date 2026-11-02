@@ -245,7 +245,7 @@ fun AppNavHost() {
             LivestreamScreen(
                 // La clave por uid evita reutilizar el ViewModel de otro livestream.
                 viewModel = viewModel(key = "livestream-$uid") {
-                    LivestreamViewModel(AppContainer.agoraRepository, uid)
+                    LivestreamViewModel(AppContainer.agoraRepository, repositorio, uid)
                 },
                 onClose = { navController.popBackStack() },
             )
@@ -366,6 +366,7 @@ fun AppNavHost() {
                         AppContainer.proxyRepository,
                         AppContainer.transcripcionRepository,
                         AppContainer.agoraRepository,
+                        AppContainer.gafasCommandRepository,
                     )
                 },
                 onBackToOperations = { navController.popBackStack() },

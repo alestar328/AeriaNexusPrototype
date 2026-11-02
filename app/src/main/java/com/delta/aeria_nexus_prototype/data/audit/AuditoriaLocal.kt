@@ -36,6 +36,11 @@ enum class TipoEvento(val familia: String, val texto: String) {
     SESION_CERRADA("session", "Session closed"),
     CREDENCIAL_EN_GRACIA("session", "Credential expired during a recording"),
     CREDENCIAL_CADUCADA("session", "Credential expired: phone out of service"),
+    AGENTE_RETIRADO("session", "Revoked officer removed from this phone"),
+    CERTIFICADO_RENOVADO("session", "Certificate renewed with a new key"),
+    CERTIFICADO_NO_RENOVADO("session", "Certificate renewal failed"),
+    TERMINAL_EN_CUARENTENA("security", "Phone quarantined by AeriaOne"),
+    TERMINAL_RETIRADO("security", "Phone decommissioned: keys and identity destroyed"),
 
     BODYCAM_ENLACE("peripheral", "Bodycam link checked"),
     ATADURA_CREADA("peripheral", "Bodycam bound to officer"),

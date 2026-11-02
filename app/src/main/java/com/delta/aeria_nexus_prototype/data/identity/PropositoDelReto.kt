@@ -20,4 +20,7 @@ enum class PropositoDelReto {
 
     /** Reto de autenticacion al desbloquear (workflow 27, pasos 11 y 12). */
     LOGIN,
+
+    /** Renovar un certificado con clave nueva (credential-lifecycle.md §1.2). */
+    RENOVACION,
 }

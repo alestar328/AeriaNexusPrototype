@@ -5,6 +5,7 @@ import android.util.Log
 import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
+import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
 import java.io.File
 import java.security.SecureRandom
 import java.time.Instant
@@ -77,7 +78,20 @@ enum class CorteDelPerfil(val codigo: String, val conservaElSos: Boolean = false
      * La version de la app esta por debajo de la minima o vetada (iam-session.md §5.9).
      * Una app vieja tiene que poder pedir ayuda: el SOS sigue con la sesion restringida.
      */
-    APP_DESFASADA("app_update_required", conservaElSos = true);
+    APP_DESFASADA("app_update_required", conservaElSos = true),
+
+    /**
+     * Un administrador ha puesto el terminal en cuarentena: perdido o robado
+     * (credential-lifecycle.md §3). Se levanta desde el panel; no se borra nada, y la
+     * sesion ya abierta sigue subiendo hasta que caduque.
+     */
+    CUARENTENA("device_quarantined"),
+
+    /** El certificado con el que se firma ha caducado: hay que volver a enrolar (§1.5). */
+    CERTIFICADO_CADUCADO("certificate_expired"),
+
+    /** Se firma con un certificado ya reemplazado por la renovacion y fuera de plazo (§1.5). */
+    CERTIFICADO_REEMPLAZADO("certificate_superseded");
 
     companion object {
         fun desdeCodigo(codigo: String?): CorteDelPerfil? = entries.firstOrNull { it.codigo == codigo }
@@ -196,7 +210,16 @@ class IdentityRepository(
     init {
         // La subida y los avisos de SOS tambien pueden enterarse de un corte: llega como
         // 401 en cualquier peticion con el token.
-        sesionBackend.alRechazar = { codigo -> CorteDelPerfil.desdeCodigo(codigo)?.let(::cortarPorPerfil) }
+        sesionBackend.alRechazar = ::atenderRechazo
+    }
+
+    /** Un `code` de rechazo de AeriaOne, llegue por la sesion, la subida o el SOS. */
+    private fun atenderRechazo(codigo: String?) {
+        if (codigo == CODIGO_TERMINAL_RETIRADO) {
+            scope.launch { retirarTerminal() }
+            return
+        }
+        CorteDelPerfil.desdeCodigo(codigo)?.let(::cortarPorPerfil)
     }
 
     /**
@@ -215,6 +238,18 @@ class IdentityRepository(
      */
     var alAcreditarSesion: (() -> Unit)? = null
 
+    /**
+     * Cada sesion completa que se guarda, con lo que trae ademas del token: las CA, la
+     * clave de evidencia y el estado de los certificados (credential-lifecycle.md §1.4).
+     * Lo cablea AppContainer, que guarda las CA y renueva si toca.
+     */
+    var alRecibirSesion: ((SesionEmitida) -> Unit)? = null
+
+    /**
+     * AeriaOne ha retirado este terminal del servicio (`device_decommissioned`, §4). Lo
+     * cablea AppContainer para destruir las claves y la identidad; los .fev se quedan.
+     */
+    var alRetirarTerminal: (() -> Unit)? = null
     /**
      * Comprueba el PIN y abre la sesion (workflow 27, pasos 6 a 12).
      *
@@ -261,7 +296,22 @@ class IdentityRepository(
             )
         }
         mantenerAcreditada(sesion)
+        abrirBoveda(pin)
         return UnlockResult.OK
+    }
+
+    /**
+     * La boveda va con el PIN (decision del usuario, 2-nov-2026): se crea en el primer
+     * desbloqueo, antes de que se pueda capturar nada, y se abre con la sesion. Al
+     * cerrarla se vuelve a sellar (AppContainer.alCerrarSesion). Una boveda antigua,
+     * con contrasena propia, se sigue abriendo aparte desde su pantalla.
+     */
+    private fun abrirBoveda(pin: String) {
+        if (!EvidenceVault.configurada.value) {
+            if (EvidenceVault.configurar(pin)) auditoria.registrar(TipoEvento.BOVEDA_CREADA)
+        } else if (EvidenceVault.abreConPin && EvidenceVault.desbloquear(pin)) {
+            auditoria.registrar(TipoEvento.BOVEDA_ABIERTA)
+        }
     }
 
     /**
@@ -329,7 +379,7 @@ class IdentityRepository(
             TipoEvento.SESION_NO_ACREDITADA,
             listOf("reason" to e.message, "renewal" to renovando.toString()),
         )
-        CorteDelPerfil.desdeCodigo((e as? IamException)?.codigo)?.let(::cortarPorPerfil)
+        atenderRechazo((e as? IamException)?.codigo)
         false
     }
 
@@ -355,9 +405,12 @@ class IdentityRepository(
         if (sesionActual == null || _status.value.corteDelPerfil == corte) return
         mantenimiento?.cancel()
         mantenimiento = null
-        // No hace falta cerrarlo en el backend: ya lo ha cerrado el.
-        sesionBackend.olvidar()
+        // En cuarentena el token abierto sigue valiendo para subir: AeriaOne acepta esa
+        // evidencia y la marca (credential-lifecycle.md §3). No se renueva: otra sesion
+        // la negaria. En los demas cortes AeriaOne ya lo ha cerrado.
+        if (corte != CorteDelPerfil.CUARENTENA) sesionBackend.olvidar()
         auditoria.registrar(TipoEvento.SESION_NO_ACREDITADA, listOf("reason" to corte.codigo))
+        if (corte == CorteDelPerfil.CUARENTENA) auditoria.registrar(TipoEvento.TERMINAL_EN_CUARENTENA)
         _status.update {
             it.copy(origenDeSesion = OrigenDeSesion.SOLO_LOCAL, emisorDelReto = null, corteDelPerfil = corte)
         }
@@ -412,6 +465,51 @@ class IdentityRepository(
     }
 
     /**
+     * Quita del telefono al agente dado de baja (iam-session.md §9.6) y deja el
+     * asistente de alta en el tramo del agente, para que otro lo use sin reinstalar.
+     *
+     * Solo con el corte REVOCADO: la baja ya es definitiva en AeriaOne, asi que no
+     * sirve para echar a un agente en activo. Se conserva la clave del terminal, que
+     * sigue dado de alta. La boveda del retirado se aparta sin tocar lo cifrado para
+     * ella, y el siguiente agente crea la suya. Lo pendiente de subir se queda en cola
+     * con la autoria que se sello al grabarlo.
+     */
+    fun retirarAgente() {
+        if (_status.value.corteDelPerfil != CorteDelPerfil.REVOCADO) return
+        val retirado = credential.agenteProvisionado()
+        // Primero cerrar la sesion: soltar la camara se firma con la clave del agente,
+        // que se borra justo despues.
+        lock(BindingPeriferico.MotivoDeFin.REVOCACION)
+        credential.borrarCredencial()
+        pinLocal.borrar()
+        perfilDelAgente.borrar()
+        // Lo nuevo deja de cifrarse para la boveda del retirado: el siguiente crea la suya.
+        EvidenceVault.archivarDelAgenteRetirado()
+        prefs.edit()
+            .remove(CLAVE_CREDENCIAL)
+            .remove(CLAVE_USER_ID)
+            .apply()
+        auditoria.registrar(TipoEvento.AGENTE_RETIRADO, listOf("user_id" to retirado))
+        Log.w(TAG, "agente $retirado retirado del telefono tras la baja en AeriaOne")
+        _status.value = leerEstadoGuardado()
+    }
+
+    /**
+     * El terminal ya no es de AeriaOne (credential-lifecycle.md §4): se destruyen sus
+     * claves, la del agente y la identidad local, y la app vuelve al alta. No se puede
+     * levantar, a diferencia de un `identity_revoked`. La evidencia pendiente (.fev) se
+     * conserva: va cifrada para el servidor y un tecnico puede recuperarla.
+     */
+    private fun retirarTerminal() {
+        if (_status.value.state == TrustState.NOT_PROVISIONED) return
+        if (sesionActual != null) lock(BindingPeriferico.MotivoDeFin.REVOCACION)
+        auditoria.registrar(TipoEvento.TERMINAL_RETIRADO)
+        Log.w(TAG, "AeriaOne ha retirado este terminal: se destruye su identidad")
+        alRetirarTerminal?.invoke()
+        _status.value = leerEstadoGuardado()
+    }
+
+    /**
      * El agente pudo bloquear mientras el reto iba y volvia. Un token que llega tarde
      * se invalida en el backend en vez de guardarse: si no, la subida seguiria
      * funcionando con la pantalla bloqueada.
@@ -432,6 +530,7 @@ class IdentityRepository(
         val anterior = sesionBackend.actual.value?.token
         sesionBackend.guardar(emitida)
         guardarPerfil(emitida.perfil, _status.value.identity?.userId)
+        alRecibirSesion?.invoke(emitida)
         anterior?.let { viejo ->
             runCatching { iam.cerrarSesion(viejo) }
                 .onFailure { Log.w(TAG, "no se pudo cerrar el token anterior: ${it.message}") }
@@ -500,7 +599,15 @@ class IdentityRepository(
     fun cambiarPin(actual: String, nuevo: String): CambioDePin {
         val comprobacion = comprobarPinActual(actual)
         if (comprobacion != CambioDePin.OK) return comprobacion
+        // La boveda se abre con el PIN: se vuelve a cifrar primero, y si despues el PIN
+        // no se guarda, se deja como estaba. Si no, un PIN quedaria sin abrir su boveda.
+        val conBoveda = EvidenceVault.abreConPin
+        if (conBoveda && !EvidenceVault.cambiarContrasena(actual, nuevo)) {
+            auditoria.registrar(TipoEvento.PIN_CAMBIO_FALLIDO)
+            return CambioDePin.NO_GUARDADO
+        }
         if (!pinLocal.establecer(nuevo)) {
+            if (conBoveda) EvidenceVault.cambiarContrasena(nuevo, actual)
             auditoria.registrar(TipoEvento.PIN_CAMBIO_FALLIDO)
             return CambioDePin.NO_GUARDADO
         }
@@ -711,13 +818,7 @@ class IdentityRepository(
         }
     }
 
-    /**
-     * El nombre comun del certificado que AeriaOne emitio a este terminal. Antes del
-     * alta el Keystore guarda uno provisional de Android, que no lleva el prefijo.
-     */
-    private fun deviceIdDelCertificado(): String? =
-        runCatching { ClaveEnKeystore.terminal.commonNameDelCertificado() }.getOrNull()
-            ?.takeIf { it.startsWith("DEV-") }
+    private fun deviceIdDelCertificado(): String? = ClaveEnKeystore.deviceIdDelTerminal()
 
     private fun leerEstadoGuardado(): TrustStatus {
         val terminalDadoDeAlta = prefs.getBoolean(CLAVE_PROVISIONADA, false)
@@ -790,5 +891,7 @@ class IdentityRepository(
 
         private const val CLAVE_DEVICE_ID = "device_id"
         private const val CLAVE_USER_ID = "user_id"
+
+        private const val CODIGO_TERMINAL_RETIRADO = "device_decommissioned"
     }
 }

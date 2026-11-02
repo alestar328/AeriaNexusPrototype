@@ -15,6 +15,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import com.delta.aeria_nexus_prototype.BuildConfig
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -169,7 +171,15 @@ fun MapScreen(
         modifier = Modifier
             .fillMaxSize(),
     ) {
-        MapboxMap(
+        // Sin token, Mapbox lanza una excepcion al crear el mapa y cierra la app entera.
+        if (BuildConfig.MAPBOX_ACCESS_TOKEN.isBlank()) {
+            Text(
+                text = "Map unavailable: MAPBOX_ACCESS_TOKEN is missing from local.properties.",
+                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                color = TextoSecundario,
+                textAlign = TextAlign.Center,
+            )
+        } else MapboxMap(
             modifier = Modifier.fillMaxSize(),
             mapViewportState = viewportState,
             style = { MapStyle(style = MAP_STYLE_URI) },

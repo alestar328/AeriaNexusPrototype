@@ -17,6 +17,7 @@ import io.agora.rtc2.DataStreamConfig
 import io.agora.rtc2.IRtcEngineEventHandler
 import io.agora.rtc2.RtcEngine
 import io.agora.rtc2.RtcEngineConfig
+import io.agora.rtc2.internal.EncryptionConfig
 import io.agora.rtc2.video.CameraCapturerConfiguration
 import io.agora.rtc2.video.VideoCanvas
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -64,6 +66,11 @@ class AgoraRepository(
     // mensaje de posicion para que los demas aten el SOS de la camara (que no
     // tiene GPS) al marcador de este agente en el mapa.
     private val uidBodycamPropia: () -> Int?,
+    // Placa del agente de la sesion, para avisar al backend del SOS de su bodycam.
+    // Vacia sin perfil de AeriaOne: el backend la saca entonces de la sesion.
+    private val placaDelAgente: () -> String,
+    // Uid, token y clave del canal que asigna AeriaOne (sos-and-proxy.md §2.7).
+    private val accesoAgora: AccesoAgoraRepository,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -111,6 +118,16 @@ class AgoraRepository(
 
     // Uid con el que este telefono entro al canal. El backend graba el SOS por uid.
     private var miUid = 0
+
+    // Canal en el que se esta: el de AeriaOne o, sin acceso suyo, el de siempre.
+    private var canal = CHANNEL_ID
+
+    // Clave con la que se entro al canal (null = en claro). Si la que vale ahora es
+    // otra hay que salir y volver a entrar: el cifrado solo se fija antes del join.
+    private var claveConLaQueSeEntro: String? = null
+
+    // Para no pedir el token en bucle si el backend no contesta.
+    private var ultimaPeticionDeAccesoMillis = 0L
 
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
@@ -389,6 +406,25 @@ class AgoraRepository(
         override fun onError(err: Int) {
             Log.w(TAG, "Error de Agora: $err")
         }
+
+        /** El token de 12 h esta por caducar: se pide otro y se renueva sin salir (§2.7). */
+        override fun onTokenPrivilegeWillExpire(token: String?) {
+            pedirAcceso(forzar = true)
+        }
+
+        /** Ya caduco. Si el backend no contesta, el de reserva, que es para esto. */
+        override fun onRequestToken() {
+            scope.launch {
+                val nuevo = withContext(Dispatchers.IO) { accesoAgora.renovarEsteTelefono() }
+                if (nuevo == null) {
+                    accesoAgora.actual.value?.tokenPara(System.currentTimeMillis())?.let { engine?.renewToken(it) }
+                }
+            }
+        }
+
+        override fun onEncryptionError(errorType: Int) {
+            Log.e(TAG, "Error de cifrado del canal: $errorType")
+        }
     }
 
     /**
@@ -437,11 +473,11 @@ class AgoraRepository(
                 },
             )
 
-            // Cada telefono entra con un uid aleatorio, como en Falcon One, pero por
-            // encima del rango reservado a servicios (bodycams y grabador en la nube,
-            // ver esBodycam): coincidir con el grabador romperia la grabacion.
+            // Sin acceso de AeriaOne (servidor viejo, nunca hubo sesion) se entra como
+            // antes: uid aleatorio por encima del rango reservado a servicios (bodycams y
+            // grabador en la nube, ver esBodycam), sin token y en claro.
             miUid = Random.nextInt(PRIMER_UID_TELEFONO, Int.MAX_VALUE)
-            rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
+            entrarAlCanal(rtcEngine)
         } catch (e: Exception) {
             Log.w(TAG, "No se pudo iniciar la red tactica", e)
             engine = null
@@ -452,6 +488,90 @@ class AgoraRepository(
         startLocationSharingIfPermitted()
         startLocationHeartbeat()
         startVigilanciaSos()
+        vigilarAcceso()
+    }
+
+    /**
+     * Entra al canal con lo que haya de AeriaOne (§2.7): su uid, el token que valga
+     * ahora (el normal o el de reserva) y la clave de la semana. Sin token se entra sin
+     * el, que vale mientras el proyecto de Agora no tenga certificado; sin clave, en claro.
+     *
+     * Durante un SOS no se cambia de uid: el backend lo graba por uid y cambiarlo
+     * partiria la grabacion. Se cambia al terminar (ver [cancelSos]).
+     */
+    private fun entrarAlCanal(rtcEngine: RtcEngine): Int {
+        val ahora = System.currentTimeMillis()
+        val acceso = accesoAgora.actual.value
+        if (acceso != null && !_sosActive.value) miUid = acceso.uid
+        // El canal lo dice AeriaOne: el token va firmado para ese y no vale en otro.
+        canal = acceso?.canal?.ifBlank { null } ?: CHANNEL_ID
+        val clave = acceso?.claveEn(ahora)
+        val cifrado = EncryptionConfig()
+        if (clave != null) {
+            cifrado.encryptionMode = EncryptionConfig.EncryptionMode.AES_256_GCM2
+            // La clave va como texto, sin descodificar; la sal si, a sus 32 bytes.
+            cifrado.encryptionKey = clave.keyHex
+            clave.salt().copyInto(cifrado.encryptionKdfSalt)
+            cifrado.datastreamEncryptionEnabled = true
+        }
+        rtcEngine.enableEncryption(clave != null, cifrado)
+        claveConLaQueSeEntro = clave?.keyId
+        return rtcEngine.joinChannel(acceso?.tokenPara(ahora), canal, miUid, opcionesDelCanal())
+    }
+
+    /**
+     * Aplica cada acceso nuevo de AeriaOne y vigila el cambio de clave del lunes. Un
+     * acceso con otro uid u otra clave obliga a salir y volver a entrar; si solo cambia
+     * el token, se renueva sin salir.
+     */
+    private fun vigilarAcceso() {
+        scope.launch {
+            accesoAgora.actual.collect { acceso -> if (acceso != null) aplicarAcceso() }
+        }
+        scope.launch {
+            while (isActive) {
+                delay(REVISION_DE_CLAVE_MILLIS)
+                val acceso = accesoAgora.actual.value ?: continue
+                val ahora = System.currentTimeMillis()
+                if (acceso.claveEn(ahora)?.keyId != claveConLaQueSeEntro) {
+                    Log.i(TAG, "cambio de clave del canal: se vuelve a entrar")
+                    volverAEntrar()
+                }
+                // A un dia de que acabe la ultima clave conocida, o sin token vigente: se pide.
+                val acabanLasClaves = acceso.claves.isNotEmpty() &&
+                    acceso.claves.maxOf { it.hastaMillis } - ahora < UN_DIA_MILLIS
+                if (acabanLasClaves || ahora >= acceso.tokenHastaMillis) pedirAcceso(forzar = false)
+            }
+        }
+    }
+
+    private fun aplicarAcceso() {
+        val rtcEngine = engine ?: return
+        val acceso = accesoAgora.actual.value ?: return
+        val ahora = System.currentTimeMillis()
+        val otroUid = acceso.uid != miUid && !_sosActive.value
+        val otroCanal = acceso.canal.isNotBlank() && acceso.canal != canal
+        if (otroUid || otroCanal || acceso.claveEn(ahora)?.keyId != claveConLaQueSeEntro) {
+            volverAEntrar()
+        } else {
+            acceso.tokenPara(ahora)?.let { rtcEngine.renewToken(it) }
+        }
+    }
+
+    /** Salir y entrar con el mismo motor. Un SOS en curso se reanuncia al entrar. */
+    private fun volverAEntrar() {
+        val rtcEngine = engine ?: return
+        rtcEngine.leaveChannel()
+        val resultado = entrarAlCanal(rtcEngine)
+        Log.i(TAG, "De vuelta al canal (uid $miUid, cifrado ${claveConLaQueSeEntro ?: "no"}): $resultado")
+    }
+
+    /** Pide a AeriaOne el acceso de este telefono, como mucho cada pocos minutos salvo [forzar]. */
+    private fun pedirAcceso(forzar: Boolean) {
+        val ahora = System.currentTimeMillis()
+        if (!forzar && ahora - ultimaPeticionDeAccesoMillis < ESPERA_ENTRE_PETICIONES_MILLIS) return
+        ultimaPeticionDeAccesoMillis = ahora
+        scope.launch(Dispatchers.IO) { accesoAgora.renovarEsteTelefono() }
     }
 
     private fun opcionesDelCanal() = ChannelMediaOptions().apply {
@@ -505,7 +625,7 @@ class AgoraRepository(
                 val rtcEngine = engine ?: return@launch
                 if (_isConnected.value) return@launch
                 rtcEngine.leaveChannel()
-                val resultado = rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
+                val resultado = entrarAlCanal(rtcEngine)
                 Log.i(TAG, "Reentrando al canal: $resultado")
                 // Un join aceptado sigue su curso solo: si vuelve a fallar, el
                 // callback de FAILED lanza otra reentrada.
@@ -561,7 +681,7 @@ class AgoraRepository(
         sendSosSignal()
         sosId = UUID.randomUUID().toString()
         ultimoLatidoBackendMillis = System.currentTimeMillis()
-        sosNotifier.inicio(sosId, CHANNEL_ID, miUid, officer, lastLatitude, lastLongitude)
+        sosNotifier.inicio(sosId, canal, miUid, officer, lastLatitude, lastLongitude)
         historialSos.registrarInicio(
             RegistroSos(
                 clave = "$miUid@$sosStartedAtMillis",
@@ -600,6 +720,8 @@ class AgoraRepository(
         stopCameraPublish()
         _microSosCerrado.value = false
         if (_entranteSilenciado.value) alternarSilencioEntrante()
+        // Si AeriaOne asigno otro uid durante el SOS, se adopta ahora.
+        accesoAgora.actual.value?.takeIf { it.uid != miUid }?.let { scope.launch { aplicarAcceso() } }
     }
 
     /**
@@ -936,9 +1058,9 @@ class AgoraRepository(
         ultimoLatidoBodycamMillis = System.currentTimeMillis()
         sosNotifier.inicio(
             sosId = id,
-            channel = CHANNEL_ID,
+            channel = canal,
             uid = uid,
-            officer = sosOfficer.ifBlank { BODYCAM_OFFICER },
+            officer = placaDelAgente(),
             // La camara no tiene GPS: va la posicion de este telefono, que la lleva puesta.
             latitude = lastLatitude,
             longitude = lastLongitude,
@@ -1220,6 +1342,7 @@ class AgoraRepository(
         private const val REENTRADA_MILLIS = 5_000L
 
         // Mismo canal que la app Flutter: ambas versiones se ven entre si.
+        /** El de siempre, para cuando AeriaOne no ha dado acceso (servidor viejo, nunca hubo sesion). */
         private const val CHANNEL_ID = "falcon_group_channel"
 
         // Cada bodycam entra al canal con un uid sacado de su identidad (BWC-896E
@@ -1261,6 +1384,9 @@ class AgoraRepository(
         // Por debajo quedan los uids de servicios: las bodycams (ver esBodycam) y
         // 90000-99999 el grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
         private const val PRIMER_UID_TELEFONO = 100_000
+        private const val REVISION_DE_CLAVE_MILLIS = 60_000L
+        private const val ESPERA_ENTRE_PETICIONES_MILLIS = 10 * 60_000L
+        private const val UN_DIA_MILLIS = 24 * 60 * 60_000L
 
         // Uid del agente inventado de simularPttRemotoDebug: en el rango de telefonos.
         private const val UID_SIMULADO_DEBUG = 123_456

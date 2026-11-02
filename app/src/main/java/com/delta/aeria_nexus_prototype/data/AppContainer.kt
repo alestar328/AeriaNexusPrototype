@@ -5,13 +5,16 @@ import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.ContextoDeAuditoria
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
+import com.delta.aeria_nexus_prototype.data.crypto.NexusKeyWrapper
 import com.delta.aeria_nexus_prototype.data.identity.AlmacenDeInvitacion
+import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
 import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
 import com.delta.aeria_nexus_prototype.data.identity.PerfilDelAgente
 import com.delta.aeria_nexus_prototype.data.identity.PinLocal
+import com.delta.aeria_nexus_prototype.data.identity.RenovacionDeCertificados
 import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
 import com.delta.aeria_nexus_prototype.data.identity.VigilanteDeCaducidad
 import com.delta.aeria_nexus_prototype.data.local.BaseCifrada
@@ -19,6 +22,7 @@ import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
 import com.delta.aeria_nexus_prototype.data.transcript.MotorWhisper
 import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
 import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionesDeBodycam
+import com.delta.aeria_nexus_prototype.data.upload.AutoriaDeEvidencia
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
@@ -87,6 +91,8 @@ object AppContainer {
         private set
     lateinit var perfilDelAgente: PerfilDelAgente
         private set
+    lateinit var accesoAgora: AccesoAgoraRepository
+        private set
     lateinit var credentialRepository: CredentialRepository
         private set
     lateinit var pinLocal: PinLocal
@@ -114,6 +120,8 @@ object AppContainer {
     fun init(context: Context) {
         val appContext = context.applicationContext
         auditoria = AuditoriaLocal(appContext)
+        // Antes que cualquier repositorio de identidad: dice que generacion de cada clave vale.
+        ClaveEnKeystore.iniciar(appContext)
         // La boveda va primero: sin ella cargada, una captura que se cierre antes de
         // abrir la pantalla de evidencia se cifraria solo para el servidor y el
         // agente no podria volver a verla en el telefono.
@@ -133,17 +141,20 @@ object AppContainer {
         val uploadConfig = UploadConfig(appContext, sesionBackend, almacenDeInvitacion)
         iamClient = IamClient(uploadConfig)
         locationRepository = LocationRepository(appContext)
-        incidentRepository = IncidentRepository(dao, locationRepository)
+        // Antes que los incidentes: cada uno guarda el nombre y la placa del agente al crearse.
+        perfilDelAgente = PerfilDelAgente(appContext)
+        incidentRepository = IncidentRepository(dao, locationRepository, perfilDelAgente)
         // Material que entra de un periferico y todavia no es de ningun incidente.
         rawEvidenceRepository = RawEvidenceRepository(db.rawEvidenceDao(), incidentRepository)
         batteryRepository = BatteryRepository(appContext)
         ajustesSos = AjustesSos(appContext)
         bodycamRepository = BodycamRepository(appContext, sesionBackend, ajustesSos)
         historialSos = HistorialSos(appContext, HistorialSosBackend(uploadConfig))
+        accesoAgora = AccesoAgoraRepository(appContext, uploadConfig, sesionBackend)
         agoraRepository = AgoraRepository(
             context = appContext,
             locationRepository = locationRepository,
-            sosNotifier = SosNotifier(appContext, uploadConfig),
+            sosNotifier = SosNotifier(uploadConfig),
             ajustesSos = ajustesSos,
             historialSos = historialSos,
             // Solo con el enlace vivo: una bodycam de la que no llega nada no se
@@ -151,6 +162,8 @@ object AppContainer {
             uidBodycamPropia = {
                 bodycamRepository.uidAgoraBodycam.takeIf { bodycamRepository.isConnected }
             },
+            placaDelAgente = { incidentRepository.agenteDeLaSesion().placa },
+            accesoAgora = accesoAgora,
         )
         buscadorBodycam = BuscadorBodycam(appContext)
         gafasRepository = GafasRepository(appContext)
@@ -178,14 +191,13 @@ object AppContainer {
             config = uploadConfig,
             sessions = uploadSessions,
             dao = dao,
-            // perfilDelAgente se crea mas abajo; la lambda solo se llama al subir.
-            placaDelAgente = { perfilDelAgente.actual()?.placa },
+            agenteActual = ::agenteActual,
         )
         // Lo que se cifra al reintentar (el cifrado fallo al capturar) sale con su incidente.
         localEvidenceRepository.alCifrarTarde = { sellada, p ->
             evidenceUploader.enqueue(sellada, p.evidenceId, p.incidentId, p.label, p.type)
         }
-        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions)
+        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions, ::agenteActual)
         // Antes que las gafas: lo que se baja de ellas tambien se transcribe.
         transcripcionRepository = TranscripcionRepository(
             motor = MotorWhisper(appContext),
@@ -222,7 +234,6 @@ object AppContainer {
         pinLocal = PinLocal(appContext)
         enrollmentRepository = EnrollmentRepository(appContext)
         credentialRepository = CredentialRepository(appContext)
-        perfilDelAgente = PerfilDelAgente(appContext)
         // Va detras de los anteriores: el desbloqueo autoriza la clave del agente y
         // firma el reto del backend, asi que los necesita ya construidos.
         identityRepository = IdentityRepository(
@@ -256,6 +267,25 @@ object AppContainer {
         // Lo capturado sin sesion con AeriaOne —sin cobertura al desbloquear, o antes
         // de que llegase el token— sale en cuanto hay token.
         identityRepository.alAcreditarSesion = ::reanudarSubidas
+        // Ciclo de vida de las credenciales (credential-lifecycle.md): lo que trae cada
+        // sesion se guarda, y si un certificado esta por caducar se renueva con clave nueva.
+        val renovacion = RenovacionDeCertificados(
+            context = appContext,
+            iam = iamClient,
+            credential = credentialRepository,
+            enrollment = enrollmentRepository,
+            auditoria = auditoria,
+        )
+        identityRepository.alRecibirSesion = { sesion ->
+            enrollmentRepository.guardarCas(sesion.cas)
+            sesion.claveDeEvidencia?.let(enrollmentRepository::guardarClaveDeEvidencia)
+            // Esta sesion ya se abrio con la clave nueva: la anterior sobra.
+            renovacion.limpiarAnteriores()
+            renovacion.renovarSiToca(sesion.credenciales)
+        }
+        // Se cifra para la clave de evidencia que manda AeriaOne; sin ella, la compilada.
+        NexusKeyWrapper.recibida = { enrollmentRepository.claveDeEvidencia()?.let { it.kid to it.publicaPem } }
+        identityRepository.alRetirarTerminal = ::destruirIdentidadLocal
         // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin
         // esto, una camara emparejada seguiria operando en nombre de un agente que
         // ya no esta de servicio.
@@ -294,6 +324,15 @@ object AppContainer {
         vigilanteDeCaducidad.arrancar()
     }
 
+    /**
+     * El agente de la credencial instalada, para sellar la autoria de lo que se guarda.
+     * Sus dos piezas se crean mas abajo en init(); solo se lee al guardar evidencia.
+     */
+    private fun agenteActual(): AutoriaDeEvidencia? {
+        val userId = credentialRepository.agenteProvisionado() ?: return null
+        return AutoriaDeEvidencia(userId, perfilDelAgente.actual()?.placa)
+    }
+
     /** Reintenta la evidencia y los manifiestos que quedaron sin entregar. */
     fun reanudarSubidas() {
         evidenceUploader.resumePending()
@@ -318,5 +357,7 @@ object AppContainer {
         identityRepository.deshacerAlta()
         // El QR apunta al servidor y al agente de la identidad que se acaba de destruir.
         almacenDeInvitacion.borrar()
+        // El uid y la clave del canal eran de este alta.
+        accesoAgora.olvidar()
     }
 }

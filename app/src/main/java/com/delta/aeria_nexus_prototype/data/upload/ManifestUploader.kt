@@ -5,6 +5,7 @@ import android.os.Build
 import android.util.Log
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.model.OfficerIncident
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +30,8 @@ class ManifestUploader(
     private val context: Context,
     private val config: UploadConfig,
     sessions: UploadSessions,
+    /** Agente de la credencial instalada ahora mismo; ver [AutoriaDeEvidencia]. */
+    private val agenteActual: () -> AutoriaDeEvidencia?,
 ) {
 
     private val uploader = ChunkedUploader(config, sessions)
@@ -45,6 +48,7 @@ class ManifestUploader(
             fichero.writeText(ManifiestoDelTelefono.json(incidente, Build.MODEL))
             // El recibo era del manifiesto anterior; este todavia no ha salido.
             marcaDeEntregado(fichero).delete()
+            sellarAutoriaSiFalta(fichero)
         }.onFailure {
             Log.e(TAG, "no se pudo escribir el manifiesto de ${incidente.id}: ${it.message}")
             return
@@ -75,7 +79,8 @@ class ManifestUploader(
                 "crypto_format" to "none",
                 "source" to "phone",
                 "device_model" to Build.MODEL,
-            )
+            ) + AutoriaDeEvidencia.metadata(autoriaSellada(fichero), placaActual = agenteActual()?.placa) +
+                sello(fichero, sha, incidentId)
             val resultado = uploader.upload(fichero, sha, metadata)
             if (resultado.delivered && resultado.verified != false) {
                 marcaDeEntregado(fichero).createNewFile()
@@ -97,8 +102,43 @@ class ManifestUploader(
 
     private fun marcaDeEntregado(fichero: File) = File(fichero.parentFile, fichero.name + ".delivered")
 
+    private fun ficheroDeAutoria(fichero: File) = File(fichero.parentFile, fichero.name + SUFIJO_AUTORIA)
+
+    /**
+     * El manifiesto se reescribe cada vez que el incidente cambia, pero el incidente
+     * sigue siendo del agente que lo abrio: la autoria se sella la primera vez y no
+     * se toca despues.
+     */
+    private fun sellarAutoriaSiFalta(fichero: File) {
+        if (autoriaSellada(fichero) != null) return
+        val autoria = agenteActual() ?: return
+        ficheroDeAutoria(fichero).writeText(autoria.sellarEn(JSONObject()).toString())
+    }
+
+    /**
+     * Se sella tambien el manifiesto (evidence-seal.md §2). El del telefono va en claro,
+     * asi que el hash cifrado y el claro son el mismo. La captura es la primera vez que
+     * se escribio el expediente, que es cuando se sello su autoria.
+     */
+    private fun sello(fichero: File, sha: String, incidentId: String): Map<String, String> {
+        val autoria = ficheroDeAutoria(fichero)
+        return SelloDeEvidencia(
+            sha256Cipher = sha,
+            sha256Plain = sha,
+            kind = "manifest",
+            mediaType = null,
+            incidentId = incidentId,
+            principal = (autoriaSellada(fichero) ?: agenteActual())?.userId,
+            capturedAt = autoria.takeIf { it.isFile }?.let { SelloDeEvidencia.iso(it.lastModified()) },
+        ).metadata()
+    }
+
+    private fun autoriaSellada(fichero: File): AutoriaDeEvidencia? =
+        AutoriaDeEvidencia.leerDe(runCatching { JSONObject(ficheroDeAutoria(fichero).readText()) }.getOrNull())
+
     private companion object {
         const val CARPETA = "manifests"
         const val SUFIJO = ".manifest.json"
+        const val SUFIJO_AUTORIA = ".author.json"
     }
 }

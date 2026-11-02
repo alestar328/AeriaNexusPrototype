@@ -6,6 +6,189 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
+## 2026-11-02 (6) — Release 1.22 (code 23) generado a petición del usuario
+
+`app/build/outputs/apk/release/app-release.apk` (159 MB), firmado con la clave FalconOne
+(SHA-256 ddc59fd4…57ba). En este ordenador el keystore está en `C:/Users/lilia/.android/
+falconone-release.jks` (local.properties actualizado). version.properties pasa a 1.23 (code 24).
+Ojo: el release no permite http (network_security_config), así que no habla con el backend
+local http://192.168.0.20:8000; para eso, debug.
+
+## 2026-11-02 (5) — Incidente que no sale en el Redmi: la app se instaló de cero a las 13:42
+
+`firstInstallTime=13:42:40`: los datos de la app se borraron (desinstalación; nuestros `install -r`
+no lo hacen). Base, `.fev`, bóveda vieja y alta anteriores se perdieron en el teléfono; el
+incidente sigue en el backend. Alta por QR rehecha a las 13:43 y `vault.key` creada a las 13:43
+sin pasos extra: la bóveda con el PIN funciona. El móvil no descarga incidentes del backend
+(Incidents = solo Room local); traerlos sería un cambio nuevo con contrato.
+
+## 2026-11-02 (4) — El mapa cerraba la app: local.properties sin claves
+
+`local.properties` se regeneró el 28-oct y solo tiene `sdk.dir`: faltan `MAPBOX_ACCESS_TOKEN`,
+`AGORA_APP_ID` (y `PAIS_PERIFERICOS`, que es PH para las gafas). No queda copia en el disco. Sin
+el token, Mapbox lanzaba `MapboxConfigurationException` y la app se cerraba al abrir el mapa;
+ahora `MapScreen` enseña un aviso en su lugar. Las claves las tiene que volver a poner el usuario.
+Recuperadas del `local.properties` del otro ordenador y copiadas aquí (Mapbox, Agora, MACs, PH,
+firma). El keystore `falconone-release.jks` NO está en este ordenador: la ruta apunta a
+`C:/Users/lilia/.falconone/`, hay que copiarlo antes de cualquier release.
+
+## 2026-11-02 (3) — Bóveda con el PIN: una sola contraseña (decisión del usuario)
+
+Pedido del usuario tras crear un incidente antes que la bóveda (la evidencia quedó `NO KEY`).
+Compila y pasan los tests; instalado en el Redmi, **sin probar**.
+
+- `IdentityRepository.unlock()` → `abrirBoveda(pin)`: sin bóveda la crea con el PIN
+  (`BOVEDA_CREADA`); con bóveda de PIN la abre con la sesión (`BOVEDA_ABIERTA`). Se sella al
+  cerrar sesión como siempre. Como el alta entra por `unlock()`, la bóveda existe antes de
+  poder capturar nada.
+- `vault.key` lleva `"opens_with": "pin"`; `EvidenceVault.abreConPin`. Las bóvedas de antes
+  (sin el campo) siguen con su contraseña propia y su «Forgot password?».
+- `cambiarPin()`: vuelve a cifrar la bóveda con el nuevo PIN antes de guardar el PIN
+  (`EvidenceVault.cambiarContrasena`, escribe en `.tmp` y renombra) y lo deshace si el PIN no
+  se guarda.
+- Pantalla de la bóveda: ya no hay formulario de crear (`crearBoveda` y `LONGITUD_MINIMA`
+  retirados). Bloqueada a mano, se abre con el PIN, que pasa por `comprobarPinActual`
+  (`via = vault_unlock`, cuenta para el límite de intentos). El reinicio por contraseña
+  olvidada crea ya la bóveda nueva con el PIN.
+- Riesgo aceptado: quien vea el PIN abre también la evidencia del teléfono (antes se descartó
+  por eso; el usuario prefiere la sencillez «de momento»).
+- Probar: alta nueva (bóveda creada sin pasos extra), captura abrible, LOCK + PIN, cambio de
+  PIN y abrir con el nuevo; en el Redmi la bóveda actual es antigua → «Forgot password?» la
+  pasa a PIN (lo grabado antes queda NO KEY en el teléfono, no en Nexus).
+
+## 2026-11-02 (2) — Cifrado IAM, encargo del backend (aeria-nexus-dc): A, B, E, D y C hechos (sin aparato)
+
+Encargo con cinco puntos, orden A → B → E → D → C (contratos en aeria-contracts, CHANGELOG
+2026-11-02). Respuestas a la baja: la bóveda del agente retirado SÍ se cambia (el nuevo crea
+la suya, lo cifrado no se toca), y la baja se prueba en el backend local 192.168.0.20:8000.
+
+### A. El agente sale de la sesión, no de OfficerSampleData (compila, sin probar en aparato)
+- `IncidentRepository.agenteDeLaSesion()` lee `PerfilDelAgente` (el perfil de AeriaOne). Nombre
+  y placa del incidente (y por tanto del manifiesto phone-incident/1) salen de ahí; vacíos si
+  AeriaOne aún no ha mandado perfil. `PerfilDelAgente` se crea ahora antes que los incidentes.
+- SOS y PTT (Operations, Active Incident, Livestream) mandan la placa de la sesión. El aviso al
+  backend del SOS de la bodycam ya no manda la placa falsa `BODYCAM`.
+- `SosNotifier`: `device_id` = CN del certificado del terminal (`ClaveEnKeystore.deviceIdDelTerminal()`),
+  no ANDROID_ID; sin alta o sin placa, se omiten.
+- Ficha propia del directo desde el perfil (sin grupo sanguíneo: AeriaOne no lo da; filas vacías ocultas).
+- "FL" en la línea de tiempo solo si el mando de las gafas está LISTO (antes salía siempre).
+- Retirado `OfficerProfile` y `OfficerSampleData.profile`. Queda el padrón de placas solo para
+  rotular el SOS de otros agentes.
+
+### B. Sello evidence-seal/1 (compila y pasan los tests, sin probar contra el backend)
+- `data/upload/SelloDeEvidencia.kt`: JSON firmado con la clave del TERMINAL (ECDSA P-256),
+  `seal` (JSON en base64) y `seal_sig` (DER en base64) en Upload-Metadata. `cert_serial` en hex
+  minúsculas, `binding_id` "", `principal` = autoría sellada (el que grabó) o, sin ella, el agente
+  de ahora. `recorded_by: goggles` si el fichero empieza por `gafas_` (vídeo, proxy y transcripción).
+- Se sellan evidence, proxy, transcript y el manifiesto (este va en claro: sha256_plain = cipher).
+- `captured_at` se guarda en los datos de cada pieza la primera vez (≈ cierre de la captura);
+  en el manifiesto es la fecha del `.author.json`. Sin certificado de terminal no hay sello.
+- Recibo con `seal` distinto de `verified`: aviso en el log. Tests: `SelloDeEvidenciaTest` (4).
+
+### E. key_rejected pintado como rechazado
+- `SyncState.REJECTED` ("Rejected", rojo). `estadoTrasEntregar()` en EvidenceUploader lo usa en la
+  entrega y en `reconcile()`. La regla de borrado no cambia (solo `accepted`), así que los recibos
+  con `flags` se tratan igual que sin ellos.
+
+Nota: en la consola de Claude hay que exportar `JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"`
+para que gradlew compile.
+
+### D. Ciclo de vida de credenciales (compila y pasan los tests, sin probar contra el backend)
+- `ClaveEnKeystore`: generaciones por alias (`aeria.device.key`, `.r1`, `.r2`…); el Keystore no
+  deja renombrar. La vigente la apunta `noBackupFilesDir/claves_vigentes.properties`
+  (`ClaveEnKeystore.iniciar()` en AppContainer). `borrar()` borra todas las generaciones.
+- `RenovacionDeCertificados`: reto RENOVACION, par nuevo, CSR con el mismo sujeto, firma con la
+  VIGENTE sobre nonce||csr_der, `POST iam/certificates/renew`; promueve la nueva solo con el
+  certificado instalado. Si faltan ≤30 días o `renew_required`; un intento al día. Agente solo
+  con el PIN puesto. Las generaciones viejas se borran al abrirse la siguiente sesión.
+- Sesión y altas: `credentials`, `device_ca_pems`/`user_ca_pems` y `evidence_key` (IamClient).
+  Las CA de dispositivos se guardan y el emparejamiento acepta cualquiera (test nuevo de CA rotada).
+  `NexusKeyWrapper.vigente()`: cifra para la `evidence_key` de AeriaOne (kid con "srv:", se quita
+  al construir el id); si no vale o no hay, la compilada.
+- Códigos: `device_quarantined`, `certificate_expired`, `certificate_superseded` → cortes nuevos
+  en ProfileCutDialog (no reintenta, no borra). `device_decommissioned` → cierra sesión y
+  `destruirIdentidadLocal()`; los .fev se quedan. Auditoría: CERTIFICADO_RENOVADO/NO_RENOVADO,
+  TERMINAL_EN_CUARENTENA, TERMINAL_RETIRADO.
+- Bóveda del agente retirado (decisión del usuario 2-nov): `EvidenceVault.archivarDelAgenteRetirado()`
+  aparta `vault.key` (no lo borra) al REMOVE OFFICER; el siguiente crea la suya.
+- Cuarentena (decisión del usuario, confirmada por el backend): NO se suelta el token; la sesión
+  ya abierta sigue subiendo (AeriaOne la acepta y la marca) y no se renueva. Con
+  `device_decommissioned` sí se suelta.
+- CAS:/EVKEY: por BT quedaron fuera del contrato (la cámara pide las CA a GET iam/trust-anchors).
+
+### C. Agora con token, uid asignado y cifrado (compila y pasan los tests, sin aparato ni backend vivo)
+- `data/AccesoAgoraRepository.kt`: `POST agora/token` al abrirse cada sesión (también sos_only).
+  Guarda la última respuesta cifrada con `DeviceKeyWrapper.agora` en `noBackupFilesDir/agora_acceso.bin`
+  para el SOS sin backend. `tokenPara()`: normal → reserva → ninguno; `claveEn()`: por la hora.
+- `AgoraRepository.entrarAlCanal()`: uid de AeriaOne (sin acceso, aleatorio como antes), token
+  (null = sin certificado) y `enableEncryption(AES_256_GCM2)` con key hex tal cual, salt de 32 bytes
+  y data stream cifrado; sin `encryption`, en claro. Otro uid u otra clave → salir y entrar; solo
+  token → `renewToken`. Durante un SOS no cambia el uid (se adopta al cancelar). Revisión cada
+  minuto: cambio de clave del lunes y token caducado. `onTokenPrivilegeWillExpire` pide otro;
+  `onRequestToken` usa la reserva si no hay backend.
+- Cámara (`BodycamRepository.prestarAccesoAgora()`): con enlace autenticado (canal cifrado v2),
+  sesión y atadura registrada, pide `{bwc_id}` y manda `AGTOKEN:` y un `AGKEY:` por clave con tiempos
+  relativos; se repite antes de caducar el token y al empezar la clave siguiente, y al reconectar.
+  AGTOKEN_OK/AGKEY_OK/…_FAIL se registran en el log sin interpretar.
+- Cámara en cuarentena (403 device_quarantined al atarla o al pedir su token): aviso
+  "QUARANTINED" en la barra superior; ya no corta la sesión del teléfono como si fuera él.
+- Tests: `AccesoAgoraTest` (3).
+
+### Pendiente
+- Prueba conjunta con el Redmi y el backend local (192.168.0.20:8000), reenrolando con QR de ese PC.
+- Dudas resueltas por el backend: se entra al `channel` de la respuesta (firma falcon_group_channel;
+  el compilado queda de reserva); agora/token manda el código en cabecera y cuerpo; un rechazo con
+  `device_id` es de la cámara (no corta la sesión del teléfono; IamException.dispositivo).
+- Mensaje de commit propuesto: "cifrado iam: agente de la sesion, sello de evidencia, renovacion de certificados, cuarentena y agora con token y cifrado".
+
+- Prueba en el Redmi: la app caía al arrancar (NullPointerException en un `combine`): `BodycamRepository` lanzaba `prestarToken()`/`prestarAccesoAgora()` en un `init` situado antes de declarar `_enlaceAutenticado` y `_binding`. Movidos al `init` de después; ya arranca. Falta `AGORA_APP_ID` en `local.properties` (sin él no hay Agora ni SOS por directo).
+
+## 2026-11-02 — Baja de usuario en el teléfono: autoría sellada y «retirar agente»
+
+Encargo del backend (aeria-nexus-8f), que ya tiene hecho `POST /api/users/<id>/offboard/`
+(iam-session.md §9.6). Primer trabajo en el equipo nuevo, que estaba en `main`: se pasó a
+`dev_back_connection` con permiso del usuario. Compila y pasan los tests unitarios. **Sin
+probar en aparato**, porque falta dar de baja a un agente de prueba en el backend.
+
+### 1. Autoría sellada al guardar, no al subir
+- Nuevo `data/upload/AutoriaDeEvidencia.kt`. Guarda el user_id de la credencial instalada y la
+  placa, dentro de los datos que ya acompañan a cada pieza (`.evidence.json`, `.proxy.json` y
+  `.data.json`). El manifiesto lleva un `.author.json` propio.
+- Si los datos ya tenían autoría, se conserva: una pieza se vuelve a encolar al clasificarla o
+  al cifrarla tarde, y el agente puede haber cambiado.
+- Al subir: `officer_user_id` y `officer_code` salen de lo sellado. Sin autoría sellada (lo
+  anterior al cambio) se sube como antes, solo con la placa de ahora.
+- `AppContainer.agenteActual()` sustituye a la lambda `placaDelAgente`.
+- Test: `AutoriaDeEvidenciaTest` (5 casos).
+
+### 2. «Retirar agente» desde el aviso PROFILE REVOKED
+- `IdentityRepository.retirarAgente()`, solo con el corte REVOCADO:
+  - cierra la sesión con motivo REVOCACION (suelta la cámara con la clave aún viva);
+  - borra la credencial, el PIN, el perfil y las claves `credencial` y `user_id`;
+  - audita AGENTE_RETIRADO;
+  - recalcula el estado: ENROLLING por el tramo del agente.
+  Conserva la clave del terminal, la bóveda y el QR guardado, que lleva la dirección del
+  servidor y no se puede borrar.
+- `ProfileCutDialog`: con REVOCADO, «CHECK AGAIN» pasa a ser «REMOVE OFFICER», con
+  confirmación. El texto ya no promete subir «cuando se reactive el perfil».
+- `EnrollmentViewModel`: con el terminal dado de alta y el QR con el código ya gastado, pide
+  un QR nuevo en vez de reintentar solo con el agente anterior. La pantalla dice "NO OFFICER ON
+  THIS PHONE" en lugar de "DEVICE NOT ENROLLED".
+
+### Pendiente
+- Probar en el Redmi: dar de baja a un agente de prueba → aviso → REMOVE → QR de otro agente →
+  PIN → lo pendiente sube con el `officer_user_id` del primero.
+- Bóveda: sigue siendo la del agente retirado, y lo que capture el siguiente se cifra también
+  para ella. El backend está de acuerdo en quitarla como destinataria de lo nuevo al retirar
+  (sin tocar lo ya cifrado), pero **espera la confirmación del usuario**.
+- La prueba en el Redmi depende de otra decisión del usuario: la baja solo está en el backend
+  local (192.168.0.20:8000), y escanear un QR de otro servidor borra la identidad del Redmi.
+- El backend confirma que el user_id de la credencial es el `principal` de `_quien_grabo`.
+- Las piezas que se cifran en el momento de retirar (transcripción o proxy a medias) quedan sin
+  autoría y saldrán como antes.
+
+---
+
 ## 2026-11-01 — Revisión del Seguimiento IAM contra el código (para el backend, sin código)
 
 Encargo de la sesión del backend (aeria-nexus-0a): contrastar `Seguimiento-IAM-AeriaOne.xlsx`

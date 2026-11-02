@@ -41,6 +41,15 @@ class EmparejamientoBodycamTest {
         assertTrue("La bodycam no acepto al telefono", escenario.bodycam.aceptoAlTelefono)
     }
 
+    /** Tras rotar la CA, una camara firmada por la vieja sigue emparejando (credential-lifecycle.md §2.3). */
+    @Test
+    fun una_camara_de_la_ca_anterior_empareja_tras_la_rotacion() {
+        val resultado = Escenario(telefonoConCaRotada = true).emparejar()
+
+        assertTrue("La camara de la CA vieja no paso: $resultado",
+            resultado is ResultadoEmparejamiento.Autenticado)
+    }
+
     /**
      * Ataque de reflexion: la bodycam devuelve la firma que acaba de recibir del
      * telefono. Sin el rol dentro de la transcripcion esto pasaria, porque los dos
@@ -209,11 +218,13 @@ private class Escenario(
     bodycamFirmaOtroNonce: Boolean = false,
     bodycamDeOtraCa: Boolean = false,
     telefonoSinAncla: Boolean = false,
+    telefonoConCaRotada: Boolean = false,
     bodycamSinEfimera: Boolean = false,
     private val intermediarioCambiaLaEfimera: Boolean = false,
 ) {
     private val caDePerifericos = Ca("AeriaOne Peripheral CA test")
     private val otraCa = Ca("Alguien Else CA")
+    private val caNueva = Ca("AeriaOne Peripheral CA test 2")
 
     private val parDelTelefono = generarParEc()
     private val certificadoDelTelefono = caDePerifericos.emitir("DEV-74435826", parDelTelefono)
@@ -232,7 +243,12 @@ private class Escenario(
         deviceId = "DEV-74435826",
         certificadoDelTelefono = certificadoDelTelefono,
         firmar = { datos -> firmar(datos, parDelTelefono.private) },
-        anclaDePerifericos = if (telefonoSinAncla) null else caDePerifericos.certificado,
+        anclasDePerifericos = when {
+            telefonoSinAncla -> emptyList()
+            // Tras rotar: la que emite es la nueva y la camara sigue con la vieja.
+            telefonoConCaRotada -> listOf(caNueva.certificado, caDePerifericos.certificado)
+            else -> listOf(caDePerifericos.certificado)
+        },
     )
 
     fun emparejar(): ResultadoEmparejamiento {

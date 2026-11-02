@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.BodycamRepository
+import com.delta.aeria_nexus_prototype.data.GafasCommandRepository
+import com.delta.aeria_nexus_prototype.data.GafasControlState
 import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.ProxyRepository
@@ -68,6 +70,7 @@ class ActiveIncidentViewModel(
     private val proxies: ProxyRepository,
     private val transcripciones: TranscripcionRepository,
     private val agora: AgoraRepository,
+    private val gafas: GafasCommandRepository,
 ) : ViewModel() {
 
     /**
@@ -152,16 +155,16 @@ class ActiveIncidentViewModel(
         }
     }
 
-    /** Dispositivos activos: FC segun la conexion Bluetooth real de la bodycam,
-     *  FL segun el perfil (gafas aun sin integrar) y siempre el telefono (AN). */
-    private fun activeDevices(): String {
-        val perfil = repositorio.officerProfile
-        return buildList {
-            if (bodycamRepository.isConnected) add("FC")
-            if (perfil.flConnected) add("FL")
-            add("AN")
-        }.joinToString(" + ")
-    }
+    /**
+     * Dispositivos activos, para la linea de tiempo que va al manifiesto: FC si la
+     * bodycam esta enlazada, FL si el mando de las gafas esta abierto, y siempre el
+     * telefono (AN). Antes FL salia siempre, por el perfil de ejemplo.
+     */
+    private fun activeDevices(): String = buildList {
+        if (bodycamRepository.isConnected) add("FC")
+        if (gafas.estado.value == GafasControlState.LISTO) add("FL")
+        add("AN")
+    }.joinToString(" + ")
 
     /** Grabacion con la bodycam conectada: los comandos BT la inician y detienen. */
     fun toggleRecording() {
@@ -300,7 +303,7 @@ class ActiveIncidentViewModel(
         if (!sosAlSoltarCamara) return
         sosAlSoltarCamara = false
         addTimelineEntry("SOS raised — phone camera handed to the livestream", TimelineEntryType.SYSTEM)
-        agora.activateSos(repositorio.officerProfile.officerNum)
+        agora.activateSos(repositorio.agenteDeLaSesion().placa)
         _uiState.update { it.copy(openSosLivestream = true) }
     }
 

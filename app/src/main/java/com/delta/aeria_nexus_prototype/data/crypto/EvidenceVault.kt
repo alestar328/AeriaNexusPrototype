@@ -28,6 +28,11 @@ private const val TAG = "EvidenceVault"
  * Bóveda de evidencia del agente: la contraseña que hace falta para volver a ver en
  * el teléfono una foto, un vídeo o una nota de audio ya capturados.
  *
+ * Desde el 2-nov-2026 esa contraseña es el PIN de la app (decisión del usuario: una
+ * sola contraseña). La bóveda se crea en el primer desbloqueo, así que existe antes
+ * de que se pueda capturar nada, y se abre con la sesión. Las creadas antes siguen
+ * con su contraseña propia ([abreConPin] en false) hasta que se reinicien.
+ *
  * ── Por qué un par de claves y no la contraseña directamente ──────────────────
  *
  * La evidencia se cifra al cerrar la captura, en mitad de un servicio, sin nadie
@@ -54,9 +59,6 @@ private const val TAG = "EvidenceVault"
  */
 object EvidenceVault {
 
-    /** Mínimo de caracteres de la contraseña. Se teclea en campo, a veces con guantes. */
-    const val LONGITUD_MINIMA = 6
-
     /**
      * Identificador de las bóvedas creadas antes de que existiera [reiniciar]: todas
      * llevaban el mismo, porque en un teléfono solo podía haber habido una.
@@ -65,6 +67,7 @@ object EvidenceVault {
     private const val ID_SUFIJO_BYTES = 4
 
     private const val FILE_NAME = "vault.key"
+    private const val ABRE_CON_PIN = "pin"
     private const val VERSION = 1
     // Recomendación de OWASP para PBKDF2-HMAC-SHA256. Cuesta un par de décimas de
     // segundo en el teléfono y encarece cada intento de adivinar la contraseña.
@@ -99,6 +102,10 @@ object EvidenceVault {
     private val _configurada = MutableStateFlow(false)
     val configurada: StateFlow<Boolean> = _configurada.asStateFlow()
 
+    /** Si la bóveda se abre con el PIN de la app. False en las creadas con contraseña propia. */
+    var abreConPin: Boolean = false
+        private set
+
     /** Carga la parte pública, que es lo único que se necesita para cifrar. */
     fun init(context: Context) {
         val fichero = File(context.filesDir, FILE_NAME)
@@ -114,14 +121,14 @@ object EvidenceVault {
     fun wrapper(): KeyWrapper? = if (publica != null) wrapper else null
 
     /**
-     * Crea la bóveda con [contrasena] y la deja desbloqueada. Bloquea el hilo unos
+     * Crea la bóveda con el [pin] de la app y la deja desbloqueada. Bloquea el hilo unos
      * cientos de milisegundos entre la derivación y el par RSA: llamar desde una
      * corrutina en Dispatchers.Default.
      *
      * Devuelve false si ya existe una bóveda: sobrescribirla dejaría ilegible toda
      * la evidencia cifrada hasta ahora.
      */
-    fun configurar(contrasena: String): Boolean {
+    fun configurar(pin: String): Boolean {
         val fichero = archivo ?: return false
         if (fichero.isFile) {
             Log.w(TAG, "ya hay una bóveda creada: no se sobrescribe")
@@ -132,7 +139,7 @@ object EvidenceVault {
                 .apply { initialize(RSA_BITS) }
                 .generateKeyPair()
             val salt = ByteArray(SALT_BYTES).also { SecureRandom().nextBytes(it) }
-            val protegida = cifrarConContrasena(par.private.encoded, contrasena, salt)
+            val protegida = cifrarConContrasena(par.private.encoded, pin, salt)
             val sufijo = ByteArray(ID_SUFIJO_BYTES).also { SecureRandom().nextBytes(it) }
             val id = "$ID_SIN_SUFIJO:" + sufijo.joinToString("") { "%02x".format(it) }
 
@@ -143,10 +150,12 @@ object EvidenceVault {
                 put("iterations", ITERACIONES)
                 put("private_key", codificar(DeviceKeyWrapper.evidencia.wrap(protegida)))
                 put("public_key", codificar(par.public.encoded))
+                put("opens_with", ABRE_CON_PIN)
             }
             fichero.writeText(json.toString())
 
             wrapperId = id
+            abreConPin = true
             publica = par.public
             privada = par.private
             _configurada.value = true
@@ -188,6 +197,45 @@ object EvidenceVault {
     }
 
     /**
+     * Vuelve a cifrar la privada con [nueva], la misma bóveda y las mismas claves: lo
+     * que hace falta al cambiar el PIN. False si [actual] no la abre; entonces no se
+     * toca nada. Se escribe en un fichero aparte y se renombra, para que un corte a
+     * medias no deje la bóveda sin ninguna contraseña que la abra.
+     */
+    fun cambiarContrasena(actual: String, nueva: String): Boolean {
+        val fichero = archivo?.takeIf { it.isFile } ?: return false
+        return try {
+            val json = JSONObject(fichero.readText())
+            val protegida = DeviceKeyWrapper.evidencia.unwrap(decodificar(json.getString("private_key")))
+                ?: return false
+            val pkcs8 = descifrarConContrasena(
+                blob = protegida,
+                contrasena = actual,
+                salt = decodificar(json.getString("salt")),
+                iteraciones = json.getInt("iterations"),
+            ) ?: return false
+
+            val salt = ByteArray(SALT_BYTES).also { SecureRandom().nextBytes(it) }
+            val nuevaProtegida = cifrarConContrasena(pkcs8, nueva, salt)
+            Arrays.fill(pkcs8, 0)
+            json.put("salt", codificar(salt))
+            json.put("iterations", ITERACIONES)
+            json.put("private_key", codificar(DeviceKeyWrapper.evidencia.wrap(nuevaProtegida)))
+
+            val temporal = File(fichero.parentFile, "$FILE_NAME.tmp")
+            temporal.writeText(json.toString())
+            if (!temporal.renameTo(fichero)) {
+                temporal.delete()
+                return false
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "no se pudo cambiar la contraseña de la bóveda: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
      * Borra la bóveda para poder crear otra con una contraseña nueva: la salida
      * cuando la contraseña se olvida. Es destructivo. El par de claves se pierde, así
      * que lo cifrado hasta ahora deja de poder abrirse en este teléfono; la copia de
@@ -203,6 +251,28 @@ object EvidenceVault {
         }
         bloquear()
         publica = null
+        abreConPin = false
+        _configurada.value = false
+        return true
+    }
+
+    /**
+     * La bóveda del agente dado de baja deja de recibir evidencia nueva y el siguiente
+     * crea la suya (decisión del usuario del 2-nov-2026). No es [reiniciar]: lo cifrado
+     * para ella no se toca, y su fichero se aparta en vez de borrarse, así que con su
+     * contraseña se podría volver a abrir. La copia de Nexus no depende de esta clave.
+     */
+    fun archivarDelAgenteRetirado(): Boolean {
+        val fichero = archivo?.takeIf { it.isFile } ?: return true
+        val apartada = File(fichero.parentFile, "vault.retired-${System.currentTimeMillis()}.key")
+        if (!fichero.renameTo(apartada)) {
+            Log.e(TAG, "no se pudo apartar la bóveda del agente retirado")
+            return false
+        }
+        bloquear()
+        publica = null
+        abreConPin = false
+        wrapperId = ID_SIN_SUFIJO
         _configurada.value = false
         return true
     }
@@ -248,6 +318,7 @@ object EvidenceVault {
             val spki = decodificar(json.getString("public_key"))
             publica = KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(spki))
             wrapperId = json.optString("id", ID_SIN_SUFIJO)
+            abreConPin = json.optString("opens_with") == ABRE_CON_PIN
         } catch (e: Exception) {
             Log.e(TAG, "vault.key ilegible: ${e.message}", e)
             publica = null

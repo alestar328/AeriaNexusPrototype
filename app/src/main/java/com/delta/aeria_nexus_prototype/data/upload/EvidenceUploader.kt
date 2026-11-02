@@ -64,8 +64,11 @@ class EvidenceUploader(
     private val config: UploadConfig,
     private val sessions: UploadSessions,
     private val dao: IncidentDao,
-    /** Placa del agente de la sesion, si se conoce. Se lee al subir, no al crear esto. */
-    private val placaDelAgente: () -> String?,
+    /**
+     * Agente de la credencial instalada ahora mismo, o null si no hay ninguna. Se sella
+     * en cada pieza al guardar sus datos, no al subirla (ver [AutoriaDeEvidencia]).
+     */
+    private val agenteActual: () -> AutoriaDeEvidencia?,
 ) {
 
     private val uploader = ChunkedUploader(config, sessions)
@@ -134,7 +137,10 @@ class EvidenceUploader(
             .put("sha256_plain", sealed.plainSha256)
         datos.evidenceId?.let { json.put("evidence_id", it) }
         datos.incidentId?.let { json.put("incident_id", it) }
-        runCatching { datosDeTranscripcion(sealed.file).writeText(json.toString(2)) }
+        val fichero = datosDeTranscripcion(sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(json)
+        json.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(json.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
         if (!config.enabled()) return
         scope.launch { deliverTranscript(sealed.file) }
@@ -199,7 +205,7 @@ class EvidenceUploader(
                 val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
                 // Sin sus datos cada pieza llegaba suelta y el backend abria un incidente
                 // nuevo por fichero. Solo faltan en los .fev anteriores a este cambio.
-                val datos = runCatching { JSONObject(datosDeEvidencia(fev).readText()) }.getOrNull()
+                val datos = leerDatos(datosDeEvidencia(fev))
                 deliver(
                     fev = fev,
                     cipherSha256 = sha,
@@ -226,31 +232,30 @@ class EvidenceUploader(
 
         evidenceId?.let { setSync(it, SyncState.SYNCING) }
 
-        val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId) + buildMap {
+        val datos = leerDatos(datosDeEvidencia(fev))
+        val autoria = AutoriaDeEvidencia.leerDe(datos)
+        // Un incidente del telefono mezcla fotos, videos y audios, y el backend
+        // solo manda al analisis de video lo que es video (upload-protocol.md §5).
+        val mediaType = type?.let { mediaTypeDe(it) }
+        val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId, autoria) + buildMap {
             put("kind", "evidence")
             label?.let { put("label", it) }
-            // Un incidente del telefono mezcla fotos, videos y audios, y el backend
-            // solo manda al analisis de video lo que es video (upload-protocol.md §5).
-            type?.let { mediaTypeDe(it) }?.let { put("media_type", it) }
-        }
+            mediaType?.let { put("media_type", it) }
+        } + sello(fev, cipherSha256, plainSha256, "evidence", mediaType, incidentId, datos)
 
         val outcome = uploader.upload(fev, cipherSha256, metadata)
         writeReceipt(fev, cipherSha256, outcome, evidenceId)
 
-        when {
-            outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) -> {
-                Log.e(TAG, "${fev.name}: el servidor NO confirma el hash — revisar")
-                evidenceId?.let { setSync(it, SyncState.FAILED) }
-            }
-            outcome.delivered -> {
-                Log.d(TAG, "${fev.name} entregado (${outcome.bytesSent / 1024} KB enviados)")
-                evidenceId?.let { setSync(it, SyncState.VERIFIED) }
-            }
-            else -> {
-                Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
-                evidenceId?.let { setSync(it, SyncState.PENDING_SYNC) }
-            }
+        val fallo = outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256)
+        val estado = estadoTrasEntregar(outcome.delivered, fallo, outcome.receipt)
+        when (estado) {
+            SyncState.FAILED -> Log.e(TAG, "${fev.name}: el servidor NO confirma el hash — revisar")
+            SyncState.REJECTED -> Log.e(TAG, "${fev.name}: rechazado por ir cifrado para la clave de pruebas — se conserva")
+            SyncState.VERIFIED -> Log.d(TAG, "${fev.name} entregado (${outcome.bytesSent / 1024} KB enviados)")
+            else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
         }
+        avisarDelSello(fev, outcome.receipt)
+        evidenceId?.let { setSync(it, estado) }
         reconcile()
     }
 
@@ -270,7 +275,7 @@ class EvidenceUploader(
                 if (aceptado(reciboDelServidor(fev), cipherSha256)) borrarProxy(fev)
                 return@withContext
             }
-            val datos = runCatching { JSONObject(datosDeProxy(fev).readText()) }.getOrNull()
+            val datos = leerDatos(datosDeProxy(fev))
             if (datos == null) {
                 Log.w(TAG, "${fev.name}: sin datos de su original, no se puede enlazar — se deja")
                 return@withContext
@@ -281,11 +286,15 @@ class EvidenceUploader(
                 plainSha256 = datos.optString("sha256_plain").ifBlank { null },
                 evidenceId = datos.optString("evidence_id").ifBlank { null },
                 incidentId = datos.optString("incident_id").ifBlank { null },
+                autoria = AutoriaDeEvidencia.leerDe(datos),
             ) + mapOf(
                 "kind" to "proxy",
                 "proxy_of" to datos.optString("proxy_of"),
                 "proxy_short_side" to datos.optInt("proxy_short_side").toString(),
                 "proxy_fps" to datos.optInt("proxy_fps").toString(),
+            ) + sello(
+                fev, cipherSha256, datos.optString("sha256_plain").ifBlank { null },
+                "proxy", "video", datos.optString("incident_id").ifBlank { null }, datos,
             )
 
             val outcome = uploader.upload(fev, cipherSha256, metadata)
@@ -311,7 +320,7 @@ class EvidenceUploader(
         if (!transcripcionesEnVuelo.add(fev.name)) return@withContext
         try {
             if (isDelivered(fev)) return@withContext
-            val datos = runCatching { JSONObject(datosDeTranscripcion(fev).readText()) }.getOrNull()
+            val datos = leerDatos(datosDeTranscripcion(fev))
             if (datos == null) {
                 Log.w(TAG, "${fev.name}: sin datos de su grabacion, no se puede enlazar — se deja")
                 return@withContext
@@ -323,12 +332,16 @@ class EvidenceUploader(
                 plainSha256 = datos.optString("sha256_plain").ifBlank { null },
                 evidenceId = datos.optString("evidence_id").ifBlank { null },
                 incidentId = datos.optString("incident_id").ifBlank { null },
+                autoria = AutoriaDeEvidencia.leerDe(datos),
             ) + mapOf(
                 "kind" to "transcript",
                 "transcript_of" to datos.getString("transcript_of"),
                 "transcript_language" to datos.optString("transcript_language"),
                 "transcript_status" to datos.getString("transcript_status"),
                 "media_type" to datos.getString("media_type"),
+            ) + sello(
+                fev, cipherSha256, datos.optString("sha256_plain").ifBlank { null },
+                "transcript", datos.getString("media_type"), datos.optString("incident_id").ifBlank { null }, datos,
             )
             val outcome = uploader.upload(fev, cipherSha256, metadata)
             writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
@@ -363,11 +376,55 @@ class EvidenceUploader(
             .put("sha256_plain", proxy.sealed.plainSha256)
         evidenceId?.let { datos.put("evidence_id", it) }
         incidentId?.let { datos.put("incident_id", it) }
-        runCatching { datosDeProxy(proxy.sealed.file).writeText(datos.toString(2)) }
+        val fichero = datosDeProxy(proxy.sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(datos)
+        datos.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(datos.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudieron guardar los datos del proxy: ${it.message}") }
     }
 
     private fun datosDeProxy(fev: File) = File(fev.parentFile, fev.name + PROXY_DATA_SUFFIX)
+
+    private fun leerDatos(fichero: File): JSONObject? = runCatching { JSONObject(fichero.readText()) }.getOrNull()
+
+    /**
+     * La autoria ya sellada en los datos de la pieza o, si es la primera vez que se
+     * guardan, la del agente de ahora. Una pieza se vuelve a encolar (al clasificarla,
+     * al cifrarla tarde) y para entonces el agente puede ser otro.
+     */
+    private fun autoriaParaSellar(datos: File): AutoriaDeEvidencia? =
+        AutoriaDeEvidencia.leerDe(leerDatos(datos)) ?: agenteActual()
+
+    /**
+     * Cuando se capturo, para el sello: la primera vez que se guardan los datos de la
+     * pieza, que es al cerrarla. Se conserva al volver a encolarla.
+     */
+    private fun capturaParaSellar(datos: File): String =
+        leerDatos(datos)?.optString(SelloDeEvidencia.CLAVE_CAPTURA)?.ifBlank { null }
+            ?: SelloDeEvidencia.ahoraIso()
+
+    /**
+     * `seal` y `seal_sig` de la pieza (evidence-seal.md). El agente es el que la grabo,
+     * no el de ahora: si no, lo de un agente dado de baja saldria sellado con el siguiente.
+     */
+    private fun sello(
+        fev: File,
+        cipherSha256: String,
+        plainSha256: String?,
+        kind: String,
+        mediaType: String?,
+        incidentId: String?,
+        datos: JSONObject?,
+    ): Map<String, String> = SelloDeEvidencia(
+        sha256Cipher = cipherSha256,
+        sha256Plain = plainSha256,
+        kind = kind,
+        mediaType = mediaType,
+        incidentId = incidentId,
+        principal = (AutoriaDeEvidencia.leerDe(datos) ?: agenteActual())?.userId,
+        capturedAt = datos?.optString(SelloDeEvidencia.CLAVE_CAPTURA)?.ifBlank { null },
+        recordedBy = SelloDeEvidencia.grabadoPor(fev.name),
+    ).metadata()
 
     /**
      * Lo que une una evidencia a su incidente, junto al .fev. Mismo motivo que el proxy:
@@ -387,7 +444,10 @@ class EvidenceUploader(
         evidenceId?.let { datos.put("evidence_id", it) }
         incidentId?.let { datos.put("incident_id", it) }
         label?.let { datos.put("label", it) }
-        runCatching { datosDeEvidencia(sealed.file).writeText(datos.toString(2)) }
+        val fichero = datosDeEvidencia(sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(datos)
+        datos.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(datos.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
     }
 
@@ -408,6 +468,7 @@ class EvidenceUploader(
         plainSha256: String?,
         evidenceId: String?,
         incidentId: String?,
+        autoria: AutoriaDeEvidencia?,
     ): Map<String, String> = buildMap {
         put("filename", fev.name)
         put("sha256_cipher", cipherSha256)
@@ -415,9 +476,7 @@ class EvidenceUploader(
         put("crypto_format", "FEVD1")
         put("source", "phone")
         put("device_model", Build.MODEL)
-        // Solo como dato: el backend atribuye por la sesion (upload-protocol.md §5.1).
-        // Sin placa conocida se omite; nunca un valor inventado.
-        placaDelAgente()?.takeIf { it.isNotBlank() }?.let { put("officer_code", it) }
+        putAll(AutoriaDeEvidencia.metadata(autoria, placaActual = agenteActual()?.placa))
         // En UTC: con la 'Z' delante de la hora local el backend calculaba el desfase
         // del reloj con la zona horaria entera de mas (receipt-schema.md §6).
         put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
@@ -454,12 +513,7 @@ class EvidenceUploader(
                     json.optJSONObject("server_receipt"),
                     json.optString("sha256_uploaded"),
                 )
-                val estado = when {
-                    entregado && fallo -> SyncState.FAILED
-                    entregado -> SyncState.VERIFIED
-                    else -> SyncState.PENDING_SYNC
-                }
-                setSync(id, estado)
+                setSync(id, estadoTrasEntregar(entregado, fallo, json.optJSONObject("server_receipt")))
             }
         }
     }
@@ -531,6 +585,28 @@ class EvidenceUploader(
     }
 
     /**
+     * Lo que se pinta en el incidente tras una entrega. `key_rejected` no es "subido":
+     * el servidor no lo ha guardado. Los `flags` (p. ej. `device_quarantined`) no
+     * cambian nada aqui: el servidor si tiene la copia.
+     */
+    private fun estadoTrasEntregar(entregado: Boolean, falloDeIntegridad: Boolean, recibo: JSONObject?): SyncState =
+        when {
+            !entregado -> SyncState.PENDING_SYNC
+            falloDeIntegridad -> SyncState.FAILED
+            recibo?.optString("status") == ESTADO_CLAVE_RECHAZADA -> SyncState.REJECTED
+            else -> SyncState.VERIFIED
+        }
+
+    /**
+     * Un sello que no verifica no impide aceptar la subida durante el piloto
+     * (evidence-seal.md §4), pero tiene que quedar a la vista en el log.
+     */
+    private fun avisarDelSello(fev: File, recibo: JSONObject?) {
+        val sello = recibo?.optString("seal")?.ifBlank { null } ?: return
+        if (sello != "verified") Log.w(TAG, "${fev.name}: el servidor marca el sello como $sello")
+    }
+
+    /**
      * La regla para borrar una copia local (receipt-schema.md §5): el servidor ha
      * firmado `accepted` sobre los mismos bytes que se subieron. Sin recibo, nunca.
      */
@@ -574,5 +650,6 @@ class EvidenceUploader(
         const val EVIDENCE_DATA_SUFFIX = ".evidence.json"
         const val TRANSCRIPT_DATA_SUFFIX = ".data.json"
         const val EVIDENCE_FOLDER = "evidence"
+        const val ESTADO_CLAVE_RECHAZADA = "key_rejected"
     }
 }

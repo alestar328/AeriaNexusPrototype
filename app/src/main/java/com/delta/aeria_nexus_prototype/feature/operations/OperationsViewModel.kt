@@ -24,7 +24,7 @@ class OperationsViewModel(
 
     /** Emite el SOS: alerta a los demas dispositivos y publica la camara propia. */
     fun activateSos() {
-        agoraRepository.activateSos(repositorio.officerProfile.officerNum)
+        agoraRepository.activateSos(repositorio.agenteDeLaSesion().placa)
     }
 
     /** Cancela el SOS propio y corta el livestream. */
@@ -43,7 +43,7 @@ class OperationsViewModel(
      * la banda de aviso. Devuelve false si no se pudo abrir el microfono.
      */
     fun iniciarPtt(): Boolean =
-        agoraRepository.iniciarPtt(repositorio.officerProfile.officerNum)
+        agoraRepository.iniciarPtt(repositorio.agenteDeLaSesion().placa)
 
     /** Cierra el PTT propio. */
     fun terminarPtt() = agoraRepository.terminarPtt()

@@ -4,6 +4,7 @@ import android.content.Context
 import java.io.File
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import org.json.JSONObject
 
 /** Como quedo la clave y si su atestacion prueba frescura o solo esta bien formada. */
 data class ResultadoDeClave(val nivel: NivelClave, val conRetoDelBackend: Boolean)
@@ -98,6 +99,55 @@ class EnrollmentRepository(private val context: Context) {
         return ancla
     }
 
+    /**
+     * Todas las CA de dispositivos de confianza (credential-lifecycle.md §2.3): el ancla
+     * del alta y las que trae cada sesion. Tras rotar una CA, una camara firmada por la
+     * vieja tiene que seguir emparejando hasta que caduque su certificado.
+     */
+    fun anclasDePerifericos(): List<X509Certificate> =
+        (listOfNotNull(anclaDePerifericosPem()) + leer(FICHERO_CAS_DISPOSITIVOS))
+            .flatMap { runCatching { Pem.leerCertificados(it) }.getOrDefault(emptyList()) }
+            .distinctBy { it.encoded.contentHashCode() }
+
+    /**
+     * Guarda las CA de dispositivos que manda AeriaOne en el alta, la sesion o la
+     * renovacion; son las que validan a la camara. Llegan por el canal autenticado con el
+     * servidor y el ancla fijada por el QR no se toca. Las de agentes no hacen falta aqui:
+     * la camara las pide ella misma a AeriaOne (GET iam/trust-anchors), nunca por BT.
+     * Sin listas (backend anterior al 2-nov-2026) no cambia nada.
+     */
+    fun guardarCas(cas: CasDeConfianza) {
+        val dispositivos = (listOfNotNull(cas.dispositivosEmisora) + cas.dispositivos).distinct()
+        if (dispositivos.isNotEmpty()) escribir(FICHERO_CAS_DISPOSITIVOS, dispositivos)
+    }
+
+    /**
+     * La clave publica de evidencia que manda AeriaOne (§2.4). Se cifra para ella en vez
+     * de para la compilada en el APK; sin ella (servidor viejo) se sigue con la compilada.
+     */
+    fun guardarClaveDeEvidencia(clave: ClaveDeEvidencia) {
+        runCatching {
+            File(carpeta, FICHERO_CLAVE_EVIDENCIA).writeText(
+                JSONObject().put("kid", clave.kid).put("public_key_pem", clave.publicaPem).toString(),
+            )
+        }
+    }
+
+    fun claveDeEvidencia(): ClaveDeEvidencia? = runCatching {
+        val json = JSONObject(File(carpeta, FICHERO_CLAVE_EVIDENCIA).readText())
+        ClaveDeEvidencia(json.getString("kid"), json.getString("public_key_pem"))
+    }.getOrNull()
+
+    // Una CA por bloque, separadas por una linea en blanco: PEM admite varios seguidos.
+    private fun escribir(nombre: String, pems: List<String>) {
+        runCatching { File(carpeta, nombre).writeText(pems.joinToString("\n") { it.trim() + "\n" }) }
+    }
+
+    private fun leer(nombre: String): List<String> {
+        val texto = File(carpeta, nombre).takeIf { it.isFile }?.readText() ?: return emptyList()
+        return BLOQUE_PEM.findAll(texto).map { it.value + "\n" }.toList()
+    }
+
     /** Cuantos certificados trae la atestacion del dispositivo; 0 si no la soporta. */
     fun certificadosDeAtestacion(): Int = ClaveEnKeystore.terminal.cadenaDeCertificados().size
 
@@ -125,5 +175,8 @@ class EnrollmentRepository(private val context: Context) {
         const val CLAVE_DEVICE_ID = "device_id"
         const val CLAVE_ALTA_COMPLETA = "alta_completa"
         const val FICHERO_ANCLA = "perifericos.ca.pem"
+        const val FICHERO_CAS_DISPOSITIVOS = "dispositivos.confianza.pem"
+        const val FICHERO_CLAVE_EVIDENCIA = "evidencia.clave.json"
+        val BLOQUE_PEM = Regex("-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----")
     }
 }

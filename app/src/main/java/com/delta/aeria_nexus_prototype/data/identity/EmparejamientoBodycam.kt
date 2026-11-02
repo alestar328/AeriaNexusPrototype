@@ -161,11 +161,11 @@ class EmparejamientoDelTelefono(
     private val certificadoDelTelefono: X509Certificate,
     private val firmar: (ByteArray) -> ByteArray,
     /**
-     * Ancla con la que se valida el certificado que presente la bodycam. Cuando
-     * exista el workflow 13 sera la CA de perifericos de AeriaOne; hasta entonces
-     * puede no haber ninguna, y sin ancla no hay emparejamiento posible.
+     * CA de dispositivos de AeriaOne con las que se valida el certificado de la bodycam.
+     * Vale cualquiera: tras rotar la CA, la vieja sigue siendo de confianza hasta que
+     * caduque lo que firmo (credential-lifecycle.md §2.3). Sin ninguna no hay emparejamiento.
      */
-    private val anclaDePerifericos: X509Certificate?,
+    private val anclasDePerifericos: List<X509Certificate>,
 ) {
 
     private val nonceDelTelefono = ProtocoloEmparejamiento.nonce()
@@ -244,11 +244,12 @@ class EmparejamientoDelTelefono(
         val efimeraB = efimeraDeLaBodycam
             ?: return ResultadoEmparejamiento.Rechazado("La bodycam no presento clave efimera")
 
-        val ancla = anclaDePerifericos
-            ?: return ResultadoEmparejamiento.NoSoportado(
+        if (anclasDePerifericos.isEmpty()) {
+            return ResultadoEmparejamiento.NoSoportado(
                 "Este telefono no tiene ancla de confianza para perifericos (workflow 13)",
             )
-        if (!estaFirmadoPor(certificado, ancla)) {
+        }
+        if (anclasDePerifericos.none { estaFirmadoPor(certificado, it) }) {
             return ResultadoEmparejamiento.Rechazado("El certificado de la bodycam no lo emitio AeriaOne")
         }
 

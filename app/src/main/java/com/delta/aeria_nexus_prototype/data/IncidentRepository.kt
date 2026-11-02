@@ -1,5 +1,7 @@
 package com.delta.aeria_nexus_prototype.data
 
+import com.delta.aeria_nexus_prototype.data.identity.PerfilDelAgente
+import com.delta.aeria_nexus_prototype.data.identity.PerfilRecibido
 import com.delta.aeria_nexus_prototype.data.local.IncidentDao
 import com.delta.aeria_nexus_prototype.data.local.RawEvidenceEntity
 import com.delta.aeria_nexus_prototype.data.local.toDomain
@@ -10,7 +12,6 @@ import com.delta.aeria_nexus_prototype.data.model.EvidenceRecord
 import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.data.model.IncidentStatus
 import com.delta.aeria_nexus_prototype.data.model.OfficerIncident
-import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
 import com.delta.aeria_nexus_prototype.data.model.Priority
 import com.delta.aeria_nexus_prototype.data.model.ReportIncident
 import com.delta.aeria_nexus_prototype.data.model.SyncState
@@ -39,13 +40,19 @@ import kotlinx.coroutines.launch
 class IncidentRepository(
     private val incidentDao: IncidentDao,
     private val ubicacion: LocationRepository,
+    private val perfilDelAgente: PerfilDelAgente,
 ) {
 
     // Vive lo mismo que la app (el repositorio es unico), por eso no hace
     // falta cancelarlo. Dispatchers.IO porque solo hace disco y esperar al GPS.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val officerProfile: OfficerProfile = OfficerSampleData.profile
+    /**
+     * Nombre y placa del agente, tal como los entrega AeriaOne (iam-session.md §5.3).
+     * Vacios hasta el primer perfil: un agente inventado acabaria en el manifiesto y
+     * en el sello de la evidencia (evidence-seal.md §5).
+     */
+    fun agenteDeLaSesion(): PerfilRecibido = perfilDelAgente.actual() ?: PerfilRecibido("", "", "", "")
     val reportIncidents: List<ReportIncident> = ReportSampleData.incidents
 
     // Lista de incidentes del agente: solo lo guardado en Room, mas recientes
@@ -180,8 +187,8 @@ class IncidentRepository(
             location = "Unknown",
             date = cuando.format(DATE_FORMAT),
             time = cuando.format(TIME_FORMAT),
-            officerName = officerProfile.name,
-            officerNum = officerProfile.officerNum,
+            officerName = agenteDeLaSesion().nombre,
+            officerNum = agenteDeLaSesion().placa,
             status = IncidentStatus.DRAFT,
             priority = Priority.MEDIUM,
             evidenceCount = 1,
@@ -273,8 +280,8 @@ class IncidentRepository(
             location = location,
             date = inicio.format(DATE_FORMAT),
             time = inicio.format(TIME_FORMAT),
-            officerName = officerProfile.name,
-            officerNum = officerProfile.officerNum,
+            officerName = agenteDeLaSesion().nombre,
+            officerNum = agenteDeLaSesion().placa,
             status = IncidentStatus.DRAFT,
             priority = Priority.MEDIUM,
             evidenceCount = evidence.size,

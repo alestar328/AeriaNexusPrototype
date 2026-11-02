@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
@@ -129,10 +130,6 @@ class BodycamRepository(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    init {
-        prestarToken()
-    }
-
     private var socket: BluetoothSocket? = null
     private var output: OutputStream? = null
 
@@ -141,6 +138,14 @@ class BodycamRepository(
 
     private val _motivoDelEnlace = MutableStateFlow<String?>(null)
     val motivoDelEnlace: StateFlow<String?> = _motivoDelEnlace.asStateFlow()
+
+    /**
+     * AeriaOne tiene esta camara en cuarentena (credential-lifecycle.md §3): no la deja
+     * atar ni le da token de Agora. La unidad no puede contarselo al agente; lo ensena
+     * el telefono. Se vuelve a saber en cada conexion.
+     */
+    private val _camaraEnCuarentena = MutableStateFlow(false)
+    val camaraEnCuarentena: StateFlow<Boolean> = _camaraEnCuarentena.asStateFlow()
 
     /** Atadura agente-camara en vigor (workflow 33). Null si la camara no sirve a nadie. */
     private val _binding = MutableStateFlow<BindingActivo?>(null)
@@ -189,7 +194,11 @@ class BodycamRepository(
 
     val isConnected: Boolean get() = _state.value == BodycamState.CONNECTED
 
+    // Aqui y no antes: los collectors corren en otro hilo y leen flows declarados
+    // arriba; lanzados antes de su declaracion los encuentran a null y la app cae.
     init {
+        prestarToken()
+        prestarAccesoAgora()
         pasarTonoSos()
         registrarAtaduraEnBackend()
     }
@@ -558,7 +567,7 @@ class BodycamRepository(
             deviceId = ClaveEnKeystore.terminal.commonNameDelCertificado() ?: "DESCONOCIDO",
             certificadoDelTelefono = certificado,
             firmar = { datos -> ClaveEnKeystore.terminal.firmarReto(datos) },
-            anclaDePerifericos = AppContainer.enrollmentRepository.anclaDePerifericos(),
+            anclasDePerifericos = AppContainer.enrollmentRepository.anclasDePerifericos(),
         )
         inicioDelEmparejamientoMillis = System.currentTimeMillis()
         _enlaceAutenticado.value = EnlaceAutenticado.COMPROBANDO
@@ -683,6 +692,73 @@ class BodycamRepository(
     }
 
     /**
+     * Pasa a la camara su acceso al canal de Agora (sos-and-proxy.md §2.7): el token
+     * que AeriaOne emite para su BWC y las claves de la semana.
+     *
+     * Tres condiciones, todas a la vez: enlace AUTENTICADO, porque la clave del canal no
+     * puede viajar en claro (en modo transicion no se manda); sesion, porque el token lo
+     * pide el agente; y atadura registrada en AeriaOne, que sin ella contesta
+     * `403 binding_invalid`. Se repite antes de que caduque el token y cuando empieza a
+     * valer la clave siguiente, que es cuando AeriaOne ya tiene la nueva "next".
+     */
+    private fun prestarAccesoAgora() {
+        scope.launch {
+            combine(_enlaceAutenticado, _binding, sesionBackend.actual) { enlace, atadura, sesion ->
+                atadura?.takeIf { enlace == EnlaceAutenticado.SI && sesion != null && it.idEnBackend != null }?.bwcId
+            }
+                .distinctUntilChanged()
+                .collectLatest { bwcId ->
+                    if (bwcId == null) return@collectLatest
+                    while (true) {
+                        val acceso = AppContainer.accesoAgora.paraLaCamara(bwcId) { marcarCamaraEnCuarentena(bwcId) }
+                        if (acceso == null) {
+                            delay(REINTENTO_ACCESO_AGORA_MILLIS)
+                            continue
+                        }
+                        enviarAccesoAgora(acceso)
+                        delay(hastaElSiguienteAcceso(acceso))
+                    }
+                }
+        }
+    }
+
+    /**
+     * `AGTOKEN:<token>:<expires_in_s>` y una `AGKEY:<key_id>:<key_hex>:<salt_b64>:<starts_in_s>:<ends_in_s>`
+     * por clave. Los tiempos van en segundos desde ahora y no como hora: la W1 ha llegado
+     * a ir 6 h desfasada. Token vacio = proyecto sin certificado; sin AGKEY, en claro.
+     */
+    private fun enviarAccesoAgora(acceso: AccesoAgora) {
+        val ahora = System.currentTimeMillis()
+        val dura = if (acceso.tokenHastaMillis > ahora) (acceso.tokenHastaMillis - ahora) / 1_000 else DURACION_TOKEN_AGORA_S
+        sendCommand("AGTOKEN:${acceso.token.orEmpty()}:$dura")
+        acceso.clavesPendientes(ahora).forEach { clave ->
+            val empieza = maxOf(0L, (clave.desdeMillis - ahora) / 1_000)
+            val acaba = (clave.hastaMillis - ahora) / 1_000
+            sendCommand("AGKEY:${clave.keyId}:${clave.keyHex}:${clave.saltB64}:$empieza:$acaba")
+        }
+        Log.i(TAG, "acceso a Agora pasado a la camara (${acceso.clavesPendientes(ahora).size} clave(s))")
+    }
+
+    private fun marcarCamaraEnCuarentena(bwcId: String) {
+        if (_camaraEnCuarentena.value) return
+        _camaraEnCuarentena.value = true
+        Log.w(TAG, "AeriaOne tiene la camara $bwcId en cuarentena")
+        AppContainer.auditoria.registrar(
+            TipoEvento.BODYCAM_ENLACE,
+            listOf("result" to "QUARANTINED", "bwc" to bwcId),
+        )
+    }
+
+    /** Diez minutos antes de que caduque el token, o al empezar la clave siguiente. */
+    private fun hastaElSiguienteAcceso(acceso: AccesoAgora): Long {
+        val ahora = System.currentTimeMillis()
+        val porElToken = if (acceso.tokenHastaMillis > ahora) acceso.tokenHastaMillis - MARGEN_TOKEN_AGORA_MILLIS else Long.MAX_VALUE
+        val porLaClave = acceso.clavesPendientes(ahora).map { it.desdeMillis }.filter { it > ahora }.minOrNull() ?: Long.MAX_VALUE
+        val cuando = minOf(porElToken, porLaClave, ahora + DURACION_TOKEN_AGORA_S * 1_000)
+        return maxOf(cuando - ahora, REINTENTO_ACCESO_AGORA_MILLIS)
+    }
+
+    /**
      * La W1 hace sonar su propio tono al entrar en SOS, y tiene que ser el que el
      * agente eligio en su perfil: se le manda en cada conexion y en cada cambio.
      * No espera al enlace autenticado como el token porque no es secreto; si se
@@ -774,8 +850,15 @@ class BodycamRepository(
                         // Solo si sigue siendo la misma: el enlace pudo caerse entretanto.
                         _binding.update { if (it?.bindingId == atadura.bindingId) it.copy(idEnBackend = id) else it }
                         Log.i(TAG, "atadura de ${atadura.bwcId} registrada en AeriaOne: $id")
+                        _camaraEnCuarentena.value = false
                     } catch (e: IamException) {
                         Log.w(TAG, "AeriaOne no registro la atadura de ${atadura.bwcId}: ${e.message}")
+                        // Con device_id el rechazo es de la camara, no de este telefono:
+                        // no se le pasa a la sesion, que cortaria al agente sin motivo.
+                        if (e.dispositivo != null) {
+                            if (e.codigo == AccesoAgoraRepository.CODIGO_CUARENTENA) marcarCamaraEnCuarentena(atadura.bwcId)
+                            return@collectLatest
+                        }
                         // Un perfil suspendido o revocado se trata como en la subida;
                         // cualquier otro code (insufficient_scope...) no toca el token.
                         sesionBackend.rechazada(e.codigo)
@@ -958,6 +1041,11 @@ class BodycamRepository(
             // y no es la respuesta generica de ningun otro comando.
             line.startsWith("TRANSCRIPT") -> _lineasDeTranscripcion.tryEmit(line)
             // TOKEN_OK / TOKEN_FAIL:<motivo> — respuesta a prestarToken().
+            // AGTOKEN_OK / AGKEY_OK / *_FAIL:<motivo>, respuesta a enviarAccesoAgora().
+            // El motivo es texto libre: se registra tal cual, no se interpreta.
+            line.startsWith("AGTOKEN_FAIL") || line.startsWith("AGKEY_FAIL") ->
+                Log.e(TAG, "la camara rechazo el acceso a Agora: $line")
+            line.startsWith("AGTOKEN_OK") || line.startsWith("AGKEY_OK") -> Log.i(TAG, "camara: $line")
             line.startsWith("TOKEN_FAIL") -> Log.e(TAG, "la camara rechazo el token: $line")
             line.startsWith("TOKEN_OK") -> Log.i(TAG, "la camara tiene el token")
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
@@ -1046,6 +1134,7 @@ class BodycamRepository(
         _binding.value = null
         _enlaceAutenticado.value = EnlaceAutenticado.DESCONOCIDO
         _motivoDelEnlace.value = null
+        _camaraEnCuarentena.value = false
         try { output?.close() } catch (_: IOException) {}
         try { socket?.close() } catch (_: IOException) {}
         output = null
@@ -1172,6 +1261,11 @@ class BodycamRepository(
 
         /** Lo que se espera a que la bodycam conteste al saludo antes de seguir sin el. */
         private const val PLAZO_EMPAREJAMIENTO_MILLIS = 6_000L
+
+        // Acceso de la camara a Agora (sos-and-proxy.md §2.7).
+        private const val REINTENTO_ACCESO_AGORA_MILLIS = 5 * 60_000L
+        private const val MARGEN_TOKEN_AGORA_MILLIS = 10 * 60_000L
+        private const val DURACION_TOKEN_AGORA_S = 12 * 60 * 60L
 
         private const val STATUS_POLL_MILLIS = 5_000L
         private const val WATCHDOG_CHECK_MILLIS = 3_000L

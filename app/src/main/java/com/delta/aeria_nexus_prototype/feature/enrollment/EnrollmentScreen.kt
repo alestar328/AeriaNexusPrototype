@@ -108,7 +108,11 @@ private fun EnrollmentContent(
                     onContinuar = onIniciar,
                 )
                 uiState.iniciada || hayProgreso -> ListaDePasos(uiState)
-                else -> Presentacion(mensajeError = uiState.mensajeError, hayQr = uiState.hayQr)
+                else -> Presentacion(
+                    mensajeError = uiState.mensajeError,
+                    hayQr = uiState.hayQr,
+                    soloFaltaAgente = uiState.fase == FaseAlta.AGENTE,
+                )
             }
         }
 
@@ -153,7 +157,7 @@ private fun BotonSecundario(uiState: EnrollmentUiState, onEscanear: () -> Unit, 
 }
 
 @Composable
-private fun Presentacion(mensajeError: String?, hayQr: Boolean) {
+private fun Presentacion(mensajeError: String?, hayQr: Boolean, soloFaltaAgente: Boolean) {
     Icon(
         Icons.Filled.PhonelinkSetup,
         contentDescription = null,
@@ -162,7 +166,7 @@ private fun Presentacion(mensajeError: String?, hayQr: Boolean) {
     )
     Spacer(Modifier.height(20.dp))
     Text(
-        text = "DEVICE NOT ENROLLED",
+        text = if (soloFaltaAgente) "NO OFFICER ON THIS PHONE" else "DEVICE NOT ENROLLED",
         color = TextoPrincipal,
         fontSize = 22.sp,
         fontWeight = FontWeight.Black,
@@ -170,8 +174,16 @@ private fun Presentacion(mensajeError: String?, hayQr: Boolean) {
     )
     Spacer(Modifier.height(16.dp))
     Text(
-        text = "This phone has not been enrolled for duty use. Installing Aeria Nexus " +
-            "does not by itself grant access to AeriaOne.",
+        // Tras retirar a un agente dado de baja el telefono sigue de alta: decir que
+        // no lo esta haria pensar que hay que reinstalar.
+        text = if (soloFaltaAgente) {
+            "This phone is still enrolled with AeriaOne, but no officer is assigned to it. " +
+                "Ask your supervisor for the enrollment QR of the officer who will use it, " +
+                "then scan it."
+        } else {
+            "This phone has not been enrolled for duty use. Installing Aeria Nexus " +
+                "does not by itself grant access to AeriaOne."
+        },
         color = TextoSecundario,
         fontSize = 15.sp,
         lineHeight = 22.sp,

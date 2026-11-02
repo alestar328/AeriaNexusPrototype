@@ -234,16 +234,17 @@ private fun AgentInfoCard(agent: AgentIdCard, modifier: Modifier = Modifier) {
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
-            text = "${agent.firstName} ${agent.lastName}".uppercase(),
+            text = "${agent.firstName} ${agent.lastName}".trim().uppercase(),
             color = Color.White,
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp,
         )
         Spacer(Modifier.height(6.dp))
-        AgentDataRow(label = "Badge", value = agent.badgeNumber)
-        AgentDataRow(label = "Rank", value = agent.rank)
-        AgentDataRow(label = "Blood type", value = agent.bloodType)
+        // Lo que AeriaOne no da (el grupo sanguineo, hoy) no se pinta vacio.
+        listOf("Badge" to agent.badgeNumber, "Rank" to agent.rank, "Blood type" to agent.bloodType)
+            .filter { (_, valor) -> valor.isNotBlank() }
+            .forEach { (etiqueta, valor) -> AgentDataRow(label = etiqueta, value = valor) }
     }
 }
 

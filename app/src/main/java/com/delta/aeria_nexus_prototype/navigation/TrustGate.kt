@@ -59,6 +59,7 @@ fun TrustGate() {
                         corte = corte,
                         onCerrar = { avisoCerrado = true },
                         onComprobar = identityRepository::comprobarCorte,
+                        onRetirarAgente = identityRepository::retirarAgente,
                     )
                 }
             }

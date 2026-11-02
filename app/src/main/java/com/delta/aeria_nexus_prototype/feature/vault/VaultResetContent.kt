@@ -111,9 +111,9 @@ private fun AvisoDeReinicio(onContinuar: () -> Unit) {
                 )
             }
             Text(
-                text = "A forgotten password cannot be recovered. Resetting lets you " +
-                    "create a new one, but the evidence already stored on this phone " +
-                    "can no longer be opened here.",
+                text = "A forgotten password cannot be recovered. Resetting creates a new " +
+                    "vault that opens with your PIN, but the evidence already stored on " +
+                    "this phone can no longer be opened here.",
                 color = TextoSecundario,
                 fontSize = 14.sp,
                 lineHeight = 21.sp,

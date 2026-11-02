@@ -4,6 +4,7 @@ import android.view.TextureView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
+import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.OfficerSampleData
 import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,16 +33,17 @@ data class LivestreamUiState(
  */
 class LivestreamViewModel(
     private val agoraRepository: AgoraRepository,
+    private val incidentRepository: IncidentRepository,
     val watchUid: Int,
 ) : ViewModel() {
 
     val isBroadcaster: Boolean = watchUid == OWN_CAMERA_UID
 
-    // Ficha del agente que sale en pantalla: la propia al emitir, la del
-    // emisor del SOS al mirar. Null si la placa no esta en el padron (por
-    // ejemplo el stream de la bodycam, que no tiene agente asignado).
+    // Ficha del agente que sale en pantalla: la propia al emitir, sacada del perfil
+    // de la sesion, y la del emisor del SOS al mirar. Null si no se sabe (sin perfil
+    // de AeriaOne, o una placa fuera del padron, como el stream de la bodycam).
     val agent: AgentIdCard? = if (isBroadcaster) {
-        OfficerSampleData.findAgent(OfficerSampleData.profile.officerNum)
+        fichaPropia()
     } else {
         agoraRepository.sosOfficer(watchUid)?.let(OfficerSampleData::findAgent)
     }
@@ -129,7 +131,7 @@ class LivestreamViewModel(
         if (pttActivo.value) {
             agoraRepository.terminarPtt()
         } else {
-            agoraRepository.iniciarPtt(OfficerSampleData.profile.officerNum)
+            agoraRepository.iniciarPtt(incidentRepository.agenteDeLaSesion().placa)
         }
     }
 
@@ -155,6 +157,19 @@ class LivestreamViewModel(
             agoraRepository.stopWatching(watchUid)
             agoraRepository.terminarPtt()
         }
+    }
+
+    /** El grupo sanguineo no lo da AeriaOne: se deja en blanco antes que inventarlo. */
+    private fun fichaPropia(): AgentIdCard? {
+        val perfil = incidentRepository.agenteDeLaSesion()
+        if (perfil.nombre.isBlank() && perfil.placa.isBlank()) return null
+        return AgentIdCard(
+            firstName = perfil.nombre,
+            lastName = "",
+            badgeNumber = perfil.placa,
+            rank = perfil.rango,
+            bloodType = "",
+        )
     }
 
     companion object {

@@ -14,7 +14,15 @@ import org.json.JSONObject
  * [codigo] es el `code` estable del contrato (§5.7), por ejemplo `profile_suspended`.
  * Es por lo que se decide: el texto de `detail` puede cambiar de redaccion.
  */
-class IamException(message: String, val codigo: String? = null) : Exception(message)
+class IamException(
+    message: String,
+    val codigo: String? = null,
+    /**
+     * El aparato al que se refiere el rechazo, si no es este telefono: la unidad de
+     * `bwc_id` en una atadura o en su token de Agora. Null = el rechazo es del telefono.
+     */
+    val dispositivo: String? = null,
+) : Exception(message)
 
 /**
  * Lo que devuelve el alta del telefono: el identificador lo decide el backend, no nosotros.
@@ -28,6 +36,8 @@ data class AltaDeTerminal(
     val cadenaPem: String,
     val anclaDePerifericosPem: String?,
     val caDeAgentesPem: String?,
+    val cas: CasDeConfianza = CasDeConfianza(),
+    val claveDeEvidencia: ClaveDeEvidencia? = null,
 )
 
 /** Lo que devuelve el alta del agente. Las anclas viajan tambien aqui (ver [AltaDeTerminal]). */
@@ -36,7 +46,33 @@ data class AltaDeAgente(
     val anclaDePerifericosPem: String?,
     val caDeAgentesPem: String?,
     val perfil: PerfilRecibido?,
+    val cas: CasDeConfianza = CasDeConfianza(),
+    val claveDeEvidencia: ClaveDeEvidencia? = null,
 )
+
+/**
+ * Las CA de confianza del tenant (credential-lifecycle.md §2.3). Tras rotar una CA hay
+ * dos: la que emite (`device_ca_pem` / `user_ca_pem`) y la vieja, que sigue valiendo
+ * hasta que caduque lo que firmo. Las listas traen todas, la emisora incluida. Vacias
+ * si contesta un backend anterior al 2-nov-2026.
+ */
+data class CasDeConfianza(
+    val dispositivosEmisora: String? = null,
+    val dispositivos: List<String> = emptyList(),
+    val agentesEmisora: String? = null,
+    val agentes: List<String> = emptyList(),
+)
+
+/** `evidence_key` (credential-lifecycle.md §2.4): la publica para la que se cifra la evidencia. */
+data class ClaveDeEvidencia(val kid: String, val publicaPem: String)
+
+/** `credentials.user` / `credentials.device` de la sesion (§1.4). */
+data class EstadoDeCertificado(val serial: String, val renovarObligado: Boolean)
+
+data class CredencialesDeSesion(val agente: EstadoDeCertificado?, val terminal: EstadoDeCertificado?)
+
+/** Lo que devuelve `POST iam/certificates/renew` (§1.2). */
+data class CertificadoRenovado(val cadenaPem: String, val cas: CasDeConfianza)
 
 /** Reto emitido por el backend. Se devuelve con su id: el backend solo acepta la respuesta a SU reto. */
 class RetoEmitido(val id: String, val nonce: ByteArray, val emisor: String)
@@ -52,6 +88,9 @@ data class SesionEmitida(
     val caducaEnMillis: Long,
     val perfil: PerfilRecibido? = null,
     val soloSos: Boolean = false,
+    val credenciales: CredencialesDeSesion? = null,
+    val cas: CasDeConfianza = CasDeConfianza(),
+    val claveDeEvidencia: ClaveDeEvidencia? = null,
 )
 
 /**
@@ -89,6 +128,8 @@ class IamClient(private val config: UploadConfig) {
             cadenaPem = cadenaPem(respuesta),
             anclaDePerifericosPem = anclaDePerifericos(respuesta),
             caDeAgentesPem = caDeAgentes(respuesta),
+            cas = casDe(respuesta),
+            claveDeEvidencia = claveDeEvidenciaDe(respuesta),
         )
     }
 
@@ -127,6 +168,8 @@ class IamClient(private val config: UploadConfig) {
             anclaDePerifericosPem = anclaDePerifericos(respuesta),
             caDeAgentesPem = caDeAgentes(respuesta),
             perfil = perfilDe(respuesta),
+            cas = casDe(respuesta),
+            claveDeEvidencia = claveDeEvidenciaDe(respuesta),
         )
     }
 
@@ -174,7 +217,36 @@ class IamClient(private val config: UploadConfig) {
             caducaEnMillis = System.currentTimeMillis() + segundos * 1_000,
             perfil = perfilDe(respuesta),
             soloSos = respuesta.optString("restricted").isNotBlank(),
+            credenciales = credencialesDe(respuesta),
+            cas = casDe(respuesta),
+            claveDeEvidencia = claveDeEvidenciaDe(respuesta),
         )
+    }
+
+    /**
+     * `POST iam/certificates/renew` (credential-lifecycle.md §1.2). Publico: lo autentica
+     * [firma], hecha con la clave VIGENTE sobre `nonce || csr_der`; el CSR va firmado con
+     * la nueva. Repetir la misma peticion devuelve el mismo certificado.
+     */
+    fun renovarCertificado(
+        reto: RetoEmitido,
+        tipo: String,
+        sujeto: String,
+        serieActual: String,
+        csrPem: String,
+        firma: ByteArray,
+    ): CertificadoRenovado {
+        val codificador = Base64.getEncoder()
+        val cuerpo = JSONObject()
+            .put("challenge_id", reto.id)
+            .put("nonce", codificador.encodeToString(reto.nonce))
+            .put("kind", tipo)
+            .put("subject_cn", sujeto)
+            .put("current_serial", serieActual)
+            .put("csr_pem", csrPem)
+            .put("signature", codificador.encodeToString(firma))
+        val respuesta = post("iam/certificates/renew", cuerpo, esperado = HttpURLConnection.HTTP_OK)
+        return CertificadoRenovado(cadenaPem = cadenaPem(respuesta), cas = casDe(respuesta))
     }
 
     /**
@@ -241,7 +313,7 @@ class IamClient(private val config: UploadConfig) {
             val flujo = if (codigo < 400) conexion.inputStream else conexion.errorStream
             val texto = flujo?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (codigo != esperado && codigo != tambienVale) {
-                throw IamException("AeriaOne answered $codigo: ${motivoDe(texto)}", codigoDeError(texto))
+                throw IamException("AeriaOne answered $codigo: ${motivoDe(texto)}", codigoDeError(texto), dispositivoDe(texto))
             }
             return if (texto.isBlank()) JSONObject() else JSONObject(texto)
         } catch (e: IOException) {
@@ -265,6 +337,9 @@ class IamClient(private val config: UploadConfig) {
     private fun perfilDe(respuesta: JSONObject): PerfilRecibido? =
         respuesta.optJSONObject("profile")?.let(PerfilDelAgente::desdeJson)
 
+    private fun dispositivoDe(texto: String): String? =
+        runCatching { JSONObject(texto).optString("device_id") }.getOrNull()?.takeIf { it.isNotBlank() }
+
     private fun codigoDeError(texto: String): String? =
         runCatching { JSONObject(texto).optString("code") }.getOrNull()?.takeIf { it.isNotBlank() }
 
@@ -285,6 +360,32 @@ class IamClient(private val config: UploadConfig) {
     /** `user_ca_pem`: la CA que firma las credenciales de los agentes. */
     private fun caDeAgentes(respuesta: JSONObject): String? =
         respuesta.optString("user_ca_pem").takeIf { it.isNotBlank() }
+
+    private fun casDe(respuesta: JSONObject) = CasDeConfianza(
+        dispositivosEmisora = anclaDePerifericos(respuesta),
+        dispositivos = textos(respuesta.optJSONArray("device_ca_pems")),
+        agentesEmisora = caDeAgentes(respuesta),
+        agentes = textos(respuesta.optJSONArray("user_ca_pems")),
+    )
+
+    private fun textos(lista: JSONArray?): List<String> =
+        if (lista == null) emptyList()
+        else (0 until lista.length()).map { lista.optString(it) }.filter { it.isNotBlank() }
+
+    private fun claveDeEvidenciaDe(respuesta: JSONObject): ClaveDeEvidencia? {
+        val clave = respuesta.optJSONObject("evidence_key") ?: return null
+        val kid = clave.optString("kid").takeIf { it.isNotBlank() } ?: return null
+        val pem = clave.optString("public_key_pem").takeIf { it.isNotBlank() } ?: return null
+        return ClaveDeEvidencia(kid, pem)
+    }
+
+    private fun credencialesDe(respuesta: JSONObject): CredencialesDeSesion? {
+        val bloque = respuesta.optJSONObject("credentials") ?: return null
+        fun estado(nombre: String) = bloque.optJSONObject(nombre)?.let {
+            EstadoDeCertificado(serial = it.optString("serial"), renovarObligado = it.optBoolean("renew_required"))
+        }
+        return CredencialesDeSesion(agente = estado("user"), terminal = estado("device"))
+    }
 
     /**
      * Solo el aparato y nuestra app: el `android_id` del contrato no se manda porque

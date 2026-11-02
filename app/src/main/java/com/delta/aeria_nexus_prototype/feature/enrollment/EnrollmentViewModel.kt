@@ -115,8 +115,18 @@ class EnrollmentViewModel(
         // es la app que murio entre las dos fases (§4.4): se sigue sola.
         if (enrollment.altaCompleta()) {
             val invitacion = invitaciones.actual()
-            if (invitacion != null) enrolarAgente(invitacion.userId) else pedirAgente()
+            when {
+                invitacion == null -> pedirAgente()
+                // Un QR con el codigo ya gastado es el del agente anterior, retirado del
+                // telefono tras su baja (iam-session.md §9.6): hace falta el del nuevo.
+                invitacion.codigo == null -> pedirQrDelAgente()
+                else -> enrolarAgente(invitacion.userId)
+            }
         }
+    }
+
+    private fun pedirQrDelAgente() {
+        _uiState.update { it.copy(fase = FaseAlta.AGENTE, pasos = PASOS_AGENTE, pideQrNuevo = true) }
     }
 
     /**
@@ -317,6 +327,8 @@ class EnrollmentViewModel(
             enrollment.adoptarDeviceId(alta.deviceId)
             enrollment.instalarCertificado(alta.cadenaPem)
             alta.anclaDePerifericosPem?.let(enrollment::instalarAnclaDePerifericos)
+            enrollment.guardarCas(alta.cas)
+            alta.claveDeEvidencia?.let(enrollment::guardarClaveDeEvidencia)
         }
         // El telefono queda acreditado, pero el alta NO ha terminado: falta la
         // credencial del agente, que es el workflow 3.
@@ -461,6 +473,11 @@ class EnrollmentViewModel(
             alta.anclaDePerifericosPem
                 ?.takeIf { invitacion == null || invitacion.esLaCaDeTerminales(it) }
                 ?.let(enrollment::instalarAnclaDePerifericos)
+            // Las listas solo si el ancla del QR cuadro: si no, no se instala nada suyo.
+            if (invitacion == null || alta.anclaDePerifericosPem?.let(invitacion::esLaCaDeTerminales) == true) {
+                enrollment.guardarCas(alta.cas)
+            }
+            alta.claveDeEvidencia?.let(enrollment::guardarClaveDeEvidencia)
             alta
         }
         hecho(AGENTE_ENTREGA, "Issued by AeriaOne · bound to $deviceId")
