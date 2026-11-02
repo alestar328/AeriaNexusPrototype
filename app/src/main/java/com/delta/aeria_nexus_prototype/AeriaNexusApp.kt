@@ -17,6 +17,7 @@ class AeriaNexusApp : Application() {
         super.onCreate()
         MapboxOptions.accessToken = BuildConfig.MAPBOX_ACCESS_TOKEN
         AppContainer.init(this)
+        rescatarCapturasAMedias()
         // La red tactica se conecta desde el arranque: asi el telefono recibe
         // alertas SOS de otros agentes aunque nunca se abra la pestana Map.
         AppContainer.agoraRepository.ensureStarted()
@@ -24,15 +25,33 @@ class AeriaNexusApp : Application() {
         // la app solo mira ese enlace, y tiene que mirarlo desde el arranque
         // para que el estado sea correcto la primera vez que se ve la barra.
         AppContainer.gafasRepository.vigilar()
-        // Una subida que se corto porque el sistema mato el proceso se retoma aqui,
-        // por el offset guardado. Es el equivalente movil de lo que en la bodycam
-        // hace BootReceiver.
-        AppContainer.evidenceUploader.resumePending()
+        // Una subida que se corto porque el sistema mato el proceso se retoma por el
+        // offset guardado. Al arrancar todavia no hay sesion con AeriaOne, asi que lo
+        // normal es que esto no haga nada y salga al acreditarse la sesion; se deja
+        // por si algun dia el token sobrevive al proceso.
+        AppContainer.reanudarSubidas()
         AppContainer.evidenceUploader.reconcile()
-        // Lo mismo para la copia ligera de los videos: si el proceso murio mientras se
-        // hacia, el original sigue en claro esperandola y hay que terminarla.
-        AppContainer.proxyRepository.reanudar()
+        // El agente lee en la boveda tambien lo que transcribe la bodycam: se trae en
+        // cuanto la camara avisa o, al reconectar, lo que diga su lista de subidas.
+        AppContainer.transcripcionesDeBodycam.arrancar()
         vigilarSesionParaLaRadio()
+    }
+
+    /**
+     * Lo que dejo a medias la app al morir, en este orden:
+     *  1. Capturas en claro cuyo cifrado fallo. Va lo primero, antes de que las gafas
+     *     o la camara escriban nada en captures/, y lo que cifra lo recogen los dos
+     *     pasos siguientes.
+     *  2. Transcripciones: antes que los proxies porque limpia lo que dejo la app al
+     *     morir, y el rescate de los proxies escribe en esa misma carpeta.
+     *  3. La copia ligera de los videos: el original sigue en claro esperandola.
+     */
+    private fun rescatarCapturasAMedias() {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            AppContainer.localEvidenceRepository.sellarLasQueFallaron()
+            AppContainer.transcripcionRepository.reanudar()
+            AppContainer.proxyRepository.reanudar()
+        }
     }
 
     /**

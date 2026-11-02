@@ -84,6 +84,7 @@ fun syncColor(sync: SyncState): Color = when (sync) {
     SyncState.SYNCING -> AmarilloAviso
     SyncState.VERIFIED -> VerdeOk
     SyncState.FAILED -> RojoSuave
+    SyncState.REJECTED -> RojoSuave
 }
 
 /** Color asociado a cada prioridad, usado en bordes y etiquetas. */

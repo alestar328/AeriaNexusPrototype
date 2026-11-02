@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -89,34 +90,71 @@ fun VaultScreen(
             onBloquear = viewModel::bloquear,
         )
         when {
-            !uiState.configurada -> PasswordForm(
-                descripcion = "Create the password that will protect the evidence " +
-                    "captured with this phone. It is never stored: if you forget it, " +
-                    "the evidence can only be recovered from Nexus.",
-                accion = "CREATE VAULT",
-                conConfirmacion = true,
+            // Solo pasa si el primer desbloqueo no pudo crearla: se reintenta en el siguiente.
+            !uiState.configurada -> CardSurface {
+                Text(
+                    text = "The vault is created with your PIN when you unlock the app. " +
+                        "Lock the app and unlock it again.",
+                    modifier = Modifier.padding(16.dp),
+                    color = TextoSecundario,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                )
+            }
+
+            uiState.reinicio != null -> VaultResetContent(
+                paso = uiState.reinicio ?: PasoReinicio.AVISO,
+                digitos = uiState.pinReinicio,
                 trabajando = uiState.trabajando,
                 mensajeError = uiState.mensajeError,
-                onConfirmar = viewModel::crearBoveda,
+                onContinuar = viewModel::aceptarAvisoDeReinicio,
+                onCancelar = viewModel::cancelarReinicio,
+                onDigito = viewModel::escribirDigitoDeReinicio,
+                onBorrar = viewModel::borrarDigitoDeReinicio,
             )
 
-            !uiState.desbloqueada -> PasswordForm(
-                descripcion = "Enter your vault password to review the evidence stored on this device.",
-                accion = "UNLOCK",
-                conConfirmacion = false,
-                trabajando = uiState.trabajando,
-                mensajeError = uiState.mensajeError,
-                onConfirmar = { contrasena, _ -> viewModel.desbloquear(contrasena) },
-            )
+            !uiState.desbloqueada -> {
+                PasswordForm(
+                    descripcion = if (uiState.conPin) {
+                        "Enter your PIN to review the evidence stored on this device."
+                    } else {
+                        "Enter your vault password to review the evidence stored on this device."
+                    },
+                    conPin = uiState.conPin,
+                    trabajando = uiState.trabajando,
+                    mensajeError = uiState.mensajeError,
+                    onConfirmar = viewModel::desbloquear,
+                )
+                // Una boveda de PIN no tiene contrasena aparte que olvidar.
+                if (!uiState.conPin) Text(
+                    text = "Forgot password?",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clickable(enabled = !uiState.trabajando, onClick = viewModel::pedirReinicio)
+                        .padding(vertical = 14.dp),
+                    color = AzulClaro,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                )
+            }
 
             else -> EvidenceList(
                 evidencias = uiState.evidencias,
                 pendientes = uiState.sinCategorizar,
+                deBodycam = uiState.transcripcionesBodycam,
+                mensajeError = uiState.mensajeError,
                 onCategorizar = viewModel::pedirCategorizacion,
+                onTranscripcion = viewModel::abrirTranscripcion,
             )
         }
     }
 
+
+    uiState.transcripcionAbierta?.let { transcripcion ->
+        TranscriptDialog(transcripcion = transcripcion, onDismiss = viewModel::cerrarTranscripcion)
+    }
 
     uiState.categorizando?.let { fila ->
         CategorizeDialog(
@@ -179,22 +217,16 @@ private fun VaultHeader(desbloqueada: Boolean, onBack: () -> Unit, onBloquear: (
     }
 }
 
-/**
- * Formulario de contrasena, con un segundo campo de confirmacion cuando la
- * boveda se esta creando. Es el mismo en los dos casos: cambian el texto y la
- * accion, no el comportamiento.
- */
+/** Formulario para abrir la boveda: con el PIN o, en una boveda antigua, con su contrasena. */
 @Composable
 private fun PasswordForm(
     descripcion: String,
-    accion: String,
-    conConfirmacion: Boolean,
+    conPin: Boolean,
     trabajando: Boolean,
     mensajeError: String?,
-    onConfirmar: (String, String) -> Unit,
+    onConfirmar: (String) -> Unit,
 ) {
     var contrasena by remember { mutableStateOf("") }
-    var repetida by remember { mutableStateOf("") }
 
     CardSurface {
         Column(
@@ -205,16 +237,10 @@ private fun PasswordForm(
 
             PasswordField(
                 value = contrasena,
-                placeholder = "Vault password",
+                placeholder = if (conPin) "PIN" else "Vault password",
+                teclado = if (conPin) KeyboardType.NumberPassword else KeyboardType.Password,
                 onValueChange = { contrasena = it },
             )
-            if (conConfirmacion) {
-                PasswordField(
-                    value = repetida,
-                    placeholder = "Repeat password",
-                    onValueChange = { repetida = it },
-                )
-            }
 
             if (mensajeError != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -230,7 +256,7 @@ private fun PasswordForm(
             }
 
             Button(
-                onClick = { onConfirmar(contrasena, repetida) },
+                onClick = { onConfirmar(contrasena) },
                 enabled = !trabajando && contrasena.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -244,7 +270,7 @@ private fun PasswordForm(
                 if (trabajando) {
                     CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp))
                 } else {
-                    Text(text = accion, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Text(text = "UNLOCK", fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                 }
             }
         }
@@ -252,7 +278,12 @@ private fun PasswordForm(
 }
 
 @Composable
-private fun PasswordField(value: String, placeholder: String, onValueChange: (String) -> Unit) {
+private fun PasswordField(
+    value: String,
+    placeholder: String,
+    teclado: KeyboardType,
+    onValueChange: (String) -> Unit,
+) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -261,7 +292,7 @@ private fun PasswordField(value: String, placeholder: String, onValueChange: (St
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
         visualTransformation = PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        keyboardOptions = KeyboardOptions(keyboardType = teclado),
         colors = OutlinedTextFieldDefaults.colors(
             focusedContainerColor = Superficie,
             unfocusedContainerColor = Superficie,
@@ -277,9 +308,12 @@ private fun PasswordField(value: String, placeholder: String, onValueChange: (St
 private fun EvidenceList(
     evidencias: List<VaultRepository.VaultItem>,
     pendientes: List<RawEvidenceEntity>,
+    deBodycam: List<VaultRepository.BodycamTranscript>,
+    mensajeError: String?,
     onCategorizar: (RawEvidenceEntity) -> Unit,
+    onTranscripcion: (String) -> Unit,
 ) {
-    if (evidencias.isEmpty() && pendientes.isEmpty()) {
+    if (evidencias.isEmpty() && pendientes.isEmpty() && deBodycam.isEmpty()) {
         Text(
             text = "No evidence captured with this phone yet.",
             color = TextoSecundario,
@@ -290,6 +324,9 @@ private fun EvidenceList(
     // Lo importado va ARRIBA y en su propio apartado: es lo unico que le pide algo
     // al agente. El resto de la boveda ya esta en su incidente y solo se consulta.
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (mensajeError != null) {
+            item { Text(text = mensajeError, color = RojoSuave, fontSize = 13.sp) }
+        }
         if (pendientes.isNotEmpty()) {
             item { Apartado("Pending categorization") }
             // Las claves llevan prefijo porque un LazyColumn las exige unicas en
@@ -302,7 +339,16 @@ private fun EvidenceList(
             }
             item { Apartado("Vault") }
         }
-        items(evidencias, key = { "boveda:${it.name}" }) { evidencia -> EvidenceRow(evidencia) }
+        items(evidencias, key = { "boveda:${it.name}" }) { evidencia ->
+            EvidenceRow(evidencia, onTranscripcion = { evidencia.transcript?.let(onTranscripcion) })
+        }
+        // Al final y aparte: no son evidencia de este telefono, solo su texto.
+        if (deBodycam.isNotEmpty()) {
+            item { Apartado("Bodycam transcripts") }
+            items(deBodycam, key = { "bodycam:${it.transcript}" }) { transcripcion ->
+                BodycamTranscriptRow(transcripcion, onAbrir = { onTranscripcion(transcripcion.transcript) })
+            }
+        }
     }
 }
 
@@ -379,7 +425,7 @@ private val FORMATO_GRABACION = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", j
 
 /** Fila de la lista; al tocarla se descifra y se muestra la evidencia. */
 @Composable
-private fun EvidenceRow(evidencia: VaultRepository.VaultItem) {
+private fun EvidenceRow(evidencia: VaultRepository.VaultItem, onTranscripcion: () -> Unit) {
     var abierta by remember { mutableStateOf(false) }
     CardSurface {
         Column(Modifier.padding(12.dp)) {
@@ -416,6 +462,10 @@ private fun EvidenceRow(evidencia: VaultRepository.VaultItem) {
                         maxLines = 1,
                     )
                 }
+                if (evidencia.openable && evidencia.transcript != null) {
+                    Chip(texto = "TEXT", color = AzulClaro, onClick = onTranscripcion)
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(
                     text = when {
                         !evidencia.openable -> "NO KEY"
@@ -440,6 +490,63 @@ private fun EvidenceRow(evidencia: VaultRepository.VaultItem) {
             }
         }
     }
+}
+
+/** Transcripcion de la bodycam: no hay video que abrir en el telefono, solo su texto. */
+@Composable
+private fun BodycamTranscriptRow(transcripcion: VaultRepository.BodycamTranscript, onAbrir: () -> Unit) {
+    CardSurface {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Videocam,
+                contentDescription = null,
+                tint = AmarilloAviso,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = transcripcion.incidentId,
+                    color = TextoPrincipal,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Received ${transcripcion.receivedAt}",
+                    color = TextoTerciario,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            if (transcripcion.openable) {
+                Chip(texto = "TEXT", color = AmarilloAviso, onClick = onAbrir)
+            } else {
+                Text(text = "NO KEY", color = TextoTerciario, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Chip(texto: String, color: Color, onClick: () -> Unit) {
+    Text(
+        text = texto,
+        modifier = Modifier
+            .heightIn(min = 32.dp)
+            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(6.dp))
+            .border(1.dp, BordeSutil, RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        color = color,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+    )
 }
 
 private fun tamanoLegible(bytes: Long): String = when {

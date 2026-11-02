@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
 import com.delta.aeria_nexus_prototype.data.BodycamRepository
+import com.delta.aeria_nexus_prototype.data.GafasCommandRepository
+import com.delta.aeria_nexus_prototype.data.GafasControlState
 import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.ProxyRepository
@@ -16,6 +18,7 @@ import com.delta.aeria_nexus_prototype.data.model.SyncState
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntry
 import com.delta.aeria_nexus_prototype.data.model.TimelineEntryType
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
 import java.io.File
 import java.util.UUID
@@ -33,6 +36,9 @@ data class ActiveIncidentUiState(
     val audioSeconds: Int = 0,
     // Evidencia recien capturada a la espera de clasificacion.
     val pendingEvidence: EvidenceRecord? = null,
+    // Transcribiendo la grabacion recien cerrada: la clasificacion sale al terminar
+    // o al pasar TOPE_TRANSCRIPCION_MS, lo que llegue antes.
+    val isTranscribing: Boolean = false,
     val showWitnessQr: Boolean = false,
     val qrSecondsLeft: Int = 0,
     // El agente pulso END con una nota de audio grabando: el incidente se cierra
@@ -62,24 +68,49 @@ class ActiveIncidentViewModel(
     private val localEvidence: LocalEvidenceRepository,
     private val uploader: EvidenceUploader,
     private val proxies: ProxyRepository,
+    private val transcripciones: TranscripcionRepository,
     private val agora: AgoraRepository,
+    private val gafas: GafasCommandRepository,
 ) : ViewModel() {
 
     /**
      * Manda a Nexus la captura recien cifrada. Se encola y vuelve: la transferencia
      * corre en el scope de la aplicacion, no en el del ViewModel, porque salir de la
      * pantalla no debe cortar una subida de 40 MB. Sube el .fev, nunca el original.
+     *
+     * Sin cifrar no se sube nada: se apunta a que incidente pertenece [destino] para
+     * que el reintento del cifrado la entregue enlazada. Sin [destino] (foto de la
+     * bodycam) no hay fichero en este telefono.
      */
-    private fun entregar(sellada: EvidenceCrypto.Sealed?, evidenceId: String, label: String) {
-        val s = sellada ?: return   // sin cifrar no hay nada que entregar
-        uploader.enqueue(s, evidenceId, activeIncident.value?.id, label)
+    private fun entregar(
+        sellada: EvidenceCrypto.Sealed?,
+        evidencia: EvidenceRecord,
+        destino: LocalEvidenceRepository.MediaTarget? = null,
+    ) {
+        val incidentId = activeIncident.value?.id
+        if (sellada == null) {
+            destino?.let { localEvidence.anotarParaElReintento(it, procedenciaDe(evidencia)) }
+            return
+        }
+        uploader.enqueue(sellada, evidencia.id, incidentId, evidencia.label, evidencia.type)
     }
+
+    private fun procedenciaDe(evidencia: EvidenceRecord) = LocalEvidenceRepository.Procedencia(
+        evidenceId = evidencia.id,
+        incidentId = activeIncident.value?.id,
+        label = evidencia.label,
+        type = evidencia.type,
+    )
 
     /** True cuando no hay bodycam: video y foto se capturan con el telefono. */
     val usesPhoneCapture: Boolean get() = !bodycamRepository.isConnected
 
     // Destino de la captura en curso con la camara del telefono.
     private var pendingCapture: LocalEvidenceRepository.MediaTarget? = null
+
+    // Hora del primer fotograma o muestra: el recorded_at de la transcripcion.
+    private var inicioVideoMillis: Long? = null
+    private var inicioAudioMillis: Long? = null
 
     // SOS pedido desde la camara del telefono. Sale cuando la pantalla suelta la
     // camara: el livestream la necesita y mientras tanto la tiene CameraX.
@@ -124,16 +155,16 @@ class ActiveIncidentViewModel(
         }
     }
 
-    /** Dispositivos activos: FC segun la conexion Bluetooth real de la bodycam,
-     *  FL segun el perfil (gafas aun sin integrar) y siempre el telefono (AN). */
-    private fun activeDevices(): String {
-        val perfil = repositorio.officerProfile
-        return buildList {
-            if (bodycamRepository.isConnected) add("FC")
-            if (perfil.flConnected) add("FL")
-            add("AN")
-        }.joinToString(" + ")
-    }
+    /**
+     * Dispositivos activos, para la linea de tiempo que va al manifiesto: FC si la
+     * bodycam esta enlazada, FL si el mando de las gafas esta abierto, y siempre el
+     * telefono (AN). Antes FL salia siempre, por el perfil de ejemplo.
+     */
+    private fun activeDevices(): String = buildList {
+        if (bodycamRepository.isConnected) add("FC")
+        if (gafas.estado.value == GafasControlState.LISTO) add("FL")
+        add("AN")
+    }.joinToString(" + ")
 
     /** Grabacion con la bodycam conectada: los comandos BT la inician y detienen. */
     fun toggleRecording() {
@@ -202,6 +233,7 @@ class ActiveIncidentViewModel(
                 mediaUri = sellada?.file?.name,
                 hash = IncidentRepository.evidenceHash(sellada?.plainSha256),
                 sellada = sellada,
+                destino = destino,
             )
         }
     }
@@ -225,6 +257,7 @@ class ActiveIncidentViewModel(
     }
 
     fun onPhoneRecordingStarted() {
+        inicioVideoMillis = System.currentTimeMillis()
         repositorio.updateActiveIncident { it.copy(isRecording = true) }
         _uiState.update { it.copy(phoneCameraAutoStart = false) }
         addTimelineEntry("Recording started — phone camera", TimelineEntryType.RECORDING_START)
@@ -270,7 +303,7 @@ class ActiveIncidentViewModel(
         if (!sosAlSoltarCamara) return
         sosAlSoltarCamara = false
         addTimelineEntry("SOS raised — phone camera handed to the livestream", TimelineEntryType.SYSTEM)
-        agora.activateSos(repositorio.officerProfile.officerNum)
+        agora.activateSos(repositorio.agenteDeLaSesion().placa)
         _uiState.update { it.copy(openSosLivestream = true) }
     }
 
@@ -279,10 +312,11 @@ class ActiveIncidentViewModel(
     }
 
     /**
-     * Cifra el video, abre la hoja de clasificacion y encarga su proxy. Al cifrar se
-     * conserva el claro porque de el sale el proxy; ProxyRepository lo borra al
-     * terminar y entrega los dos, primero el proxy y luego el original. La duracion
-     * se lee antes, mientras el fichero sigue siendo un MP4 legible.
+     * Cifra el video, encarga su transcripcion y su proxy y abre la hoja de
+     * clasificacion. Al cifrar se conserva el claro porque de el salen las dos
+     * cosas: primero se le saca el audio y despues ProxyRepository hace la copia,
+     * lo borra y entrega primero el proxy y luego el original. La duracion se lee
+     * antes, mientras el fichero sigue siendo un MP4 legible.
      */
     private suspend fun registrarVideoDelTelefono(destino: LocalEvidenceRepository.MediaTarget) {
         val duracion = localEvidence.mediaDuration(destino)
@@ -302,10 +336,34 @@ class ActiveIncidentViewModel(
             sync = SyncState.LOCAL_ONLY,
             mediaUri = sellada?.file?.name,
         )
-        _uiState.update { it.copy(pendingEvidence = video) }
-        if (sellada != null) {
-            proxies.procesar(destino, sellada, video.id, activeIncident.value?.id, video.label)
+        if (sellada == null) {
+            entregar(null, video, destino)
+            _uiState.update { it.copy(pendingEvidence = video) }
+            return
         }
+        _uiState.update { it.copy(isTranscribing = true) }
+        val transcripcion = transcripciones.preparar(destino.file, origenDe(sellada, video, inicioVideoMillis))
+        proxies.procesar(destino, sellada, video.id, activeIncident.value?.id, video.label)
+        clasificarTrasTranscribir(transcripcion, video)
+    }
+
+    private fun origenDe(sellada: EvidenceCrypto.Sealed, evidencia: EvidenceRecord, inicioMillis: Long?) =
+        TranscripcionRepository.Evidencia(
+            sha256Plain = sellada.plainSha256,
+            evidenceId = evidencia.id,
+            incidentId = activeIncident.value?.id,
+            grabadaPor = "phone",
+            grabadaEnMillis = inicioMillis,
+        )
+
+    /**
+     * Espera a la transcripcion con el indicador en pantalla y abre la clasificacion.
+     * Pasado el tope la abre igual: la transcripcion sigue en segundo plano y sube
+     * cuando termine.
+     */
+    private suspend fun clasificarTrasTranscribir(transcripcion: String?, evidencia: EvidenceRecord) {
+        transcripcion?.let { transcripciones.esperar(it, TOPE_TRANSCRIPCION_MS) }
+        _uiState.update { it.copy(isTranscribing = false, pendingEvidence = evidencia) }
     }
 
     /** Crea la evidencia de foto pendiente y abre la hoja de clasificacion. */
@@ -313,6 +371,7 @@ class ActiveIncidentViewModel(
         mediaUri: String?,
         hash: String = IncidentRepository.fakeHash(),
         sellada: EvidenceCrypto.Sealed? = null,
+        destino: LocalEvidenceRepository.MediaTarget? = null,
     ) {
         val grabando = activeIncident.value?.isRecording == true
         val foto = EvidenceRecord(
@@ -327,7 +386,7 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Photo captured", TimelineEntryType.PHOTO)
         _uiState.update { it.copy(pendingEvidence = foto) }
-        entregar(sellada, foto.id, foto.label)
+        entregar(sellada, foto, destino)
     }
 
     /**
@@ -339,6 +398,7 @@ class ActiveIncidentViewModel(
             viewModelScope.launch { stopAudioNote() }
         } else {
             if (!localEvidence.startAudioRecording()) return
+            inicioAudioMillis = System.currentTimeMillis()
             _uiState.update { it.copy(isAudioRecording = true) }
             addTimelineEntry("Audio note recording started", TimelineEntryType.AUDIO)
         }
@@ -368,8 +428,17 @@ class ActiveIncidentViewModel(
         )
         addTimelineEntry("Audio note added — $duracion", TimelineEntryType.AUDIO)
         // La entrega a Nexus no espera a la clasificacion, igual que en foto y video.
-        entregar(capturada.sealed, nota.id, nota.label)
-        _uiState.update { it.copy(pendingEvidence = nota) }
+        entregar(capturada.sealed, nota, capturada.target)
+        val sellada = capturada.sealed
+        if (sellada == null) {
+            // Sin cifrar, el claro es la unica copia de la nota: se queda.
+            _uiState.update { it.copy(pendingEvidence = nota) }
+            return
+        }
+        _uiState.update { it.copy(isTranscribing = true) }
+        val transcripcion = transcripciones.preparar(capturada.target.file, origenDe(sellada, nota, inicioAudioMillis))
+        localEvidence.discard(capturada.target)
+        clasificarTrasTranscribir(transcripcion, nota)
     }
 
     fun generateWitnessQr() {
@@ -464,6 +533,11 @@ class ActiveIncidentViewModel(
     companion object {
         // El QR de testigo expira a los 24 minutos, igual que el prototipo web.
         private const val QR_VALID_SECONDS = 24 * 60
+
+        // Lo que el agente espera como mucho a la transcripcion tras cerrar una
+        // grabacion. Con el modelo base cubre un par de minutos de audio; lo que
+        // tarde mas sigue en segundo plano.
+        private const val TOPE_TRANSCRIPCION_MS = 20_000L
 
         /** Formatea segundos como MM:SS, o HH:MM:SS a partir de una hora. */
         fun formatSeconds(total: Int): String {

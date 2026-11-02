@@ -19,11 +19,14 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -35,20 +38,46 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.identity.BindingActivo
 import com.delta.aeria_nexus_prototype.data.identity.BindingPeriferico
 import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
+import com.delta.aeria_nexus_prototype.data.identity.CanalCifrado
 import com.delta.aeria_nexus_prototype.data.identity.EmparejamientoDelTelefono
+import com.delta.aeria_nexus_prototype.data.identity.IamException
+import com.delta.aeria_nexus_prototype.data.identity.OficialRotulado
 import com.delta.aeria_nexus_prototype.data.identity.ResultadoEmparejamiento
+import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
+import com.delta.aeria_nexus_prototype.data.red.HttpEnRedLocal
 import java.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Estado de la conexion Bluetooth con la bodycam. */
 enum class BodycamState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
+
+/**
+ * Una evidencia de la bodycam y como va su subida a Nexus.
+ *
+ * [pendiente] no se deduce aqui: lo manda la propia bodycam, que es quien sabe si
+ * un incidente sigue en su cola de reintentos. Es lo unico sobre lo que tiene
+ * sentido ofrecer un boton de cancelar.
+ */
+data class SubidaDeEvidencia(
+    val id: String,
+    val entregada: Boolean,
+    val cancelada: Boolean,
+    val pendiente: Boolean,
+    /** `none`, `working`, `ready` o `failed` (TRANSCRIPT-FORMAT.md §7 de BodyCamServer). */
+    val transcripcion: String = "none",
+)
 
 /**
  * Si sabemos con QUIEN estamos hablando (workflow 31).
@@ -93,7 +122,11 @@ enum class EnlaceAutenticado {
  * backoff, un watchdog descarta enlaces muertos que no llegan a fallar la
  * escritura, y BodycamService mantiene el proceso vivo en segundo plano.
  */
-class BodycamRepository(private val context: Context) {
+class BodycamRepository(
+    private val context: Context,
+    private val sesionBackend: SesionBackend,
+    private val ajustesSos: AjustesSos,
+) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -106,6 +139,14 @@ class BodycamRepository(private val context: Context) {
     private val _motivoDelEnlace = MutableStateFlow<String?>(null)
     val motivoDelEnlace: StateFlow<String?> = _motivoDelEnlace.asStateFlow()
 
+    /**
+     * AeriaOne tiene esta camara en cuarentena (credential-lifecycle.md §3): no la deja
+     * atar ni le da token de Agora. La unidad no puede contarselo al agente; lo ensena
+     * el telefono. Se vuelve a saber en cada conexion.
+     */
+    private val _camaraEnCuarentena = MutableStateFlow(false)
+    val camaraEnCuarentena: StateFlow<Boolean> = _camaraEnCuarentena.asStateFlow()
+
     /** Atadura agente-camara en vigor (workflow 33). Null si la camara no sirve a nadie. */
     private val _binding = MutableStateFlow<BindingActivo?>(null)
     val binding: StateFlow<BindingActivo?> = _binding.asStateFlow()
@@ -113,6 +154,22 @@ class BodycamRepository(private val context: Context) {
     /** Intercambio en curso, si lo hay. Vive lo que dure una conexion. */
     private var emparejamiento: EmparejamientoDelTelefono? = null
     private var inicioDelEmparejamientoMillis = 0L
+
+    /**
+     * Canal cifrado con la camara (workflow 31 v2). Con el puesto, todo lo que se
+     * manda va cifrado y una linea en claro de la camara se descarta. Null sin
+     * emparejamiento, o con una camara que no lo completa (modo transicion: se
+     * sigue hablando en claro, como antes).
+     */
+    @Volatile private var canal: CanalCifrado? = null
+
+    /**
+     * Comandos que llegaron mientras se emparejaba. No pueden salir en claro justo
+     * antes de que el canal se cifre (la camara ya los rechazaria), asi que esperan
+     * al resultado y salen despues por el canal que toque. STATUS no se guarda: el
+     * poll manda otro enseguida.
+     */
+    private val enEspera = mutableListOf<String>()
 
     /** Declaracion enviada a la camara mientras se espera su BIND_OK. */
     private var pendienteDeAtar: BindingPeriferico.Declaracion? = null
@@ -136,6 +193,15 @@ class BodycamRepository(private val context: Context) {
     val state: StateFlow<BodycamState> = _state.asStateFlow()
 
     val isConnected: Boolean get() = _state.value == BodycamState.CONNECTED
+
+    // Aqui y no antes: los collectors corren en otro hilo y leen flows declarados
+    // arriba; lanzados antes de su declaracion los encuentran a null y la app cae.
+    init {
+        prestarToken()
+        prestarAccesoAgora()
+        pasarTonoSos()
+        registrarAtaduraEnBackend()
+    }
 
     // La MAC no es secreta (la W1 la anuncia a cualquiera que busque), por eso
     // basta con preferencias en claro.
@@ -189,6 +255,27 @@ class BodycamRepository(private val context: Context) {
     private val _commandResponses = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val commandResponses: SharedFlow<String> = _commandResponses.asSharedFlow()
 
+    // Lineas TRANSCRIPT_READY:, TRANSCRIPT: y TRANSCRIPT_ERROR: (TRANSCRIPT-FORMAT.md
+    // §7). Las atiende TranscripcionesDeBodycam; una sola puede pesar decenas de KB.
+    private val _lineasDeTranscripcion = MutableSharedFlow<String>(extraBufferCapacity = 16)
+
+    // PREVIEW_TOKEN:<token>:<segundos> o PREVIEW_TOKEN_FAIL:<motivo>, ver pedirTokenDelVisor.
+    private val _respuestasTokenVisor = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val lineasDeTranscripcion: SharedFlow<String> = _lineasDeTranscripcion.asSharedFlow()
+
+    /**
+     * Unidad conectada (`BWC-896E`), del campo unit_id del STATUS. Null si la camara
+     * aun no lo manda: sin ella, un INC_000032 no distingue de que camara es.
+     */
+    @Volatile var unidadConectada: String? = null
+        private set
+
+    // Subidas de evidencia de la bodycam, de la respuesta UPLOADS: a UPLOAD_LIST.
+    // No llega en el STATUS periodico a proposito: la lista puede tener decenas de
+    // incidentes y no cambia sola cada 5 segundos, asi que se pide cuando se mira.
+    private val _subidas = MutableStateFlow<List<SubidaDeEvidencia>>(emptyList())
+    val subidas: StateFlow<List<SubidaDeEvidencia>> = _subidas.asStateFlow()
+
     /** True si los permisos Bluetooth de runtime ya estan concedidos. */
     fun hasBluetoothPermission(): Boolean {
         // Antes de Android 12 el permiso BLUETOOTH es de instalacion, no de runtime.
@@ -240,6 +327,7 @@ class BodycamRepository(private val context: Context) {
             .apply()
         // El numero era de la camara anterior; el de la nueva llega en su STATUS.
         uidAgoraBodycam = null
+        unidadConectada = null
         _bodycamElegida.value = dispositivo
     }
 
@@ -363,18 +451,33 @@ class BodycamRepository(private val context: Context) {
 
     /** Envia un comando del protocolo; el salto de linea se agrega aqui. */
     fun sendCommand(command: String) {
-        scope.launch {
-            try {
-                // Un solo escritor a la vez: sin esto, comandos concurrentes
-                // podrian entrelazar sus bytes dentro de la misma linea.
-                synchronized(writeLock) {
-                    output?.write("$command\n".toByteArray(Charsets.UTF_8))
-                    output?.flush()
+        scope.launch { escribir(command) }
+    }
+
+    /**
+     * Escribe [command] en el hilo que llama. Cada sendCommand va en su propia
+     * corrutina y no garantiza el orden; quien necesita que varias ordenes salgan
+     * una detras de otra (ver [soltar]) usa esto directamente.
+     */
+    private fun escribir(command: String) {
+        try {
+            // Un solo escritor a la vez: sin esto, comandos concurrentes
+            // podrian entrelazar sus bytes dentro de la misma linea. Con el
+            // canal cifrado, ademas, el contador del IV tiene que avanzar en el
+            // mismo orden en que salen los bytes: se cifra aqui dentro.
+            synchronized(writeLock) {
+                val activo = canal
+                if (activo == null && emparejamiento != null && !command.startsWith("AUTH_")) {
+                    if (command != "STATUS") enEspera += command
+                    return
                 }
-            } catch (e: IOException) {
-                // El cierre despierta a readUntilClosed y dispara el reintento.
-                closeQuietly()
+                val linea = activo?.cifrar(command) ?: command
+                output?.write("$linea\n".toByteArray(Charsets.UTF_8))
+                output?.flush()
             }
+        } catch (e: IOException) {
+            // El cierre despierta a readUntilClosed y dispara el reintento.
+            closeQuietly()
         }
     }
 
@@ -385,10 +488,35 @@ class BodycamRepository(private val context: Context) {
             var linea: String?
             while (reader.readLine().also { linea = it } != null) {
                 lastRxMillis = System.currentTimeMillis()
-                linea?.trim()?.takeIf { it.isNotEmpty() }?.let(::handleLine)
+                linea?.trim()?.takeIf { it.isNotEmpty() }?.let(::abrir)?.let(::handleLine)
             }
         } catch (e: IOException) {
             // Fin normal de la conexion: el bucle decide si reintenta.
+        }
+    }
+
+    /**
+     * La linea en claro, o null si se descarta.
+     *
+     * Con el canal cifrado, una linea en claro no la ha mandado la camara (ella ya
+     * cifra todo) y se ignora; una trama que no descifra es manipulacion o un
+     * contador desincronizado, y se corta el enlace para volver a emparejar.
+     */
+    private fun abrir(linea: String): String? {
+        val activo = canal
+        if (activo == null) {
+            if (linea.startsWith(CanalCifrado.PREFIJO)) Log.w(TAG, "Trama cifrada sin canal acordado: ignorada")
+            return linea.takeUnless { it.startsWith(CanalCifrado.PREFIJO) }
+        }
+        if (!linea.startsWith(CanalCifrado.PREFIJO)) {
+            Log.w(TAG, "Linea en claro con el canal cifrado: ignorada")
+            return null
+        }
+        return activo.descifrar(linea) ?: run {
+            Log.e(TAG, "Trama de la bodycam que no descifra: se corta el enlace")
+            marcarEnlace(EnlaceAutenticado.RECHAZADO, "Trama cifrada manipulada o desincronizada")
+            closeQuietly()
+            null
         }
     }
 
@@ -439,7 +567,7 @@ class BodycamRepository(private val context: Context) {
             deviceId = ClaveEnKeystore.terminal.commonNameDelCertificado() ?: "DESCONOCIDO",
             certificadoDelTelefono = certificado,
             firmar = { datos -> ClaveEnKeystore.terminal.firmarReto(datos) },
-            anclaDePerifericos = AppContainer.enrollmentRepository.anclaDePerifericos(),
+            anclasDePerifericos = AppContainer.enrollmentRepository.anclasDePerifericos(),
         )
         inicioDelEmparejamientoMillis = System.currentTimeMillis()
         _enlaceAutenticado.value = EnlaceAutenticado.COMPROBANDO
@@ -461,7 +589,11 @@ class BodycamRepository(private val context: Context) {
 
         when (val resultado = enCurso.comprobar(linea)) {
             is ResultadoEmparejamiento.Autenticado -> {
-                marcarEnlace(EnlaceAutenticado.SI, "${resultado.bwcId} · ${resultado.sujeto}")
+                // El canal ANTES de marcar el enlace: marcarlo dispara prestarToken
+                // en otra corrutina, y el token no puede salir en claro. Mismo
+                // cerrojo que las escrituras, para que ninguna quede a medias.
+                synchronized(writeLock) { canal = resultado.canal }
+                marcarEnlace(EnlaceAutenticado.SI, "${resultado.bwcId} · ${resultado.sujeto} · canal cifrado")
                 // El emparejamiento dice QUE camara es; la atadura dice A QUIEN
                 // sirve. Son dos cosas distintas y esta es la segunda.
                 atarAlAgente(resultado.bwcId, resultado.nonceDeLaSesion)
@@ -474,6 +606,17 @@ class BodycamRepository(private val context: Context) {
                 marcarEnlace(EnlaceAutenticado.NO_SOPORTADO, resultado.motivo)
         }
         emparejamiento = null
+        soltarEnEspera()
+    }
+
+    /**
+     * Lo que se guardo durante el emparejamiento sale ahora, cifrado si se acordo
+     * canal. Sin canal sale en claro: es el modo transicion, la camara lo sigue
+     * aceptando y no mandarlo dejaria al agente sin su REC_START.
+     */
+    private fun soltarEnEspera() {
+        val pendientes = synchronized(writeLock) { enEspera.toList().also { enEspera.clear() } }
+        pendientes.forEach(::sendCommand)
     }
 
     /**
@@ -489,6 +632,7 @@ class BodycamRepository(private val context: Context) {
             EnlaceAutenticado.NO_SOPORTADO,
             "La bodycam no respondio al emparejamiento: firmware sin el workflow 31",
         )
+        soltarEnEspera()
     }
 
     /**
@@ -515,6 +659,121 @@ class BodycamRepository(private val context: Context) {
     }
 
     /**
+     * Presta a la camara el token de la sesion del agente, para que suba su evidencia.
+     *
+     * El backend solo da sesion al telefono, y la subida exige un token con alcance
+     * `video.upload`. Decision del 2026-09-25 para la demo: la camara usa el MISMO token
+     * que el telefono. Lo que se acepta con ello, dicho donde se ve: la camara lleva
+     * todos los alcances del agente hasta que caduque o se cierre la sesion; y en el
+     * backend sus subidas figuran con el terminal del agente como dispositivo. Desde
+     * el 2026-09-28 el token viaja por el canal cifrado: la camara rechaza un TOKEN
+     * sin el (TOKEN_FAIL).
+     *
+     * Solo por un enlace AUTENTICADO (workflow 31): a una camara que no ha demostrado
+     * quien es no se le da una credencial. Se reenvia al reconectar y al abrir otra
+     * sesion, y al cerrarla se le manda retirar.
+     */
+    private fun prestarToken() {
+        scope.launch {
+            combine(_enlaceAutenticado, sesionBackend.actual) { enlace, sesion -> enlace to sesion }
+                .collectLatest { (enlace, sesion) ->
+                    if (enlace != EnlaceAutenticado.SI) return@collectLatest
+                    if (sesion == null) {
+                        sendCommand("TOKEN_CLEAR")
+                    } else {
+                        // Segundos que le quedan, no la hora de caducidad: la W1 ha llegado
+                        // a ir 6 h desfasada y tiraria un token valido.
+                        val quedan = (sesion.caducaEnMillis - System.currentTimeMillis()) / 1_000
+                        sendCommand("TOKEN:${sesion.token}:$quedan")
+                        Log.i(TAG, "token de la sesion prestado a la camara")
+                    }
+                }
+        }
+    }
+
+    /**
+     * Pasa a la camara su acceso al canal de Agora (sos-and-proxy.md §2.7): el token
+     * que AeriaOne emite para su BWC y las claves de la semana.
+     *
+     * Tres condiciones, todas a la vez: enlace AUTENTICADO, porque la clave del canal no
+     * puede viajar en claro (en modo transicion no se manda); sesion, porque el token lo
+     * pide el agente; y atadura registrada en AeriaOne, que sin ella contesta
+     * `403 binding_invalid`. Se repite antes de que caduque el token y cuando empieza a
+     * valer la clave siguiente, que es cuando AeriaOne ya tiene la nueva "next".
+     */
+    private fun prestarAccesoAgora() {
+        scope.launch {
+            combine(_enlaceAutenticado, _binding, sesionBackend.actual) { enlace, atadura, sesion ->
+                atadura?.takeIf { enlace == EnlaceAutenticado.SI && sesion != null && it.idEnBackend != null }?.bwcId
+            }
+                .distinctUntilChanged()
+                .collectLatest { bwcId ->
+                    if (bwcId == null) return@collectLatest
+                    while (true) {
+                        val acceso = AppContainer.accesoAgora.paraLaCamara(bwcId) { marcarCamaraEnCuarentena(bwcId) }
+                        if (acceso == null) {
+                            delay(REINTENTO_ACCESO_AGORA_MILLIS)
+                            continue
+                        }
+                        enviarAccesoAgora(acceso)
+                        delay(hastaElSiguienteAcceso(acceso))
+                    }
+                }
+        }
+    }
+
+    /**
+     * `AGTOKEN:<token>:<expires_in_s>` y una `AGKEY:<key_id>:<key_hex>:<salt_b64>:<starts_in_s>:<ends_in_s>`
+     * por clave. Los tiempos van en segundos desde ahora y no como hora: la W1 ha llegado
+     * a ir 6 h desfasada. Token vacio = proyecto sin certificado; sin AGKEY, en claro.
+     */
+    private fun enviarAccesoAgora(acceso: AccesoAgora) {
+        val ahora = System.currentTimeMillis()
+        val dura = if (acceso.tokenHastaMillis > ahora) (acceso.tokenHastaMillis - ahora) / 1_000 else DURACION_TOKEN_AGORA_S
+        sendCommand("AGTOKEN:${acceso.token.orEmpty()}:$dura")
+        acceso.clavesPendientes(ahora).forEach { clave ->
+            val empieza = maxOf(0L, (clave.desdeMillis - ahora) / 1_000)
+            val acaba = (clave.hastaMillis - ahora) / 1_000
+            sendCommand("AGKEY:${clave.keyId}:${clave.keyHex}:${clave.saltB64}:$empieza:$acaba")
+        }
+        Log.i(TAG, "acceso a Agora pasado a la camara (${acceso.clavesPendientes(ahora).size} clave(s))")
+    }
+
+    private fun marcarCamaraEnCuarentena(bwcId: String) {
+        if (_camaraEnCuarentena.value) return
+        _camaraEnCuarentena.value = true
+        Log.w(TAG, "AeriaOne tiene la camara $bwcId en cuarentena")
+        AppContainer.auditoria.registrar(
+            TipoEvento.BODYCAM_ENLACE,
+            listOf("result" to "QUARANTINED", "bwc" to bwcId),
+        )
+    }
+
+    /** Diez minutos antes de que caduque el token, o al empezar la clave siguiente. */
+    private fun hastaElSiguienteAcceso(acceso: AccesoAgora): Long {
+        val ahora = System.currentTimeMillis()
+        val porElToken = if (acceso.tokenHastaMillis > ahora) acceso.tokenHastaMillis - MARGEN_TOKEN_AGORA_MILLIS else Long.MAX_VALUE
+        val porLaClave = acceso.clavesPendientes(ahora).map { it.desdeMillis }.filter { it > ahora }.minOrNull() ?: Long.MAX_VALUE
+        val cuando = minOf(porElToken, porLaClave, ahora + DURACION_TOKEN_AGORA_S * 1_000)
+        return maxOf(cuando - ahora, REINTENTO_ACCESO_AGORA_MILLIS)
+    }
+
+    /**
+     * La W1 hace sonar su propio tono al entrar en SOS, y tiene que ser el que el
+     * agente eligio en su perfil: se le manda en cada conexion y en cada cambio.
+     * No espera al enlace autenticado como el token porque no es secreto; si se
+     * esta emparejando, sendCommand lo deja en espera y sale por el canal cifrado.
+     */
+    private fun pasarTonoSos() {
+        scope.launch {
+            combine(_state, ajustesSos.tono) { estado, tono -> estado to tono }
+                .collectLatest { (estado, tono) ->
+                    if (estado == BodycamState.CONNECTED) sendCommand("SOS_TONE:${tono.name}")
+                }
+        }
+    }
+
+    /**
      * Ata la camara al agente que tiene la sesion abierta (workflow 33).
      *
      * La atadura es una declaracion firmada CON LA CLAVE DEL AGENTE, no con la del
@@ -537,12 +796,22 @@ class BodycamRepository(private val context: Context) {
         }
 
         val ahora = System.currentTimeMillis()
+        // Lo que la camara rotula sale de AeriaOne, no de la app. Sin perfil recibido
+        // (telefono dado de alta antes del 9-oct-2026 y aun sin sesion acreditada) se
+        // rotula el identificador del agente: mejor eso que el nombre de otra persona.
+        val perfil = AppContainer.perfilDelAgente.actual()
+        val oficial = OficialRotulado(
+            nombre = perfil?.nombre ?: identidad.userId,
+            rango = perfil?.rango.orEmpty(),
+            placa = perfil?.placa.orEmpty(),
+        )
         val declaracion = BindingPeriferico.declaracion(
             bindingId = BindingPeriferico.nuevoId(),
             userId = identidad.userId,
             deviceId = identidad.deviceId,
             bwcId = bwcId,
             tenant = identidad.tenant,
+            oficial = oficial,
             nonceDeLaSesion = nonceDeLaSesion,
             emitidoEn = ahora,
             caducaEn = ahora + BindingPeriferico.VALIDEZ_POR_DEFECTO_MILLIS,
@@ -561,6 +830,58 @@ class BodycamRepository(private val context: Context) {
     }
 
     /**
+     * Deja escrito en AeriaOne que camara lleva el agente (iam-session.md §6.1). Sin
+     * esto el backend no sabe a quien atribuir lo que sube la unidad.
+     *
+     * Se registra cuando hay atadura aceptada por la camara Y sesion: si el token
+     * llega despues (sin cobertura al desbloquear), se hace entonces. Un intento por
+     * atadura y por sesion; si falla por red, la siguiente lo repite.
+     */
+    private fun registrarAtaduraEnBackend() {
+        scope.launch {
+            combine(_binding, sesionBackend.actual) { atadura, _ -> atadura }
+                .collectLatest { atadura ->
+                    if (atadura == null || atadura.idEnBackend != null) return@collectLatest
+                    // La sesion restringida de un suspendido no trae el alcance de
+                    // emparejar: token() la oculta y no se llega a pedir.
+                    val token = sesionBackend.token() ?: return@collectLatest
+                    try {
+                        val id = AppContainer.iamClient.registrarAtadura(token, atadura)
+                        // Solo si sigue siendo la misma: el enlace pudo caerse entretanto.
+                        _binding.update { if (it?.bindingId == atadura.bindingId) it.copy(idEnBackend = id) else it }
+                        Log.i(TAG, "atadura de ${atadura.bwcId} registrada en AeriaOne: $id")
+                        _camaraEnCuarentena.value = false
+                    } catch (e: IamException) {
+                        Log.w(TAG, "AeriaOne no registro la atadura de ${atadura.bwcId}: ${e.message}")
+                        // Con device_id el rechazo es de la camara, no de este telefono:
+                        // no se le pasa a la sesion, que cortaria al agente sin motivo.
+                        if (e.dispositivo != null) {
+                            if (e.codigo == AccesoAgoraRepository.CODIGO_CUARENTENA) marcarCamaraEnCuarentena(atadura.bwcId)
+                            return@collectLatest
+                        }
+                        // Un perfil suspendido o revocado se trata como en la subida;
+                        // cualquier otro code (insufficient_scope...) no toca el token.
+                        sesionBackend.rechazada(e.codigo)
+                    }
+                }
+        }
+    }
+
+    /** Avisa a AeriaOne de que la atadura ha terminado (§6.2). Si no llega, caduca sola. */
+    private fun terminarAtaduraEnBackend(atadura: BindingActivo) {
+        val id = atadura.idEnBackend ?: return
+        // El token se lee ya: quien cierra la sesion lo olvida justo despues.
+        val token = sesionBackend.token() ?: return
+        scope.launch {
+            try {
+                AppContainer.iamClient.terminarAtadura(token, id)
+            } catch (e: IamException) {
+                Log.w(TAG, "AeriaOne no cerro la atadura de ${atadura.bwcId}: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Deshace la atadura (workflow 34): fin de turno, cierre de sesion, caducidad,
      * reasignacion o revocacion.
      *
@@ -568,10 +889,42 @@ class BodycamRepository(private val context: Context) {
      * con acercarse a la camara para dejar al agente sin atribucion en mitad de un
      * incidente, y la evidencia de ese rato no podria decir quien la grabo.
      */
-    fun desatar(motivo: BindingPeriferico.MotivoDeFin) {
-        val activo = _binding.value ?: return
+    /**
+     * El agente ha terminado con la camara (se cierra su sesion): se desata, se le
+     * retira el token prestado y se corta el enlace, por este orden.
+     *
+     * Cortar es lo que permite rotar la camara entre agentes: la W1 solo acepta un
+     * telefono a la vez, y el bucle de reconexion del telefono saliente la volveria
+     * a coger tras cualquier caida. Despues de esto no se vuelve a conectar sola:
+     * hace falta que un agente con sesion pulse conectar en el controlador.
+     *
+     * Lo que este grabando o emitiendo la camara sigue: vive en la W1, no en el
+     * enlace. La firma del fin se prepara aqui, en el hilo que llama, porque quien
+     * cierra la sesion retira la clave del agente justo despues.
+     */
+    fun soltar(motivo: BindingPeriferico.MotivoDeFin) {
+        val ordenDeFin = ordenDeDesatar(motivo)
+        val teniaToken = _enlaceAutenticado.value == EnlaceAutenticado.SI
+        scope.launch {
+            ordenDeFin?.let(::escribir)
+            if (teniaToken) escribir("TOKEN_CLEAR")
+            // Unos ms para que las dos lineas salgan del buffer antes de cerrar. Si
+            // se pierden, la W1 retira atadura y token igual al caerse el enlace.
+            delay(MARGEN_ANTES_DE_SOLTAR_MILLIS)
+            disconnect()
+            Log.i(TAG, "bodycam soltada al cerrar la sesion: ${motivo.name}")
+        }
+    }
+
+    /**
+     * Quita la atadura en vigor y devuelve la orden UNBIND firmada que hay que
+     * mandar a la camara, o null si no habia atadura o ya no se puede firmar.
+     */
+    private fun ordenDeDesatar(motivo: BindingPeriferico.MotivoDeFin): String? {
+        val activo = _binding.value ?: return null
         val credential = AppContainer.credentialRepository
         _binding.value = null
+        terminarAtaduraEnBackend(activo)
 
         if (!credential.puedeFirmarComoElAgente) {
             // Sin sesion no se puede firmar el fin. La atadura muere igual por
@@ -579,7 +932,7 @@ class BodycamRepository(private val context: Context) {
             // lo que se pierde es el aviso inmediato a la camara.
             Log.w(TAG, "sesion ya cerrada: la atadura de ${activo.bwcId} caducara sola")
             auditarDesatado(activo, motivo, firmado = false)
-            return
+            return null
         }
         val declaracion = BindingPeriferico.declaracionDeFin(
             bindingId = activo.bindingId,
@@ -588,15 +941,13 @@ class BodycamRepository(private val context: Context) {
         )
         val firma = credential.firmarRetoDeSesion(declaracion.toByteArray(Charsets.UTF_8))
         val codificador = Base64.getEncoder()
-        sendCommand(
-            listOf(
-                "UNBIND",
-                codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
-                codificador.encodeToString(firma),
-            ).joinToString(":"),
-        )
         Log.i(TAG, "atadura de ${activo.bwcId} deshecha: ${motivo.name}")
         auditarDesatado(activo, motivo, firmado = true)
+        return listOf(
+            "UNBIND",
+            codificador.encodeToString(declaracion.toByteArray(Charsets.UTF_8)),
+            codificador.encodeToString(firma),
+        ).joinToString(":")
     }
 
     /** Si el fin no va firmado, la camara no se entera hasta que caduque: queda escrito. */
@@ -664,6 +1015,7 @@ class BodycamRepository(private val context: Context) {
             return
         }
         when {
+            line.startsWith("PREVIEW_TOKEN") -> _respuestasTokenVisor.tryEmit(line)
             // STATUS:{json} — estado periodico de la bodycam.
             line.startsWith("STATUS:") -> {
                 try {
@@ -676,12 +1028,31 @@ class BodycamRepository(private val context: Context) {
                     fileServerIp = estado.optString("file_server_ip").takeIf { it.isNotEmpty() }
                     fileServerPort = estado.optInt("file_server_port", fileServerPort)
                     uidAgoraBodycam = estado.optInt("stream_uid").takeIf { it > 0 }
+                    unidadConectada = estado.optString("unit_id").takeIf { it.isNotEmpty() }
                 } catch (e: Exception) {
                     Log.w(TAG, "STATUS ilegible de la bodycam")
                 }
             }
+            // UPLOADS:[...] — estado de subida de cada incidente de la unidad.
+            // Respuesta a UPLOAD_LIST. Cancelar o reanudar contesta OK:, no una
+            // lista nueva: quien lo pida vuelve a llamar a pedirSubidas().
+            line.startsWith("UPLOADS:") -> atenderListaDeSubidas(line)
+            // Va antes que OK:/ERROR: a proposito: TRANSCRIPT_ERROR lleva el incidente
+            // y no es la respuesta generica de ningun otro comando.
+            line.startsWith("TRANSCRIPT") -> _lineasDeTranscripcion.tryEmit(line)
+            // TOKEN_OK / TOKEN_FAIL:<motivo> — respuesta a prestarToken().
+            // AGTOKEN_OK / AGKEY_OK / *_FAIL:<motivo>, respuesta a enviarAccesoAgora().
+            // El motivo es texto libre: se registra tal cual, no se interpreta.
+            line.startsWith("AGTOKEN_FAIL") || line.startsWith("AGKEY_FAIL") ->
+                Log.e(TAG, "la camara rechazo el acceso a Agora: $line")
+            line.startsWith("AGTOKEN_OK") || line.startsWith("AGKEY_OK") -> Log.i(TAG, "camara: $line")
+            line.startsWith("TOKEN_FAIL") -> Log.e(TAG, "la camara rechazo el token: $line")
+            line.startsWith("TOKEN_OK") -> Log.i(TAG, "la camara tiene el token")
             // Botones fisicos (BTN_STREAM_*, BTN_REC_*, BTN_PTT_ON/OFF).
             line.startsWith("BTN_") -> {
+                // Queda en el log porque es lo unico que dice, a posteriori, cuando
+                // se abrio o se cerro cada cosa en la camara (SOS, micro, grabacion).
+                Log.i(TAG, "Aviso de la camara: $line")
                 applyStateChange(line)
                 _buttonEvents.tryEmit(line)
             }
@@ -690,6 +1061,36 @@ class BodycamRepository(private val context: Context) {
                 applyStateChange(line)
                 _commandResponses.tryEmit(line)
             }
+        }
+    }
+
+    /** Pide a la bodycam la lista de subidas. La respuesta llega en [subidas]. */
+    fun pedirSubidas() = sendCommand("UPLOAD_LIST")
+
+    /**
+     * Cancela la subida de un incidente: corta la transferencia en curso y lo saca
+     * de la cola de reintentos de la bodycam. **No borra el video** — sigue en la
+     * unidad y [reanudarSubida] lo devuelve a la cola sin repetir un solo byte.
+     */
+    fun cancelarSubida(incidentId: String) = sendCommand("UPLOAD_CANCEL:$incidentId")
+
+    fun reanudarSubida(incidentId: String) = sendCommand("UPLOAD_RESUME:$incidentId")
+
+    private fun atenderListaDeSubidas(linea: String) {
+        try {
+            val array = JSONArray(linea.removePrefix("UPLOADS:"))
+            _subidas.value = (0 until array.length()).map { i ->
+                val o = array.getJSONObject(i)
+                SubidaDeEvidencia(
+                    id = o.optString("id"),
+                    entregada = o.optBoolean("delivered"),
+                    cancelada = o.optBoolean("cancelled"),
+                    pendiente = o.optBoolean("pending"),
+                    transcripcion = o.optString("transcript", "none"),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "UPLOADS ilegible de la bodycam")
         }
     }
 
@@ -722,6 +1123,10 @@ class BodycamRepository(private val context: Context) {
 
     private fun closeQuietly() {
         emparejamiento = null
+        synchronized(writeLock) {
+            canal = null
+            enEspera.clear()
+        }
         // La atadura NO sobrevive al enlace: un corte de Bluetooth es rutinario y
         // se recrea al reconectar, pero mientras no hay enlace la camara no esta
         // sirviendo a nadie y la interfaz no debe decir lo contrario.
@@ -729,6 +1134,7 @@ class BodycamRepository(private val context: Context) {
         _binding.value = null
         _enlaceAutenticado.value = EnlaceAutenticado.DESCONOCIDO
         _motivoDelEnlace.value = null
+        _camaraEnCuarentena.value = false
         try { output?.close() } catch (_: IOException) {}
         try { socket?.close() } catch (_: IOException) {}
         output = null
@@ -750,24 +1156,55 @@ class BodycamRepository(private val context: Context) {
      */
     fun streamPreviewFrames(rotationDegrees: Float): Flow<Bitmap> = flow {
         val ip = fileServerIp ?: return@flow
-        var conexion: HttpURLConnection? = null
+        if (!HttpEnRedLocal.esIpPrivada(ip)) {
+            Log.w(TAG, "La bodycam anuncia una IP que no es de red local: no se abre el visor")
+            return@flow
+        }
         try {
-            conexion = URL("http://$ip:$fileServerPort/preview/stream").openConnection() as HttpURLConnection
-            conexion.connectTimeout = FRAME_TIMEOUT_MILLIS
-            conexion.readTimeout = STREAM_READ_TIMEOUT_MILLIS
-            if (conexion.responseCode != HttpURLConnection.HTTP_OK) return@flow
-            val entrada = BufferedInputStream(conexion.inputStream)
-            while (true) {
-                val bytes = leerFrameMultipart(entrada) ?: break
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?.let { emit(rotarFrame(it, rotationDegrees)) }
+            val ruta = pedirTokenDelVisor()?.let { "/preview/stream?token=$it" } ?: "/preview/stream"
+            val conexion = HttpEnRedLocal.get(
+                ip, fileServerPort, ruta,
+                FRAME_TIMEOUT_MILLIS, STREAM_READ_TIMEOUT_MILLIS,
+            ) ?: return@flow
+            conexion.use {
+                val entrada = BufferedInputStream(it.cuerpo)
+                while (true) {
+                    val bytes = leerFrameMultipart(entrada) ?: break
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        ?.let { frame -> emit(rotarFrame(frame, rotationDegrees)) }
+                }
             }
         } catch (e: IOException) {
             Log.w(TAG, "Stream del visor cortado: ${e.message}")
-        } finally {
-            conexion?.disconnect()
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * Token de un solo uso para abrir el visor (iam-session.md §6.3, AUTH-002): sin el,
+     * cualquiera en la misma wifi podria ver la camara. Se pide uno por conexion.
+     *
+     * Null si no hay canal cifrado (la camara solo lo da por el) o no contesta a tiempo.
+     * Entonces se abre sin token: la camara lo acepta mientras no lo exija, y cuando lo
+     * exija contestara 401 y el visor no abrira, que es lo correcto.
+     */
+    private suspend fun pedirTokenDelVisor(): String? {
+        if (canal == null) return null
+        val linea = coroutineScope {
+            // Escuchando antes de pedir: la respuesta puede llegar antes de que first() empiece.
+            val respuesta = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(ESPERA_TOKEN_VISOR_MILLIS) { _respuestasTokenVisor.first() }
+            }
+            sendCommand("PREVIEW_TOKEN")
+            respuesta.await()
+        }
+        val token = linea?.takeIf { it.startsWith("PREVIEW_TOKEN:") }
+            ?.removePrefix("PREVIEW_TOKEN:")
+            ?.substringBefore(':')
+            ?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }
+        // El token no va al log: vale para abrir el visor durante 60 s.
+        if (token == null) Log.w(TAG, "la camara no dio token del visor: ${linea?.substringBefore(':') ?: "sin respuesta"}")
+        return token
+    }
 
     /**
      * Lee un frame del stream MJPEG: cabeceras de la parte (de donde sale
@@ -777,7 +1214,7 @@ class BodycamRepository(private val context: Context) {
     private fun leerFrameMultipart(entrada: BufferedInputStream): ByteArray? {
         var tamano = -1
         while (true) {
-            val linea = leerLinea(entrada) ?: return null
+            val linea = HttpEnRedLocal.leerLinea(entrada) ?: return null
             if (linea.startsWith("Content-Length:", ignoreCase = true)) {
                 tamano = linea.substringAfter(":").trim().toIntOrNull() ?: return null
             }
@@ -794,17 +1231,6 @@ class BodycamRepository(private val context: Context) {
         return datos
     }
 
-    /** Linea de texto terminada en \n (sin el \r\n), o null si el stream acabo. */
-    private fun leerLinea(entrada: BufferedInputStream): String? {
-        val bytes = StringBuilder()
-        while (true) {
-            val b = entrada.read()
-            if (b < 0) return null
-            if (b == '\n'.code) return bytes.toString().trimEnd('\r')
-            bytes.append(b.toChar())
-        }
-    }
-
     // Cada fuente de la bodycam entrega el frame con su propia orientacion;
     // el que colecta pasa los grados ajustados en campo para su fuente.
     private fun rotarFrame(frame: Bitmap, grados: Float): Bitmap {
@@ -815,6 +1241,9 @@ class BodycamRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "BodycamRepository"
+
+        // Espera entre las ultimas ordenes al soltar la camara y el cierre del socket.
+        private const val MARGEN_ANTES_DE_SOLTAR_MILLIS = 300L
 
         private const val FICHERO_PREFS = "aeria_bodycam"
         private const val CLAVE_MAC = "mac"
@@ -833,6 +1262,11 @@ class BodycamRepository(private val context: Context) {
         /** Lo que se espera a que la bodycam conteste al saludo antes de seguir sin el. */
         private const val PLAZO_EMPAREJAMIENTO_MILLIS = 6_000L
 
+        // Acceso de la camara a Agora (sos-and-proxy.md §2.7).
+        private const val REINTENTO_ACCESO_AGORA_MILLIS = 5 * 60_000L
+        private const val MARGEN_TOKEN_AGORA_MILLIS = 10 * 60_000L
+        private const val DURACION_TOKEN_AGORA_S = 12 * 60 * 60L
+
         private const val STATUS_POLL_MILLIS = 5_000L
         private const val WATCHDOG_CHECK_MILLIS = 3_000L
         private const val STALE_LINK_MILLIS = 12_000L
@@ -843,6 +1277,9 @@ class BodycamRepository(private val context: Context) {
         // La W1 empuja un frame cada ~150 ms; si en 5 s no llega nada, el
         // enlace esta muerto y conviene cortar para que el visor reintente.
         private const val STREAM_READ_TIMEOUT_MILLIS = 5_000
+
+        // La camara contesta al momento; si tarda mas, se abre el visor sin token.
+        private const val ESPERA_TOKEN_VISOR_MILLIS = 3_000L
 
         // Rotacion de los frames segun la fuente, ajustadas en campo:
         // visor de foto (2026-07-12: con 90 quedaba girada a la derecha).

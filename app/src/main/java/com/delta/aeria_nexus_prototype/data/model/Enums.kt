@@ -23,6 +23,12 @@ enum class SyncState(val label: String) {
     SYNCING("Syncing"),
     VERIFIED("Synced"),
     FAILED("Failed"),
+
+    /**
+     * El servidor la recibio integra pero no la guarda: va cifrada para la clave de
+     * pruebas (`key_rejected`, receipt-schema.md §5). Se conserva en el telefono.
+     */
+    REJECTED("Rejected"),
 }
 
 enum class EvidenceType {

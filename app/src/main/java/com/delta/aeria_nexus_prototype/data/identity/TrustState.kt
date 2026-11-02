@@ -96,6 +96,18 @@ enum class TrustBlockReason(
         nextStep = "Contact your supervisor to have a new credential issued.",
     ),
 
+    /**
+     * Workflow 53: la credencial llego a su fecha. No es una sancion como la
+     * revocacion, y el mensaje lo dice; si se estaba grabando, la grabacion se
+     * dejo terminar antes de llegar aqui (ver PoliticaDeCaducidad).
+     */
+    CERTIFICATE_EXPIRED(
+        title = "CREDENTIAL EXPIRED",
+        message = "The certificate that identifies you on this phone has reached its expiry " +
+            "date. Everything you captured is safe and encrypted on this device.",
+        nextStep = "Contact your supervisor to renew your credential and enroll the phone again.",
+    ),
+
     APP_INSTANCE_DISABLED(
         title = "INSTALLATION DISABLED",
         message = "This particular installation of Aeria Nexus has been disabled. Other phones " +

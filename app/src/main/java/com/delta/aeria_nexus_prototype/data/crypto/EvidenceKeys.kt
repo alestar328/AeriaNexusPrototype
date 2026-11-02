@@ -66,7 +66,7 @@ object EvidenceKeys {
      * la captura se cifra y se entrega igual, simplemente no es revisable en local.
      */
     fun recipients(): List<KeyWrapper> =
-        listOfNotNull(EvidenceVault.wrapper(), NexusKeyWrapper.fromApk())
+        listOfNotNull(EvidenceVault.wrapper(), NexusKeyWrapper.vigente())
 
     /** El primero de [recipients] capaz de abrir uno de los envoltorios del fichero. */
     fun unwrap(wraps: List<Pair<String, ByteArray>>): ByteArray? {
@@ -164,6 +164,12 @@ class DeviceKeyWrapper private constructor(private val alias: String) {
 
         /** Protege el verificador del PIN del agente (workflow 4). Otra clave, a propósito. */
         val identidad = DeviceKeyWrapper("aeria_identity_v1")
+
+        /** Protege la clave de la base de Room ([com.delta.aeria_nexus_prototype.data.local.BaseCifrada]). */
+        val baseDeDatos = DeviceKeyWrapper("aeria_database_v1")
+
+        /** Protege el token de reserva y las claves del canal de Agora ([com.delta.aeria_nexus_prototype.data.AccesoAgoraRepository]). */
+        val agora = DeviceKeyWrapper("aeria_agora_v1")
     }
 }
 
@@ -218,6 +224,33 @@ class NexusKeyWrapper private constructor(
             "giRW1AugkrA2rDNkRR/s5/770PuvrxDE/2F7PcMMQlBL/Dl+Tl6/l1zYb51QMvJ89w/eku7TAe7aD4Cx" +
             "9/lOaG0IQKqRd/zeuG0hubLDJC8ND9ARy8a47K9/Vgnl3uhrlE01HU37muzhbOCyMB9dxlZ6fLjTtfKG" +
             "VctsxIyD62iOYlQJ6XJJfbLv4HsxNZTz1iwnB11FXgKnbps/NXAdOPfYz5pyo7wSuQIDAQAB"
+
+        /**
+         * La clave de evidencia que manda AeriaOne en la sesion y en el alta
+         * (credential-lifecycle.md §2.4), como (kid, PEM de la publica). La cablea
+         * AppContainer; null si el servidor no la ha mandado nunca.
+         */
+        @Volatile
+        var recibida: (() -> Pair<String, String>?)? = null
+
+        /** Para la que se cifra: la recibida del servidor o, si no hay, la compilada. */
+        fun vigente(): NexusKeyWrapper? = recibida?.invoke()?.let { (kid, pem) -> desdePem(kid, pem) } ?: fromApk()
+
+        /**
+         * El `kid` del contrato ya lleva el prefijo (`srv:qpd-2026-11`) y aqui se anade
+         * al construir el id: se quita para no grabar `srv:srv:` en la cabecera.
+         */
+        private fun desdePem(kid: String, pem: String): NexusKeyWrapper? = try {
+            val spki = Base64.getMimeDecoder().decode(
+                pem.lines().filterNot { it.startsWith("-----") }.joinToString(""),
+            )
+            // Si no es una RSA valida se descubre aqui y no al cifrar la primera captura.
+            KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(spki))
+            NexusKeyWrapper(kid.removePrefix("srv:"), spki)
+        } catch (e: Exception) {
+            Log.e(TAG, "la clave de evidencia del servidor no vale, se usa la compilada: ${e.message}")
+            null
+        }
 
         fun fromApk(): NexusKeyWrapper? {
             if (PUBLIC_KEY_B64.isBlank() || KEY_ID.isBlank()) return null

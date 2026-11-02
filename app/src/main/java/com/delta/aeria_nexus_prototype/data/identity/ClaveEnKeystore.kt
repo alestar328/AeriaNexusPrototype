@@ -1,5 +1,6 @@
 package com.delta.aeria_nexus_prototype.data.identity
 
+import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
@@ -13,6 +14,8 @@ import java.security.PublicKey
 import java.security.Signature
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
+import java.io.File
+import java.util.Properties
 
 /**
  * Una clave del Keystore de Android, identificada por su alias.
@@ -35,10 +38,15 @@ import java.security.spec.ECGenParameterSpec
  * [generar] y en ningun otro sitio.
  */
 internal class ClaveEnKeystore private constructor(
-    private val alias: String,
+    /** Alias de la primera generacion. Las renovaciones van en `<base>.r<n>`. */
+    private val base: String,
+    /** 0 la del alta; cada renovacion suma uno (credential-lifecycle.md §1). */
+    private val generacion: Int,
     /** Como se nombra esta clave en los mensajes de error, p. ej. "del agente". */
     private val descripcion: String,
 ) {
+
+    private val alias: String = aliasDe(base, generacion)
 
     private val keystore: KeyStore
         get() = KeyStore.getInstance(PROVEEDOR).apply { load(null) }
@@ -228,12 +236,52 @@ internal class ClaveEnKeystore private constructor(
     }
 
     /**
-     * Destruye la clave. Es lo que exige el §13 al resetear: "reset must
-     * destroy/invalidate old local identity".
+     * Destruye la clave y todas sus generaciones. Es lo que exige el §13 al resetear:
+     * "reset must destroy/invalidate old local identity".
      */
     fun borrar() {
+        aliasDeLaFamilia(base).forEach { viejo -> runCatching { keystore.deleteEntry(viejo) } }
+        runCatching { fijarGeneracion(base, 0) }
+    }
+
+    /** Solo esta generacion: la de una renovacion que no llego a terminar. */
+    fun borrarSoloEsta() {
         runCatching { keystore.deleteEntry(alias) }
     }
+
+    /**
+     * Par nuevo para renovar el certificado (credential-lifecycle.md §1.2). No pasa a
+     * ser la vigente hasta [promover]: mientras, la vieja sigue firmando y abriendo sesion.
+     * Lo que quedase de una renovacion a medias se borra antes.
+     */
+    fun siguienteGeneracion(): ClaveEnKeystore {
+        aliasDeLaFamilia(base)
+            .filter { generacionDe(base, it) > generacion }
+            .forEach { sobrante -> runCatching { keystore.deleteEntry(sobrante) } }
+        return ClaveEnKeystore(base, generacion + 1, descripcion)
+    }
+
+    /** Esta generacion, ya con su certificado instalado, pasa a ser la vigente. */
+    fun promover() {
+        fijarGeneracion(base, generacion)
+    }
+
+    /**
+     * Borra las generaciones anteriores a esta. Se llama cuando la nueva ya se ha usado
+     * con exito: hasta entonces la vieja es la red si algo sale mal (§1.3).
+     */
+    fun borrarAnteriores() {
+        aliasDeLaFamilia(base)
+            .filter { generacionDe(base, it) < generacion }
+            .forEach { viejo -> runCatching { keystore.deleteEntry(viejo) } }
+    }
+
+    /** True si hay alguna generacion anterior pendiente de borrar. */
+    fun tieneAnteriores(): Boolean = aliasDeLaFamilia(base).any { generacionDe(base, it) < generacion }
+
+    private fun aliasDeLaFamilia(base: String): List<String> =
+        runCatching { keystore.aliases().toList() }.getOrDefault(emptyList())
+            .filter { it == base || it.startsWith("$base$SEPARADOR") }
 
     private data class Intento(val strongBox: Boolean, val conAtestacion: Boolean)
 
@@ -243,10 +291,56 @@ internal class ClaveEnKeystore private constructor(
 
         private const val CURVA = "secp256r1"
 
+        private const val BASE_TERMINAL = "aeria.device.key"
+        private const val BASE_AGENTE = "aeria.user.key"
+        private const val SEPARADOR = ".r"
+
+        /**
+         * Que generacion de cada clave es la vigente. El Keystore no deja renombrar una
+         * entrada, asi que renovar crea otra con alias nuevo y esto apunta a ella. En
+         * noBackupFilesDir: como la clave, no debe viajar a otro telefono. Sin fichero
+         * (telefonos anteriores a la renovacion) la vigente es la primera.
+         */
+        @Volatile
+        private var ficheroDeGeneraciones: File? = null
+
+        /** Lo llama AppContainer antes de que nadie use una clave. */
+        fun iniciar(context: Context) {
+            ficheroDeGeneraciones = File(context.noBackupFilesDir, "claves_vigentes.properties")
+        }
+
         /** Identidad del TELEFONO (workflow 12). Se genera con reto de atestacion. */
-        val terminal = ClaveEnKeystore(alias = "aeria.device.key", descripcion = "del terminal")
+        val terminal: ClaveEnKeystore
+            get() = ClaveEnKeystore(BASE_TERMINAL, generacionVigente(BASE_TERMINAL), "del terminal")
 
         /** Identidad del AGENTE (workflow 3). Nunca es la misma que la del terminal. */
-        val agente = ClaveEnKeystore(alias = "aeria.user.key", descripcion = "del agente")
+        val agente: ClaveEnKeystore
+            get() = ClaveEnKeystore(BASE_AGENTE, generacionVigente(BASE_AGENTE), "del agente")
+
+        private fun aliasDe(base: String, generacion: Int): String =
+            if (generacion == 0) base else "$base$SEPARADOR$generacion"
+
+        private fun generacionDe(base: String, alias: String): Int =
+            if (alias == base) 0 else alias.removePrefix("$base$SEPARADOR").toIntOrNull() ?: -1
+
+        private fun leerGeneraciones(): Properties = Properties().apply {
+            ficheroDeGeneraciones?.takeIf { it.isFile }?.let { f -> runCatching { f.inputStream().use(::load) } }
+        }
+
+        private fun generacionVigente(base: String): Int = leerGeneraciones().getProperty(base)?.toIntOrNull() ?: 0
+
+        @Synchronized
+        private fun fijarGeneracion(base: String, generacion: Int) {
+            val fichero = ficheroDeGeneraciones ?: error("ClaveEnKeystore.iniciar() no se ha llamado")
+            val props = leerGeneraciones().apply { setProperty(base, generacion.toString()) }
+            fichero.outputStream().use { props.store(it, null) }
+        }
+
+        /**
+         * El nombre comun del certificado que AeriaOne emitio a este terminal (DEV-xxxx).
+         * Null antes del alta: el Keystore guarda uno provisional de Android sin el prefijo.
+         */
+        fun deviceIdDelTerminal(): String? =
+            runCatching { terminal.commonNameDelCertificado() }.getOrNull()?.takeIf { it.startsWith("DEV-") }
     }
 }

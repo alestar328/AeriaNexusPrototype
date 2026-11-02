@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.model.ActiveIncident
 import com.delta.aeria_nexus_prototype.data.model.EvidenceClass
@@ -252,6 +254,10 @@ fun ActiveIncidentScreen(
         }
     }
 
+
+    if (uiState.isTranscribing) {
+        TranscribingDialog()
+    }
 
     if (uiState.pendingEvidence != null) {
         ClassifySheet(
@@ -634,6 +640,39 @@ private fun ClassifySheet(onClassify: (EvidenceClass) -> Unit, onSkip: () -> Uni
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/**
+ * Mientras se transcribe la grabacion recien cerrada. No se puede cerrar: dura
+ * como mucho el tope del ViewModel y despues sale sola la hoja de clasificacion.
+ */
+@Composable
+private fun TranscribingDialog() {
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+    ) {
+        CardSurface {
+            Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = AzulClaro, modifier = Modifier.size(40.dp))
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "TRANSCRIBING AUDIO",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "The evidence is already saved. Classification opens in a moment.",
+                    color = TextoSecundario,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }

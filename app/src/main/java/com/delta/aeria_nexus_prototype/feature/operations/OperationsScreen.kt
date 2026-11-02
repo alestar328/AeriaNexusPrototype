@@ -1,8 +1,11 @@
 package com.delta.aeria_nexus_prototype.feature.operations
 
 import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -29,9 +32,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -54,8 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.R
+import com.delta.aeria_nexus_prototype.ui.components.PttToggleButton
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
-import com.delta.aeria_nexus_prototype.ui.theme.AmbarRevision
 import com.delta.aeria_nexus_prototype.ui.theme.AzulClaro
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteFin
 import com.delta.aeria_nexus_prototype.ui.theme.AzulGradienteInicio
@@ -109,6 +110,25 @@ fun OperationsScreen(
         onOpenSosLivestream()
     }
 
+    // La ubicacion del incidente se toma al abrirlo. Si falta el permiso se pide en
+    // ese momento, y el incidente se abre aunque se niegue: sin ubicacion se trabaja
+    // igual, y el incidente lo dice en vez de inventarla.
+    val context = LocalContext.current
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { onOpenActiveIncident(viewModel.createIncident()) }
+    val abrirIncidenteNuevo = {
+        val tienePermiso = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (tienePermiso) {
+            onOpenActiveIncident(viewModel.createIncident())
+        } else {
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
     // Los indicadores de bodycam y gafas de la barra superior no valen nada sin
     // el permiso de Bluetooth: sin el, Android no entrega los avisos de conexion
     // y los iconos se quedan en gris con los aparatos puestos y funcionando. Se
@@ -147,7 +167,7 @@ fun OperationsScreen(
             ) {
                 NewIncidentButton(
                     compacto = compacto,
-                    onClick = { onOpenActiveIncident(viewModel.createIncident()) },
+                    onClick = abrirIncidenteNuevo,
                     modifier = Modifier.weight(1f),
                 )
                 ContinueIncidentButton(
@@ -172,7 +192,7 @@ fun OperationsScreen(
         // El PTT va a lo ancho y pegado al SOS, con el mismo peso visual: son
         // las dos cosas que el agente puede necesitar pulsar sin mirar.
         Spacer(Modifier.height(10.dp))
-        PttButton(
+        PttToggleButton(
             activo = pttActivo,
             pisadoPor = pttPisadoPor,
             onClick = {
@@ -362,94 +382,6 @@ private fun RadioActionButton(
                 tint = AzulClaro,
                 modifier = Modifier.size(if (compacto) 28.dp else 36.dp),
             )
-        }
-    }
-}
-
-/**
- * PTT del propio telefono: una pulsacion abre el canal y otra lo cierra.
- *
- * Es un conmutador desde el 2026-09-15, como el de la bodycam: el agente no
- * tiene que tener la mano en la pantalla mientras habla. El precio es el fallo
- * clasico de la radio, dejarse el microfono abierto, y por eso el boton late
- * mientras transmite y los tonos de abrir y cerrar son distintos.
- *
- * El indicador se enciende con lo que el repositorio confirma haber abierto, no
- * con la pulsacion: un boton que dice ON AIR sin que salga voz es peor que uno
- * que no responde, porque el agente cree que le estan oyendo.
- *
- * [pisadoPor] no es null cuando otro agente habla a la vez: el boton pasa a ambar,
- * con icono de aviso y el nombre de quien pisa. Acompana al triple pitido de
- * PttTones.pisando(); el color solo no bastaria con sol en la pantalla.
- */
-@Composable
-private fun PttButton(
-    activo: Boolean,
-    pisadoPor: String?,
-    onClick: () -> Unit,
-) {
-    val pisado = activo && pisadoPor != null
-    val colorAcento = when {
-        pisado -> AmbarRevision
-        activo -> AzulClaro
-        else -> AzulPrimario.copy(alpha = 0.2f)
-    }
-    val colorFondo = when {
-        pisado -> AmbarRevision.copy(alpha = 0.18f)
-        activo -> AzulPrimario.copy(alpha = 0.35f)
-        else -> AzulOscuroPanel
-    }
-
-    // Late mientras se transmite, como el SOS: tiene que verse de reojo.
-    val latido by rememberInfiniteTransition(label = "pttLatido").animateFloat(
-        initialValue = 1f,
-        targetValue = 0.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 600),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pttLatido",
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 72.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(colorFondo)
-            .border(if (pisado) 2.dp else 1.dp, colorAcento, RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Icon(
-                if (pisado) Icons.Filled.Warning else Icons.Filled.Mic,
-                contentDescription = if (pisado) "Another officer is talking" else "Push to talk",
-                tint = if (pisado) AmbarRevision else AzulClaro,
-                modifier = Modifier
-                    .size(26.dp)
-                    .alpha(if (activo) latido else 1f),
-            )
-            Column {
-                Text(
-                    text = if (activo) "ON AIR — TAP TO STOP" else "PTT — TAP TO TALK",
-                    color = if (activo) colorAcento else TextoSecundario,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 1.sp,
-                )
-                if (pisado) {
-                    Text(
-                        text = "$pisadoPor ALSO ON AIR",
-                        color = AmbarRevision,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
         }
     }
 }

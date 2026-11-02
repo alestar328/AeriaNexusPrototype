@@ -2,10 +2,12 @@ package com.delta.aeria_nexus_prototype.feature.lock
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.delta.aeria_nexus_prototype.data.identity.EstadoDeCaducidad
+import com.delta.aeria_nexus_prototype.data.identity.FaseDeCaducidad
+import com.delta.aeria_nexus_prototype.data.identity.IamClient
+import com.delta.aeria_nexus_prototype.data.identity.PoliticaDeCaducidad
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
-import com.delta.aeria_nexus_prototype.data.identity.PropositoDelReto
 import com.delta.aeria_nexus_prototype.data.identity.ProvisionedIdentity
-import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
 import com.delta.aeria_nexus_prototype.data.identity.TrustState
 import com.delta.aeria_nexus_prototype.data.identity.UnlockResult
 import kotlinx.coroutines.Dispatchers
@@ -27,8 +29,10 @@ data class LockUiState(
     val attemptsLeft: Int = IdentityRepository.MAX_ATTEMPTS,
     /** Segundos que faltan para poder volver a intentarlo. 0 = teclado libre. */
     val lockoutSeconds: Int = 0,
-    /** Quien emitio el reto que espera firma, si hay uno. */
-    val emisorDelRetoPendiente: String? = null,
+    /** Hay servidor AeriaOne: el PIN, ademas de abrir, firmara su reto. */
+    val conAeriaOne: Boolean = false,
+    /** Dias que le quedan a la credencial si esta a punto de caducar (workflow 53); null si no. */
+    val diasParaCaducar: Long? = null,
     val mensajeError: String? = null,
 )
 
@@ -41,13 +45,14 @@ data class LockUiState(
  */
 class LockViewModel(
     private val identity: IdentityRepository,
-    private val retos: RetoRepository,
+    iam: IamClient,
+    caducidad: StateFlow<EstadoDeCaducidad>,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
-        // El reto se mira al construir la pantalla y no en cada recomposicion: es
-        // una lectura de disco y el estado no cambia mientras se teclea el PIN.
-        LockUiState(emisorDelRetoPendiente = retos.pendiente(PropositoDelReto.LOGIN)?.emisor),
+        // Se mira al construir la pantalla y no en cada recomposicion: es una
+        // lectura de disco y no cambia mientras se teclea el PIN.
+        LockUiState(conAeriaOne = iam.configurado()),
     )
     val uiState: StateFlow<LockUiState> = _uiState.asStateFlow()
 
@@ -61,6 +66,16 @@ class LockViewModel(
                         attemptsLeft = status.attemptsLeft,
                     )
                 }
+            }
+        }
+        // Se avisa aqui, al empezar el turno, y no con una banda fija: dos semanas
+        // de aviso permanente acabarian sin leerse.
+        viewModelScope.launch {
+            caducidad.collect { estado ->
+                val dias = estado.caducaEn
+                    ?.takeIf { estado.fase == FaseDeCaducidad.POR_CADUCAR }
+                    ?.let { PoliticaDeCaducidad.diasRestantes(it, System.currentTimeMillis()) }
+                _uiState.update { it.copy(diasParaCaducar = dias) }
             }
         }
         // Cuenta atras del bloqueo temporal. El agente tiene que ver que el tiempo

@@ -6,32 +6,1250 @@ Este archivo es la fuente de verdad para retomar el desarrollo en cualquier sesi
 
 ---
 
-## 2026-11-01 — Label de la status line de Claude Code
+## 2026-11-02 (6) — Release 1.22 (code 23) generado a petición del usuario
 
-Creado `.claude/statusline-label` (líneas: `App Movil` / `celeste` / `blue`) para que la status
-line global (`~/.claude/statusline.ps1`) muestre "App Movil" en azul sobre celeste en este repo.
-Sin cambios en la app. Pendiente: decidir si `.claude/` se sube a git o se ignora.
+`app/build/outputs/apk/release/app-release.apk` (159 MB), firmado con la clave FalconOne
+(SHA-256 ddc59fd4…57ba). En este ordenador el keystore está en `C:/Users/lilia/.android/
+falconone-release.jks` (local.properties actualizado). version.properties pasa a 1.23 (code 24).
+Ojo: el release no permite http (network_security_config), así que no habla con el backend
+local http://192.168.0.20:8000; para eso, debug.
 
-### Diagnóstico para el backend: baja definitiva de usuario (offboard)
+## 2026-11-02 (5) — Incidente que no sale en el Redmi: la app se instaló de cero a las 13:42
 
-Consulta de la sesión del backend; solo se respondió, sin tocar código. Se leyó la rama
-`origin/dev_back_connection` (b1aa978): `main` está desfasada respecto al trabajo real.
-- `profile_revoked`: `CorteDelPerfil.REVOCADO` deja la sesión solo local, sin token y con el aviso
-  ProfileCutDialog. No pide `sos_only` y no borra nada. En subida y SOS solo se detecta si el 401/403
-  trae la cabecera `X-Error-Code`.
-- La evidencia pendiente del revocado se queda en el teléfono. Si entra otro agente, se sube con
-  su sesión y con su `officer_code`, porque la placa se toma al subir. Hay que sellar la autoría al
-  capturar.
-- No hay un "retirar solo al agente" alcanzable desde la app. El asistente sí reutiliza el
-  terminal con un QR del mismo servidor, pero no se llega a él.
-- No se consulta `/api/iam/revocations` ni `/api/iam/identity`.
+`firstInstallTime=13:42:40`: los datos de la app se borraron (desinstalación; nuestros `install -r`
+no lo hacen). Base, `.fev`, bóveda vieja y alta anteriores se perdieron en el teléfono; el
+incidente sigue en el backend. Alta por QR rehecha a las 13:43 y `vault.key` creada a las 13:43
+sin pasos extra: la bóveda con el PIN funciona. El móvil no descarga incidentes del backend
+(Incidents = solo Room local); traerlos sería un cambio nuevo con contrato.
 
-Pendiente en la app (si se encarga): retirar al agente conservando el terminal y sellar la
-autoría de la evidencia al capturar.
+## 2026-11-02 (4) — El mapa cerraba la app: local.properties sin claves
 
-**Encargado por el backend el mismo día**, a la espera de que el usuario lo apruebe. Se hará en
-dev_back_connection: sidecar con la autoría al capturar (`officer_user_id` + `officer_code` en
-Upload-Metadata) y "retirar agente" en ProfileCutDialog. El backend ya lo acepta (iam-session.md §9.6).
+`local.properties` se regeneró el 28-oct y solo tiene `sdk.dir`: faltan `MAPBOX_ACCESS_TOKEN`,
+`AGORA_APP_ID` (y `PAIS_PERIFERICOS`, que es PH para las gafas). No queda copia en el disco. Sin
+el token, Mapbox lanzaba `MapboxConfigurationException` y la app se cerraba al abrir el mapa;
+ahora `MapScreen` enseña un aviso en su lugar. Las claves las tiene que volver a poner el usuario.
+Recuperadas del `local.properties` del otro ordenador y copiadas aquí (Mapbox, Agora, MACs, PH,
+firma). El keystore `falconone-release.jks` NO está en este ordenador: la ruta apunta a
+`C:/Users/lilia/.falconone/`, hay que copiarlo antes de cualquier release.
+
+## 2026-11-02 (3) — Bóveda con el PIN: una sola contraseña (decisión del usuario)
+
+Pedido del usuario tras crear un incidente antes que la bóveda (la evidencia quedó `NO KEY`).
+Compila y pasan los tests; instalado en el Redmi, **sin probar**.
+
+- `IdentityRepository.unlock()` → `abrirBoveda(pin)`: sin bóveda la crea con el PIN
+  (`BOVEDA_CREADA`); con bóveda de PIN la abre con la sesión (`BOVEDA_ABIERTA`). Se sella al
+  cerrar sesión como siempre. Como el alta entra por `unlock()`, la bóveda existe antes de
+  poder capturar nada.
+- `vault.key` lleva `"opens_with": "pin"`; `EvidenceVault.abreConPin`. Las bóvedas de antes
+  (sin el campo) siguen con su contraseña propia y su «Forgot password?».
+- `cambiarPin()`: vuelve a cifrar la bóveda con el nuevo PIN antes de guardar el PIN
+  (`EvidenceVault.cambiarContrasena`, escribe en `.tmp` y renombra) y lo deshace si el PIN no
+  se guarda.
+- Pantalla de la bóveda: ya no hay formulario de crear (`crearBoveda` y `LONGITUD_MINIMA`
+  retirados). Bloqueada a mano, se abre con el PIN, que pasa por `comprobarPinActual`
+  (`via = vault_unlock`, cuenta para el límite de intentos). El reinicio por contraseña
+  olvidada crea ya la bóveda nueva con el PIN.
+- Riesgo aceptado: quien vea el PIN abre también la evidencia del teléfono (antes se descartó
+  por eso; el usuario prefiere la sencillez «de momento»).
+- Probar: alta nueva (bóveda creada sin pasos extra), captura abrible, LOCK + PIN, cambio de
+  PIN y abrir con el nuevo; en el Redmi la bóveda actual es antigua → «Forgot password?» la
+  pasa a PIN (lo grabado antes queda NO KEY en el teléfono, no en Nexus).
+
+## 2026-11-02 (2) — Cifrado IAM, encargo del backend (aeria-nexus-dc): A, B, E, D y C hechos (sin aparato)
+
+Encargo con cinco puntos, orden A → B → E → D → C (contratos en aeria-contracts, CHANGELOG
+2026-11-02). Respuestas a la baja: la bóveda del agente retirado SÍ se cambia (el nuevo crea
+la suya, lo cifrado no se toca), y la baja se prueba en el backend local 192.168.0.20:8000.
+
+### A. El agente sale de la sesión, no de OfficerSampleData (compila, sin probar en aparato)
+- `IncidentRepository.agenteDeLaSesion()` lee `PerfilDelAgente` (el perfil de AeriaOne). Nombre
+  y placa del incidente (y por tanto del manifiesto phone-incident/1) salen de ahí; vacíos si
+  AeriaOne aún no ha mandado perfil. `PerfilDelAgente` se crea ahora antes que los incidentes.
+- SOS y PTT (Operations, Active Incident, Livestream) mandan la placa de la sesión. El aviso al
+  backend del SOS de la bodycam ya no manda la placa falsa `BODYCAM`.
+- `SosNotifier`: `device_id` = CN del certificado del terminal (`ClaveEnKeystore.deviceIdDelTerminal()`),
+  no ANDROID_ID; sin alta o sin placa, se omiten.
+- Ficha propia del directo desde el perfil (sin grupo sanguíneo: AeriaOne no lo da; filas vacías ocultas).
+- "FL" en la línea de tiempo solo si el mando de las gafas está LISTO (antes salía siempre).
+- Retirado `OfficerProfile` y `OfficerSampleData.profile`. Queda el padrón de placas solo para
+  rotular el SOS de otros agentes.
+
+### B. Sello evidence-seal/1 (compila y pasan los tests, sin probar contra el backend)
+- `data/upload/SelloDeEvidencia.kt`: JSON firmado con la clave del TERMINAL (ECDSA P-256),
+  `seal` (JSON en base64) y `seal_sig` (DER en base64) en Upload-Metadata. `cert_serial` en hex
+  minúsculas, `binding_id` "", `principal` = autoría sellada (el que grabó) o, sin ella, el agente
+  de ahora. `recorded_by: goggles` si el fichero empieza por `gafas_` (vídeo, proxy y transcripción).
+- Se sellan evidence, proxy, transcript y el manifiesto (este va en claro: sha256_plain = cipher).
+- `captured_at` se guarda en los datos de cada pieza la primera vez (≈ cierre de la captura);
+  en el manifiesto es la fecha del `.author.json`. Sin certificado de terminal no hay sello.
+- Recibo con `seal` distinto de `verified`: aviso en el log. Tests: `SelloDeEvidenciaTest` (4).
+
+### E. key_rejected pintado como rechazado
+- `SyncState.REJECTED` ("Rejected", rojo). `estadoTrasEntregar()` en EvidenceUploader lo usa en la
+  entrega y en `reconcile()`. La regla de borrado no cambia (solo `accepted`), así que los recibos
+  con `flags` se tratan igual que sin ellos.
+
+Nota: en la consola de Claude hay que exportar `JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"`
+para que gradlew compile.
+
+### D. Ciclo de vida de credenciales (compila y pasan los tests, sin probar contra el backend)
+- `ClaveEnKeystore`: generaciones por alias (`aeria.device.key`, `.r1`, `.r2`…); el Keystore no
+  deja renombrar. La vigente la apunta `noBackupFilesDir/claves_vigentes.properties`
+  (`ClaveEnKeystore.iniciar()` en AppContainer). `borrar()` borra todas las generaciones.
+- `RenovacionDeCertificados`: reto RENOVACION, par nuevo, CSR con el mismo sujeto, firma con la
+  VIGENTE sobre nonce||csr_der, `POST iam/certificates/renew`; promueve la nueva solo con el
+  certificado instalado. Si faltan ≤30 días o `renew_required`; un intento al día. Agente solo
+  con el PIN puesto. Las generaciones viejas se borran al abrirse la siguiente sesión.
+- Sesión y altas: `credentials`, `device_ca_pems`/`user_ca_pems` y `evidence_key` (IamClient).
+  Las CA de dispositivos se guardan y el emparejamiento acepta cualquiera (test nuevo de CA rotada).
+  `NexusKeyWrapper.vigente()`: cifra para la `evidence_key` de AeriaOne (kid con "srv:", se quita
+  al construir el id); si no vale o no hay, la compilada.
+- Códigos: `device_quarantined`, `certificate_expired`, `certificate_superseded` → cortes nuevos
+  en ProfileCutDialog (no reintenta, no borra). `device_decommissioned` → cierra sesión y
+  `destruirIdentidadLocal()`; los .fev se quedan. Auditoría: CERTIFICADO_RENOVADO/NO_RENOVADO,
+  TERMINAL_EN_CUARENTENA, TERMINAL_RETIRADO.
+- Bóveda del agente retirado (decisión del usuario 2-nov): `EvidenceVault.archivarDelAgenteRetirado()`
+  aparta `vault.key` (no lo borra) al REMOVE OFFICER; el siguiente crea la suya.
+- Cuarentena (decisión del usuario, confirmada por el backend): NO se suelta el token; la sesión
+  ya abierta sigue subiendo (AeriaOne la acepta y la marca) y no se renueva. Con
+  `device_decommissioned` sí se suelta.
+- CAS:/EVKEY: por BT quedaron fuera del contrato (la cámara pide las CA a GET iam/trust-anchors).
+
+### C. Agora con token, uid asignado y cifrado (compila y pasan los tests, sin aparato ni backend vivo)
+- `data/AccesoAgoraRepository.kt`: `POST agora/token` al abrirse cada sesión (también sos_only).
+  Guarda la última respuesta cifrada con `DeviceKeyWrapper.agora` en `noBackupFilesDir/agora_acceso.bin`
+  para el SOS sin backend. `tokenPara()`: normal → reserva → ninguno; `claveEn()`: por la hora.
+- `AgoraRepository.entrarAlCanal()`: uid de AeriaOne (sin acceso, aleatorio como antes), token
+  (null = sin certificado) y `enableEncryption(AES_256_GCM2)` con key hex tal cual, salt de 32 bytes
+  y data stream cifrado; sin `encryption`, en claro. Otro uid u otra clave → salir y entrar; solo
+  token → `renewToken`. Durante un SOS no cambia el uid (se adopta al cancelar). Revisión cada
+  minuto: cambio de clave del lunes y token caducado. `onTokenPrivilegeWillExpire` pide otro;
+  `onRequestToken` usa la reserva si no hay backend.
+- Cámara (`BodycamRepository.prestarAccesoAgora()`): con enlace autenticado (canal cifrado v2),
+  sesión y atadura registrada, pide `{bwc_id}` y manda `AGTOKEN:` y un `AGKEY:` por clave con tiempos
+  relativos; se repite antes de caducar el token y al empezar la clave siguiente, y al reconectar.
+  AGTOKEN_OK/AGKEY_OK/…_FAIL se registran en el log sin interpretar.
+- Cámara en cuarentena (403 device_quarantined al atarla o al pedir su token): aviso
+  "QUARANTINED" en la barra superior; ya no corta la sesión del teléfono como si fuera él.
+- Tests: `AccesoAgoraTest` (3).
+
+### Pendiente
+- Prueba conjunta con el Redmi y el backend local (192.168.0.20:8000), reenrolando con QR de ese PC.
+- Dudas resueltas por el backend: se entra al `channel` de la respuesta (firma falcon_group_channel;
+  el compilado queda de reserva); agora/token manda el código en cabecera y cuerpo; un rechazo con
+  `device_id` es de la cámara (no corta la sesión del teléfono; IamException.dispositivo).
+- Mensaje de commit propuesto: "cifrado iam: agente de la sesion, sello de evidencia, renovacion de certificados, cuarentena y agora con token y cifrado".
+
+- Prueba en el Redmi: la app caía al arrancar (NullPointerException en un `combine`): `BodycamRepository` lanzaba `prestarToken()`/`prestarAccesoAgora()` en un `init` situado antes de declarar `_enlaceAutenticado` y `_binding`. Movidos al `init` de después; ya arranca. Falta `AGORA_APP_ID` en `local.properties` (sin él no hay Agora ni SOS por directo).
+
+## 2026-11-02 — Baja de usuario en el teléfono: autoría sellada y «retirar agente»
+
+Encargo del backend (aeria-nexus-8f), que ya tiene hecho `POST /api/users/<id>/offboard/`
+(iam-session.md §9.6). Primer trabajo en el equipo nuevo, que estaba en `main`: se pasó a
+`dev_back_connection` con permiso del usuario. Compila y pasan los tests unitarios. **Sin
+probar en aparato**, porque falta dar de baja a un agente de prueba en el backend.
+
+### 1. Autoría sellada al guardar, no al subir
+- Nuevo `data/upload/AutoriaDeEvidencia.kt`. Guarda el user_id de la credencial instalada y la
+  placa, dentro de los datos que ya acompañan a cada pieza (`.evidence.json`, `.proxy.json` y
+  `.data.json`). El manifiesto lleva un `.author.json` propio.
+- Si los datos ya tenían autoría, se conserva: una pieza se vuelve a encolar al clasificarla o
+  al cifrarla tarde, y el agente puede haber cambiado.
+- Al subir: `officer_user_id` y `officer_code` salen de lo sellado. Sin autoría sellada (lo
+  anterior al cambio) se sube como antes, solo con la placa de ahora.
+- `AppContainer.agenteActual()` sustituye a la lambda `placaDelAgente`.
+- Test: `AutoriaDeEvidenciaTest` (5 casos).
+
+### 2. «Retirar agente» desde el aviso PROFILE REVOKED
+- `IdentityRepository.retirarAgente()`, solo con el corte REVOCADO:
+  - cierra la sesión con motivo REVOCACION (suelta la cámara con la clave aún viva);
+  - borra la credencial, el PIN, el perfil y las claves `credencial` y `user_id`;
+  - audita AGENTE_RETIRADO;
+  - recalcula el estado: ENROLLING por el tramo del agente.
+  Conserva la clave del terminal, la bóveda y el QR guardado, que lleva la dirección del
+  servidor y no se puede borrar.
+- `ProfileCutDialog`: con REVOCADO, «CHECK AGAIN» pasa a ser «REMOVE OFFICER», con
+  confirmación. El texto ya no promete subir «cuando se reactive el perfil».
+- `EnrollmentViewModel`: con el terminal dado de alta y el QR con el código ya gastado, pide
+  un QR nuevo en vez de reintentar solo con el agente anterior. La pantalla dice "NO OFFICER ON
+  THIS PHONE" en lugar de "DEVICE NOT ENROLLED".
+
+### Pendiente
+- Probar en el Redmi: dar de baja a un agente de prueba → aviso → REMOVE → QR de otro agente →
+  PIN → lo pendiente sube con el `officer_user_id` del primero.
+- Bóveda: sigue siendo la del agente retirado, y lo que capture el siguiente se cifra también
+  para ella. El backend está de acuerdo en quitarla como destinataria de lo nuevo al retirar
+  (sin tocar lo ya cifrado), pero **espera la confirmación del usuario**.
+- La prueba en el Redmi depende de otra decisión del usuario: la baja solo está en el backend
+  local (192.168.0.20:8000), y escanear un QR de otro servidor borra la identidad del Redmi.
+- El backend confirma que el user_id de la credencial es el `principal` de `_quien_grabo`.
+- Las piezas que se cifran en el momento de retirar (transcripción o proxy a medias) quedan sin
+  autoría y saldrán como antes.
+
+---
+
+## 2026-11-01 — Revisión del Seguimiento IAM contra el código (para el backend, sin código)
+
+Encargo de la sesión del backend (aeria-nexus-0a): contrastar `Seguimiento-IAM-AeriaOne.xlsx`
+(congelado al 25-sep) con el código de hoy y contar qué queda del cifrado. **El xlsx no se toca**:
+lo edita el backend para añadir la columna Backend. La lista de filas que cambian se le mandó por mensaje.
+
+- Pasan a Parcial: wf 25, 53 y 65; IAM-07 e IAM-09. En Catalogo-68, el 27 pasa a Hecho y el 28 y el 29 a Parcial.
+  Probados en aparato: 3, 12, 27 y la sesión del 28 (Redmi, 19 y 27-oct).
+- **Hallazgos nuevos:** el manifiesto `phone-incident/1` y la placa del SOS/PTT siguen saliendo de
+  `OfficerSampleData.profile` (Carlos Mendez / P-4471); `SosNotifier` manda `device_id = ANDROID_ID`
+  y no el DEV-xxxx del certificado; el teléfono no verifica la firma del recibo del servidor.
+- Cifrado: nada nuevo desde el 25-oct. No hay pruebas formales en aparato; el 27-oct, el alta https
+  contra Azure sirve solo de indicio. El canal BT v2 sigue en modo transición, FLAG_SECURE
+  sigue en «todavía no» y el PCM de Whisper sigue aplazado.
+
+**Mismo día, segunda tanda (aeria-contracts CHANGELOG 2026-11-01 y (2)):**
+- Recibo `key_rejected`: el teléfono ya cumple (`EvidenceUploader.aceptado()` solo borra con
+  `accepted`). Pero lo mostraría como subido: hay que pintarlo como rechazado antes de encender
+  `EVIDENCE_REJECT_DEV_KEYS`.
+- Propuestas leídas y comentadas al backend, **sin implementar** (esperan al usuario):
+  `evidence-seal.md` (verificar la firma sobre los bytes de `seal`, quién es el `principal` en el
+  teléfono, gafas, sellado tardío) y `sos-and-proxy.md` §2.7 (con el certificado de Agora, el SOS
+  pasa a depender del backend; uid aleatorio del teléfono; token y clave de la W1 por el canal v2;
+  rotación de la clave a medianoche UTC).
+- El seguimiento ya lo actualizó el backend (hoja `Revision-2026-11-01`, D9-D11); copia previa en
+  `Seguimiento-IAM-AeriaOne.backup-2026-11-01.xlsx`.
+
+- Tercera tanda: el backend reescribió `evidence-seal.md` y §2.7 con estos puntos. Quedan
+  abiertos la rotación de la clave de Agora y qué recibe una sesión `sos_only`. Si el SOS puede
+  depender del backend es la decisión 7 del documento del usuario.
+
+**Próximo paso:** que el usuario decida (1) arreglar el agente de ejemplo del manifiesto y el SOS
+(va antes que el sello), (2) el sello y (3) Agora con tokens.
+
+---
+
+## 2026-10-27 — Primera alta por QR contra el servidor de Azure (nexus.aeriaone.com)
+
+Sin cambios de código en la app; diagnóstico junto a la sesión del backend.
+
+- **Alta del agente fallaba con 500** en `POST /api/iam/users/enroll`: `NotSupportedError: FOR UPDATE
+  cannot be applied to the nullable side of an outer join` (PostgreSQL de Azure; en local era SQLite).
+  Arreglo del backend: `select_for_update(of=("self",))` en `iam_views.py:450`. Primero se commiteó en
+  `dev_whisper_text` y no se desplegó; desplegado tras el merge a main (bc460f6). La fase del terminal
+  ya iba bien.
+- **La app sí limpia la identidad anterior** al escanear un QR de otro servidor (`onQrLeido`).
+  Ojo: `upload.conf` (`api_url`/`base_url`) manda sobre el QR; «Borrar datos» lo elimina.
+- **La evidencia no llega al servidor.** El backend solo ve sesiones y un `sos.started` del Redmi
+  (DEV-C75588D3). Sospecha: después de borrar los datos no había bóveda, así que no hay `.fev` (NO KEY)
+  y no se sube nada. El estado sale en la fila de evidencia y en logcat con la etiqueta `FalconUpload`.
+- **La W1 no tiene alta contra Azure:** sube sola con su `upload.conf` y su certificado lo firma la CA
+  local (`tools/alta-bodycam.sh`). No hay flujo de alta de la unidad contra un servidor real.
+
+**Próximo paso:** crear la bóveda, repetir la captura con el teléfono y mirar `FalconUpload`. Decidir
+cómo se da de alta la W1 contra el servidor real (contrato en aeria-contracts + BodyCamServer).
+
+---
+
+## 2026-10-25 — Encargo de cifrado del backend (punto 1: sin http y pinning, COM-004)
+
+Encargo de aeria-nexus-backend-b5 con 7 puntos por prioridad (ver memoria
+`encargo-cifrado-backend-2026-10-25`). Antes se le respondió el estado del cifrado por
+tipo de dato (solo lectura). Agora queda fuera hasta que el backend publique contrato.
+
+**Punto 1 hecho (compila debug y release; SIN probar en aparato):**
+- Fuera `usesCleartextTraffic="true"`. Nuevo `res/xml/network_security_config.xml` sin http;
+  `src/debug/res/xml/` lo permite solo en depuración (backend de la wifi, IP variable).
+- Pinning en código, `data/red/ConexionBackend.kt`: la cadena verificada por Android debe
+  acabar en ISRG Root X1 (`C5+lpZ…`) o X2 (`diGVw…`, respaldo). Los pines dejan de exigirse el
+  **1-oct-2027**: antes hay que revisar las raíces y sacar versión. No va en
+  network_security_config porque el dominio sale del QR. Lo usan IamClient, SosNotifier,
+  HistorialSosBackend y ChunkedUploader.
+- Visor de la W1: `data/red/HttpEnRedLocal.kt`, GET por socket (se salta la política de
+  http de Android) y solo a IPv4 privada; entiende el chunked de NanoHTTPD.
+- Pruebas: `HttpEnRedLocalTest` (3/3 en JVM). `ConexionBackendTest` (instrumentada, compila;
+  pendiente de pasar con un teléfono con internet).
+
+**Punto 2 hecho (CRY-002, compila; SIN probar en aparato):** Room cifrada con SQLCipher.
+- Decisión del usuario: sí a la dependencia `net.zetetic:sqlcipher-android` **4.17.0**, la
+  última que no exige Kotlin 2.2 (la 4.18+ trae kotlin-stdlib 2.2.10 y el proyecto está en
+  2.0.21). Pesa ~3,2 MB en release (arm64 2,1 MB + armeabi-v7a 1,0 MB).
+- `data/local/BaseCifrada.kt`: clave aleatoria de 32 bytes, en `noBackupFilesDir/<base>.key`
+  envuelta con una clave de Keystore propia (`DeviceKeyWrapper.baseDeDatos`, alias
+  `aeria_database_v1`), sin PIN. Se pasa como clave en bruto `x'…'` (sin KDF).
+- Migración: si la base está en claro, checkpoint del WAL, journal DELETE, `sqlcipher_export`
+  a `<base>.cifrando` y renombrado encima. Si la app muere a mitad, se repite. Una base cifrada
+  sin su clave se descarta (es ilegible). El fichero en claro viejo se borra, pero no se
+  sobrescribe en la flash.
+- `SupportOpenHelperFactory(clave, null, false)`: con el constructor de un argumento la clave
+  se borra tras la primera apertura y Room no podría reabrir.
+- Prueba: `BaseCifradaTest` (instrumentada, compila; falta el teléfono).
+- Cambio pedido por el backend («quarantine, never discard silently»): una base cifrada cuya
+  clave no se puede leer **no se borra**. Se mueve con su -wal/-shm y su clave envuelta a
+  `noBackupFilesDir/cuarentena/<fecha>.db` (por si el fallo del Keystore fuera pasajero), la
+  app arranca vacía, se anota `BASE_EN_CUARENTENA` en la auditoría local y sale un diálogo
+  (`AvisoBaseEnCuarentena`, encima de TrustGate) en cada arranque hasta que el agente pulsa
+  UNDERSTOOD. Los .fev no quedan huérfanos: la subida pendiente y la bóveda leen la carpeta, y
+  el enlace al incidente va en el `.json` junto a cada `.fev`. Se pierden la clasificación y la
+  fecha de `raw_evidence`.
+- **Tropiezo:** se lanzó `assembleRelease` para medir el peso y gastó una versión (horneó 1.21
+  y pisó el `app-release.apk` 1.20 del 21-oct). `version.properties` se devolvió a 22/1.21.
+
+  La auditoría local **no se sube** a ningún sitio todavía (el backend no tiene ingesta de
+  auditoría de dispositivos, workflow 61 pendiente suyo): el evento queda en el teléfono.
+
+**Punto 3 hecho (CRY-001/002, compila; SIN probar en aparato):** el claro de un cifrado
+fallido ya no se queda indefinidamente.
+- `LocalEvidenceRepository.seal`: si falla, se reintenta en segundo plano al minuto, a los 5 y
+  a los 15 min (para si el claro ya no está o ya tiene .fev).
+- `sellarLasQueFallaron()`: al arrancar, antes que nada, cifra lo que haya en `captures/` sin
+  su .fev (fotos se borran; audio y vídeo conservan el claro para que lo recojan la
+  transcripción y el proxy). `AeriaNexusApp.rescatarCapturasAMedias()` lo encadena con
+  `transcripcionRepository.reanudar()` y `proxyRepository.reanudar()`, en ese orden.
+- Enlace al incidente (pedido por el backend): si el cifrado falla, `entregar()` apunta en
+  `captures/<captura>.procedencia.json` el evidence_id, incident_id, label y tipo en ese momento.
+  Cuando el reintento o el barrido la cifran, `entregarTarde()` la encola con esos datos
+  (`LocalEvidenceRepository.alCifrarTarde`, conectado en AppContainer a `evidenceUploader.enqueue`).
+  Sin procedencia (capturas antiguas, gafas) sube igual por `resumePending`, sin incident_id.
+- **Aplazado:** PCM de Whisper en claro (minutos, en el almacenamiento interno). El backend lo
+  deja como riesgo conocido en el informe; se retoma tras el piloto si ciberseguridad lo pide.
+
+**Punto 4:** `SIMULADOR_CONFIANZA_EN_RELEASE=false` en `local.properties` (decisión del usuario).
+FLAG_SECURE **sigue comentado** también por decisión del usuario (preguntado hoy otra vez).
+Sin la propiedad, `build.gradle.kts` ya usa false (`?: "false"`).
+
+**Punto 5 hecho (EVD-002, compila; SIN probar en aparato):** fuera el `agent_007` fijo.
+- Nombres de captura: `photo_<fecha>.jpg`, sin agente (antes `photo_agent_007_<fecha>.jpg`).
+  Nada interpreta el nombre salvo el prefijo de tipo; los .fev viejos siguen valiendo.
+- `officer_code` de la subida = placa del perfil de la sesión (`PerfilDelAgente`), o se omite.
+  El backend atribuye por la sesión (upload-protocol.md §5.1). `officer_user_id` no se manda: es
+  solo de la unidad.
+
+**Token del visor (encargo de bodycamserver-0b, iam-session.md §6.3; compila, SIN aparato):**
+`streamPreviewFrames` pide `PREVIEW_TOKEN` por BT antes de cada conexión y abre
+`/preview/stream?token=<32 hex>`. Sin canal cifrado v2 no lo pide; sin respuesta en 3 s o con
+`PREVIEW_TOKEN_FAIL` abre sin token (la W1 aún no lo exige; cuando lo exija dará 401). El token
+no se escribe en el log. Recomendado a la bodycam no exigirlo hasta probarlo juntos.
+
+**Cierre del encargo (aceptado por el backend):** punto 6 (preferencias cifradas) no se hace,
+queda en el informe como «identificadores no secretos en preferencias privadas». Pendientes: el
+punto 7 (canal BT v2 con la W1) y todas las pruebas en aparato. Agora espera el contrato del backend.
+
+**Próximo paso:** con un teléfono, pasar `ConexionBackendTest` y `BaseCifradaTest`, abrir la app
+sobre una instalación con incidentes (que sigan ahí) y probar el visor de la W1. Seguir con el
+punto 3.
+
+## 2026-10-21 — Avisos SOS del mapa que no se iban, botones de cerrar e historial de SOS
+
+**Diagnóstico (por qué se quedaban):**
+- El banner «SOS — Agent X / VIEW LIVE» y el tooltip rojo solo salían con el `emergency_cancel`.
+  Si ese mensaje se perdía, o el emisor se quedaba sin red, se le cerraba la app o se apagaba,
+  se quedaban **para siempre** (hasta reiniciar la app). `onUserOffline` no los tocaba.
+- El tooltip «Signal cut: hora» **no caduca nunca**: solo se quita con su X o con un SOS nuevo
+  del mismo agente.
+- El punto gris «Last seen: hora» sale a los **7 s** sin mensajes del agente
+  (`STALE_AFTER_MILLIS`) y solo se borra si Agora avisa de una salida ordenada
+  (`USER_OFFLINE_QUIT`). Si el agente se cae sin salir, se queda para siempre, y como el
+  teléfono entra con un uid aleatorio en cada arranque, deja un fantasma.
+
+**Cambios:**
+- `AgoraRepository`: vigilancia cada 2 s. Un SOS de teléfono del que no se oye el `emergency`
+  en 10 s (tres reenvíos de 3 s perdidos) se da por cortado: se cierra el popup y el banner, y
+  sale el aviso «Signal cut» con la hora del último latido. También se corta si el emisor sale del
+  canal. Mientras este teléfono esté fuera del canal no se corta nada: el margen cuenta desde
+  que vuelve a entrar. Una cancelación que llega tarde solo corrige la hora y no reabre un aviso
+  ya cerrado. `cerrarSosRemoto()` agrupa los dos caminos.
+- Mapa: X en el banner SOS (lo oculta solo en ese teléfono y para esa emergencia; el tooltip
+  sigue mientras dure), X en el «Last seen» gris (`olvidarAgente`; vuelve si el agente vuelve a
+  mandar su posición). La X del «Signal cut» ya existía y ahora usa el mismo `BotonCerrar`.
+- Botón de warning encima del de centrar, con un contador del **total** de SOS. Abre
+  `SosHistoryDialog`: lista solo de lectura, lo más nuevo primero, con agente, origen, fecha,
+  inicio y fin (Active / Ended / Signal lost / No end recorded), y botón REFRESH.
+- Historial: `HistorialSosBackend` lee `GET {api_url}sos?limit=200` (aeria-contracts
+  sos-and-proxy.md §2.6, CHANGELOG 2026-10-21) con `token()`, nunca con el `sos_only`. Si no
+  llega al backend, se usa `HistorialSos`, la copia local en `noBackupFilesDir/sos_history.json`
+  (sin posiciones; solo se añade, y un fichero ilegible se aparta en vez de pisarlo). Se refresca
+  al abrir el mapa, al abrir la lista y 3 s después de cada SOS que empieza o acaba.
+- El backend no tenía los SOS de la bodycam (nadie se los avisaba). Ahora el teléfono que **lleva**
+  esa bodycam manda `sos/start` con `source=bodycam`, `bwc_id` (`bwcDelUid`), latidos cada 10 s
+  y `sos/stop` cuando la cámara deja de publicar. El backend da un SOS por perdido a los 30 s
+  sin latido (se calcula al leer).
+
+Compila y pasan las pruebas de unidad. **Sin probar en el aparato.**
+
+**Pendiente:** probarlo con dos teléfonos (cortar el SOS, matar la app del emisor, quitarle la
+red) y con la W1. La lista solo pide la primera página (200); paginar con `next_before` si
+hiciera falta. Un vídeo de la bodycam que se corta y vuelve a mitad de un SOS se apunta como
+dos SOS.
+
+## 2026-10-19 — Alta por QR (§4.4) y el device_id de la sesión
+
+Encargo del usuario (pasado por la sesión del backend aeria-nexus-8e) para la demo del 20-oct.
+Contrato: **aeria-contracts iam-session.md §4.4**. Backend hecho y probado (459 tests).
+
+- **Flujo:** la pantalla de alta abre con «SCAN ENROLLMENT QR». El escáner (`EscanerDeQr.kt`,
+  zxing-core 3.5.3 sobre el ImageAnalysis de CameraX, 1280x720) solo se abre desde el
+  asistente: no hay esquema de URL propio. Tras escanear, el alta sigue sola: terminal →
+  «Verify AeriaOne server» (paso nuevo) → agente con el `user_id` y el `code` del QR → PIN.
+- **`InvitacionDeAlta.kt` (nuevo):** lee el QR `AERIA-ENROLL-1` (otra versión no se usa),
+  exige https salvo en debug y lo guarda entero en `noBackupFilesDir/enrollment_invite.json`
+  (`AlmacenDeInvitacion`). El `code` se borra al recibir el 201/200 de §4.2; el resto se queda.
+  `expires_at` solo se avisa en pantalla, no se rechaza por el reloj del teléfono.
+- **Comprobación del servidor:** tras §4.1, antes de adoptar el `device_id` y de mandar el
+  código: huella del `device_ca_pem` == `device_ca_sha256` **y** firma del certificado del
+  terminal con esa CA. Tras §4.2, lo mismo con `user_ca_pem`. Si falla, no se instala nada.
+  El ancla de periféricos de §4.2 solo se instala si es la CA que fija el QR.
+- **Servidor:** `UploadConfig` toma `api_url`/`base_url` del QR. En debug `upload.conf` manda
+  sobre el QR si existe; **en release el fichero se ignora entero** (también `chunk_bytes`).
+- **Errores:** `enrollment_code_invalid/expired/required` y `reenrollment_not_authorized` →
+  «Ask your supervisor for a new QR» y el botón pasa a «SCAN NEW QR», sin reintento.
+- **Otro QR con el terminal ya dado de alta:** si su CA de dispositivos no es la instalada
+  (otro servidor), se destruye la identidad y se empieza de cero.
+- **Alta sin QR:** solo en debug con `api_url` en `upload.conf` («ENROLL WITHOUT QR (DEBUG)»),
+  con el formulario del identificador de siempre.
+- **Fallo de rdiaz (403 «Dispositivo desconocido» con DEV-92A71C):** DEV-92A71C es el
+  `IDENTIDAD_DEMO`, al que se caía cuando `aeria_trust` no tenía `device_id`. Ahora la sesión y
+  el estado guardado usan el CN del certificado del terminal en el Keystore. Además
+  `allowBackup="false"` y reglas que excluyen todo (nube y transferencia entre aparatos): las
+  preferencias restauradas en otro teléfono traían la identidad de otro terminal. La clave ya
+  era no exportable (Keystore, sin cambios).
+- Tests: `InvitacionDeAltaTest` (9, incluido el impostor que sirve la CA auténtica y firma
+  con la suya). Se añadió `org.json` como `testImplementation` (el de android.jar es un stub).
+
+Compila y pasan los tests de unidad. MIUI no deja `settings put secure backup_auto_restore`
+por adb. **Probado en el Redmi (u4vcjv7xeubiljhu) contra el backend en 192.168.0.18:8000:**
+QR escaneado, alta completa, PIN y sesión acreditada por AeriaOne (`SESION_ACREDITADA`).
+
+- **Perfil sin datos de ejemplo:** `ProfileScreen` recibe `FichaDelAgente` (nueva) en vez de
+  `OfficerSampleData.profile`: nombre, placa, rango y unidad del perfil de AeriaOne; el
+  identificador del agente y el Device ID de la identidad; agency = tenant del QR; bodycam y
+  gafas con su estado real; versión de `BuildConfig`. Lo vacío no se pinta. Se quitaron la
+  sección de idioma y «Jurisdiction», que no tienen fuente. `OfficerSampleData.profile` sigue
+  alimentando el manifiesto y la placa del SOS/PTT (ver memoria de altas del panel).
+- La pestaña «Operations» de la barra inferior se llama ahora «Ops».
+
+**Pendiente:** probar la versión release con QR https (la demo con release necesita un QR con
+dirección alcanzable desde esa red).
+
+---
+
+## 2026-10-16 — Recibo firmado del servidor y versión mínima de la app
+
+Contrato adoptado: **aeria-contracts, CHANGELOG 2026-10-16** (`receipt-schema.md`
+`evidence-receipt/1`, `iam-session.md` §5.7 y §5.9, `openapi.yaml` 0.8.0). Lo pidió la sesión
+del backend (aeria-nexus-f7), que ya lo tiene implementado y probado con `client_sim.py`.
+
+- **Recibo:** `ChunkedUploader.status()` (antes `verify`, privada) devuelve `verified` y el
+  `receipt` del `GET <sesión>/status`; `Outcome.receipt` lo lleva. `EvidenceUploader` lo guarda
+  entero en el `.upload.json` (`server_receipt`).
+- **Regla de borrado:** el proxy solo se borra con `receipt.status == "accepted"` y
+  `sha256_received` igual a nuestro `sha256_cipher` (`aceptado()`). `verified: null` ya no basta;
+  sí sigue bastando para no volver a subir. Si el recibo no llegó con la subida, `deliverProxy`
+  lo vuelve a pedir con la `session_url` del `.upload.json` en cada `resumePending`
+  (`reciboDelServidor()`). A las evidencias originales no se les pide: no se borran nunca.
+- **Integridad:** `falloDeIntegridad()` = `verified == false`, recibo `integrity_failed` o
+  `sha256_received` distinto del propio. Se usa en la evidencia (Room FAILED), el proxy, la
+  transcripción y `reconcile`. Un 401/403 en `/status` ya avisa a `SesionBackend` como el resto.
+- **Versión:** `CorteDelPerfil.APP_DESFASADA` (`app_update_required`), con `conservaElSos` igual
+  que `SUSPENDIDO`: no se reintenta, se descarta el token, se pide la sesión `sos_only` y sale
+  `ProfileCutDialog` con «UPDATE REQUIRED». Vale para el 403 al abrir sesión y el 401 a mitad de
+  turno (llega por `X-Error-Code` igual que los otros cortes).
+- **Arreglado de paso:** `uploaded_at` ponía la hora local con una `Z` literal; ahora va en UTC.
+  Sin esto el `device_clock.skew_ms` del recibo salía con toda la zona horaria de desfase.
+
+Compila. **Nada probado en aparato ni contra el backend.**
+
+**Pendiente:**
+- Probar: subida con proxy → recibo `accepted` en el `.upload.json` y proxy borrado; backend
+  sin recibo → proxy conservado; fijar en el panel una versión mínima por encima de 1.20 →
+  aviso UPDATE REQUIRED y SOS operativo.
+- Los proxies subidos antes de hoy tienen `.upload.json` sin `server_receipt`: se pide a su
+  `session_url` y se borran solos. El backend confirma (receipt-schema.md §2) que una sesión tus
+  terminada sigue dando 200 en `/status` meses después y emite el recibo la primera vez que se
+  pide. **Condición:** tiene que ser el mismo backend (misma base de datos) al que se subieron;
+  contra otro, esas sesiones no existen y el proxy se queda.
+- `ManifestUploader` sigue marcando entregado con `verified != false`: no borra nada, así que
+  la regla no le aplica.
+
+---
+
+## 2026-10-09/10 — Reenrolamiento con permiso (409), reintento con la misma clave y atadura en el backend
+
+Cambio de contrato del backend, aprobado por el usuario (iam-session.md §4.2, §5.7 y §9.4):
+`POST /api/iam/users/enroll` contesta `409 reenrollment_not_authorized` si el perfil ya se
+enroló alguna vez. El primer enrolamiento sigue libre; los siguientes los autoriza un admin en
+el panel (Users > «Allow new phone»), con un permiso de 24 h y un solo uso.
+
+- `EnrollmentViewModel.mensajeDeFallo` da texto propio a ese `code`: «This officer ID has
+  already been enrolled. Ask your supervisor to allow a new phone for you in AeriaOne, then try
+  again.» No hay reintento automático: el alta se queda en ENROLLMENT FAILED y TRY AGAIN vuelve
+  al formulario, que es lo que el agente necesita cuando su jefe ya lo ha autorizado.
+- **Ojo en pruebas:** reinstalar la app, o `deshacerAlta()`, y volver a enrolar al mismo agente
+  da 409. En desarrollo: `python manage.py allow_reenroll <principal>` en `aeria-nexus/backend`.
+
+- **Reintento sin admin (contrato del 10-oct, §4.2):** si el 201 del alta se pierde, repetir
+  desde el mismo terminal y con la **misma clave** devuelve 200 con la misma credencial. Por
+  eso `CredentialRepository.generarClave(userId)` ya no regenera el par en cada intento: apunta
+  para qué agente lo generó (`pending_key_user_id`) y lo reutiliza hasta que el certificado
+  queda instalado. Con otro identificador se genera uno nuevo. `IamClient.enrolarAgente`
+  acepta 200 además de 201.
+- **Atadura en el backend (§6.1 y §6.2):** `BodycamRepository.registrarAtaduraEnBackend` llama
+  a `POST /api/iam/bindings` (`peripheral_id` = BWC-xxxx, `declaration_id` = el `BIND-…`
+  firmado, `expires_at` en milisegundos) cuando la cámara ha contestado BIND_OK y hay sesión;
+  si el token llega después, entonces. Guarda el UUID del backend en `BindingActivo.idEnBackend`
+  y al soltar la cámara (`ordenDeDesatar`) llama a `bindings/<uuid>/end`. Con la sesión
+  `sos_only` no se intenta. Un `profile_suspended` aquí dispara el mismo corte que en la subida.
+
+Compila y pasan los tests de unidad. **Nada probado en aparato ni contra el backend.**
+
+**Estado al cierre (10-oct):** todo lo de esta entrada y lo de las dos del 9-oct está **sin
+commitear** en `dev_back_connection`. Backend en la rama `dev_whisper_text`, commit 498cd98
+(354 tests); el contrato (`aeria-contracts`, iam-session.md §4.2, §5.4, §6.1, §6.2 y CHANGELOG
+del 9 y 10-oct) también sin commitear. **Próximo paso:** la prueba en aparato de abajo, contra
+ese backend. **No implementar** nada que dependa de dos decisiones que el usuario aún no ha
+tomado: si `devices/enroll` acepta una sesión de admin en lugar de `IAM_ENROLLMENT_TOKEN` (alta
+de la cámara a través del teléfono) y cómo se reenrola una cámara reinstalada.
+
+**Pendiente:**
+- Probar en aparato: el 409 y el alta tras autorizarla; cortar la red justo tras enviar el alta
+  y reintentar (debe entrar sin admin); atar la W1 y ver la fila en el backend; cerrar sesión y
+  ver que queda cerrada.
+- El `end` sale a la vez que el cierre de sesión, en corrutinas distintas, y puede llegar tarde
+  (401) o no salir si el Bluetooth ya había caído. Resuelto con el backend (§5.4):
+  `IdentityRepository.lock` manda el logout con `{"end_bindings": true}` y AeriaOne cierra las
+  ataduras del agente desde ese terminal en la misma petición. Las renovaciones de token a
+  mitad de turno van sin el campo. Sin red al cerrar sesión, la atadura caduca sola (12 h).
+- Si falla la instalación del certificado porque el backend devuelve uno a nombre de otro, el
+  reintento recibe el mismo y vuelve a fallar: ahí sí hace falta el admin.
+
+---
+
+## 2026-10-09 (2) — Identificador tecleado en el alta, mensajes por `code` y perfil del agente desde el backend
+
+Decisiones del usuario sobre los pendientes de la entrada de abajo: (a) el identificador se
+teclea **entero**; (c) mensajes propios en inglés; (d) nombre, rango y placa llegan del backend.
+(b) agente suspendido a mitad de turno: **avisar y dejarle seguir en local**, sin bloquear la
+app. Compila y pasan los tests de unidad; **nada probado en aparato**.
+
+- **(a) Alta del agente:** al terminar el alta del terminal (o al reanudar en ENROLLING) aparece
+  un formulario «OFFICER ID» (`EnrollmentAgenteForm.kt`, nuevo). Se guarda en minúsculas y sin
+  espacios y se valida con la regla del panel (`[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]`). Tras un fallo, TRY AGAIN
+  vuelve al formulario con lo tecleado, para corregir la errata. `EnrollmentViewModel` ya no lee
+  el `user_id` de `IDENTIDAD_DEMO` (la constante sigue como relleno del simulador de estados).
+- **(c) Mensajes:** `IamException` lleva el `code` del contrato (§5.7). En el alta del agente:
+  `profile_suspended`, `profile_revoked`, `profile_not_found` y `device_not_enrolled` tienen
+  texto propio; el resto sigue saliendo como «AeriaOne answered N: detail».
+- **(d) Perfil:** `IamClient` lee `profile` (`display_name`, `rank`, `badge`, `unit`) del 201 de
+  `iam/users/enroll` y del 200 de `iam/session`. `PerfilDelAgente` (nuevo) guarda el último en
+  `noBackupFilesDir/officer_profile.json`; `deshacerAlta()` lo borra. Sin nombre se usa el
+  `user_id`. **La atadura con la bodycam firma ya esos datos** (`BodycamRepository.atarAlAgente`);
+  sin perfil recibido rotula el `user_id` con rango y placa vacíos.
+
+- **(b) Corte del perfil:** `CorteDelPerfil` (`profile_suspended`, `profile_revoked`,
+  `identity_revoked`) en `TrustStatus.corteDelPerfil`. Se detecta en el 403 de `iam/session` y en
+  cualquier 401/403 de la subida tus y de los avisos de SOS (cabecera `X-Error-Code`, vía
+  `UploadConfig.avisarSiRechazo`). Al detectarlo: se para el bucle de `mantenerAcreditada`, se
+  olvida el token (la bodycam recibe `TOKEN_CLEAR`), la sesión pasa a SOLO_LOCAL y sale
+  `ProfileCutDialog` (nuevo) encima de la pantalla en curso. No se llama a `alCerrarSesion`: la
+  cámara sigue atada y se sigue grabando. Cada desbloqueo, y el botón CHECK AGAIN del aviso,
+  hacen **un** intento nuevo. `ChunkedUploader` corta la subida en cuanto no hay token en vez de
+  gastar los reintentos.
+
+**Pendiente:**
+- Probar en aparato: alta con identificador bueno, con errata (404), con perfil suspendido (403),
+  y que la W1 rotule el nombre del panel. BodyCamServer confirma (leído en su código,
+  sin probar) que la W1 acepta rango y placa vacíos: rotula rango «-» y usa como placa la parte
+  del `user_id` anterior al primer punto, que va también en el nombre de sus ficheros.
+- Sin empezar, pendiente del visto bueno: usar los avisos nuevos de la unidad
+  (`UPLOAD_REJECTED:<INC>:<code>` y `"rejected"` en `UPLOADS:`) para mostrar el motivo, avisar
+  del corte y volver a prestar el token en el acto. La unidad ya no pierde el token al caer el
+  Bluetooth: si se cierra sesión con el enlace caído y sin red, lo conserva hasta que caduca.
+- Probar (b): suspender desde el panel con la sesión abierta y ver el aviso; reactivar y CHECK
+  AGAIN; que lo grabado mientras tanto suba al volver. Cerrado el aviso no queda ningún
+  indicador fijo de que se trabaja en local.
+- `binding_invalid` (401) no tiene trato propio: el bucle abre sesión nueva y no lo arregla,
+  porque pide volver a enrolar. Menor.
+- **SOS de un agente suspendido** (decisión del usuario, tomada en la sesión de BodyCamServer:
+  debe llegar). Tras el 403 `profile_suspended`, `IdentityRepository.pedirSesionSoloSos` pide
+  otra sesión con `"sos_only": true` (iam-session.md §5.8). Su token (`SesionEmitida.soloSos`)
+  se usa solo en `SosNotifier` (`tokenParaSos()`) y se presta a la bodycam; `token()` lo
+  oculta a la subida. Un intento por corte; no se renueva sola (dura 12 h). El backend ya
+  tiene `sos/start`, heartbeat y stop, que hasta hoy contestaban 404. **Sin probar.**
+- `OfficerSampleData.profile` sigue alimentando la pantalla de perfil, el manifiesto de los
+  incidentes y la placa del SOS y del PTT. No se ha tocado: la tarjeta del SOS busca al emisor
+  por placa en un padrón fijo y con placas reales dejaría de salir. Decisión aparte.
+- El tenant sigue fijo (`QPD`).
+
+---
+
+## 2026-10-09 — Niveles de usuario y altas desde el panel: revisión contra el teléfono (sin código)
+
+El backend simplifica los roles en tres niveles (`user`, `admin`, `superadmin`, montados sobre
+los siete roles), pasa las altas de agentes al panel web y permite suspender perfiles. Se revisó
+el teléfono contra el contrato (`aeria-contracts/iam-session.md` §3.1, §5.7, §6 y §9, CHANGELOG
+del 9-oct). **No se tocó código**: todo lo de abajo espera la decisión del usuario.
+
+**Lo que se comprobó:**
+- El teléfono no lee `roles` ni `scope`: de `iam/session` solo usa `access_token` y
+  `expires_in`. Un jefe con cuatro roles entra igual. No distingue a un admin de un agente.
+- El `user_id` del alta está fijo: `IDENTIDAD_DEMO` en `IdentityRepository.kt`
+  (`cmendez.aeriaone.com`). No hay campo ni intent para cambiarlo: todo teléfono se enrola
+  como la misma persona. El tenant (`QPD`) también está fijo en `EnrollmentViewModel.kt`.
+- Nombre, rango y placa que firma la atadura y que la bodycam rotula en el vídeo salen de
+  `OfficerSampleData.profile` (`IncidentRepository.kt`): toda bodycam rotula al mismo oficial.
+- Un 403 en el alta se enseña tal cual («AeriaOne answered 403: …»). Un 401 a mitad de turno
+  no se le explica al agente: la subida falla como un error más, `SosNotifier` falla en
+  silencio y `mantenerAcreditada()` reintenta para siempre (30 s, 1, 2 y cada 5 min).
+- No se llama a `iam/session/status`, `iam/revocations` ni `iam/bindings`.
+
+**Lo que cambió en el backend y nos afecta:** los 401/403 llevan `code` estable (y cabecera
+`X-Error-Code`); `iam/session` responde 403 `profile_suspended` a un perfil suspendido;
+suspender o cambiar de nivel cierra las sesiones en el acto. §6 del contrato se corrigió con la
+declaración de atadura tal como la firma `BindingPeriferico.kt`.
+
+**Pendiente, sin empezar, a decidir por el usuario:**
+- (a) Obligatorio: cómo llega el identificador del agente (tecleado entero, o código de un solo
+  uso emitido por el panel, que es contrato nuevo). Si se teclea: minúsculas y sin espacios.
+- (b) Tratar `profile_suspended`, `profile_revoked` e `identity_revoked`: no reintentar,
+  descartar el token y avisar al agente. Decidir si la app se bloquea o sigue en local.
+- (c) Mensaje propio en inglés para el 403 de suspensión en el alta.
+- (d) Que nombre, rango y placa lleguen del backend (contrato nuevo); encaja con (a).
+
+---
+
+## 2026-10-03 — Reinicio de la bóveda cuando se olvida la contraseña
+
+El manager instaló la app, olvidó la contraseña de la bóveda y no había salida salvo borrar
+los datos de la app (que se lleva también la identidad). Compila; **nada probado en aparato**:
+probarlo destruye la bóveda del teléfono de pruebas y esa decisión es del usuario.
+
+**Decisión:** la contraseña sigue sin poder recuperarse. Lo que se añade es un reinicio
+destructivo autorizado con el PIN de identidad. No abre ninguna evidencia: el PIN solo evita
+que cualquiera con el teléfono le borre al agente lo que puede ver. La copia de Nexus no se
+toca, porque cada `.fev` lleva también el destinatario `srv:`.
+
+- **Flujo:** Evidence Vault → «Forgot password?» → aviso de lo que se pierde → PIN → se borra
+  `vault.key` y la caché descifrada → formulario de crear contraseña. Los `.fev` no se borran.
+- **PIN:** `IdentityRepository.comprobarPinActual(pin, via = "vault_reset")`, el mismo del
+  cambio de PIN. Los fallos cuentan contra el límite del desbloqueo y agotarlo cierra la sesión.
+- **Auditoría:** evento nuevo `BOVEDA_REINICIADA` con `unreadable_on_device` (cuántos ficheros
+  dejan de poder abrirse en el teléfono).
+- **Identificador por bóveda:** antes todas eran `vault:v1`, así que tras un reinicio lo antiguo
+  habría parecido de la bóveda nueva (OPEN que nunca carga). Ahora cada bóveda nueva es
+  `vault:v1:<8 hex>`, guardado en `vault.key`; las ya creadas siguen siendo `vault:v1`. Ni el
+  backend ni BodyCamServer leen ese identificador. `EvidenceVault.WRAPPER_ID` pasa a `wrapperId`.
+- Ficheros: `EvidenceVault.kt`, `VaultRepository.kt`, `VaultViewModel.kt`, `VaultScreen.kt`,
+  `VaultResetContent.kt` (nuevo), `AuditoriaLocal.kt`, `IdentityRepository.kt`, `AppNavHost.kt`.
+
+**Pendiente:**
+- Probar en aparato: reinicio con PIN bueno y malo, que lo antiguo salga `NO KEY`, que lo
+  capturado después se abra y que el evento aparezca en Profile > Audit log.
+- Segunda parte, con backend: que el servidor vuelva a envolver las claves de los `.fev`
+  antiguos para la bóveda nueva, pedido con la firma de `aeria.user.key` y solo con la
+  credencial vigente. Pide contrato nuevo en `aeria-contracts`.
+- Lo capturado entre el reinicio y la contraseña nueva queda solo para Nexus (`NO KEY`), igual
+  que antes de crear la primera bóveda.
+
+## 2026-10-02 — Transcripción de la evidencia con Whisper
+
+Encargo del usuario, coordinado con la sesión BodyCamServer (rama `dev_whisper_text`).
+Contrato común: `docs/TRANSCRIPT-FORMAT.md` y `docs/UPLOAD-PROTOCOL.md` §5-6 de BodyCamServer.
+Compila y pasan los tests; **nada probado en aparato** (no había ningún teléfono conectado).
+
+**Decisiones del usuario:** modelo `ggml-base-q5_1` dentro del APK (unos 57 MB); se transcriben
+los vídeos del teléfono, las notas de audio y los vídeos de las gafas al importarlos.
+Propuestas del móvil aceptadas en el contrato: se admite M4A, se añade `source.recorded_by`
+(phone/falconone/bodycam) e `incident_id` puede ser null.
+
+- **Nativo:** `app/src/main/cpp` (CMake + JNI). whisper.cpp v1.9.4 se baja con FetchContent,
+  fijado por hash. Va estático en una sola `libtranscripcion.so` (1,7 MB), solo arm64-v8a,
+  armv8.2+fp16+dotprod y siempre en Release. `WhisperNativo` comprueba la CPU antes de cargar
+  la librería; si no es compatible, el resultado es `status=failed`.
+- **Modelo:** la tarea `descargarModeloWhisper` lo baja, comprueba el sha256 y lo deja en los
+  assets. Guarda una copia en `.gradle/whisper/`, que no va a git. Se copia una vez a `noBackupFilesDir`.
+- **Flujo** (`data/transcript`): al cerrar la grabación se cifra conservando el claro. Después
+  `TranscripcionRepository.preparar` decodifica el audio a PCM de 16 kHz y el claro ya se puede
+  borrar. Una cola de uno en uno transcribe en trozos de 5 min, sella el JSON en
+  `transcripts/<base>.transcript.json.fev` y lo entrega con `kind=transcript`. **Cambio del
+  usuario del mismo día:** sale primero y sola, sin esperar a la evidencia y aunque no se suba
+  el vídeo. En la cola de reintentos va antes que los proxies y que la evidencia.
+- **Pantalla:** diálogo "TRANSCRIBING AUDIO" y después la hoja de clasificación. El tope de
+  espera es de 20 s (`TOPE_TRANSCRIPCION_MS`); lo que tarde más sigue en segundo plano.
+- **Recuperación:** el trabajo vive en `transcripts/pendientes` (PCM + `.job.json`) y se
+  repite entero al arrancar. Los claros que sobrevivieron a una muerte de la app se rescatan:
+  los vídeos desde `ProxyRepository.reanudar` y las notas y las gafas desde `TranscripcionRepository.reanudar`.
+- **Ojo:** el PCM es audio en claro dentro de la carpeta privada mientras espera turno.
+
+**Lectura en la bóveda (decisión del usuario, mismo día):** el agente lee en el móvil las
+transcripciones del teléfono y también las de la bodycam (§7 del contrato).
+- Bóveda: botón TEXT en cada vídeo o nota que tenga transcripción, y apartado "Bodycam
+  transcripts". `TranscriptDialog` muestra el origen (PHONE / FALCONONE / BODYCAM), el idioma
+  y los segmentos con su minuto. Para leerlas hay que desbloquear la bóveda; se descifran en
+  memoria, la copia en claro se borra al momento y cada apertura queda en el diario.
+- Bodycam (`TranscripcionesDeBodycam`): al conectar pide `UPLOAD_LIST` y solicita las
+  `"transcript":"ready"`; también atiende `TRANSCRIPT_READY:<id>`. Cada respuesta
+  `TRANSCRIPT:<id>:{json}` se cifra en cuanto llega en `transcripts/bodycam/` y no se sube
+  nunca. Los errores llegan como `TRANSCRIPT_ERROR:<id>:<motivo>`, que propuse para saber de qué incidente son.
+- La unidad sale del `unit_id` del STATUS, que BodyCamServer añadió hoy y no está probado.
+  Sin él, el móvil pide una vez por conexión cada transcripción "ready".
+- Ojo: al conectar, la `UPLOAD_LIST` puede salir antes del primer STATUS. Entonces la primera
+  vez vuelve a bajar las que ya tiene; es inofensivo.
+
+**Por probar en el Samsung:**
+1. Nota de audio corta y larga: diálogo, después la hoja; `adb logcat -s Transcripcion WhisperNativo MotorWhisper`.
+2. Vídeo del teléfono de más de 2 min: el tope salta y la transcripción llega después.
+3. Contenido del `.transcript.json.fev`, descifrado en BodyCamServer con la clave dev.
+4. Subida con `kind=transcript` sin red y después con red: tiene que salir antes que el vídeo.
+5. Matar la app transcribiendo y comprobar que se repite al arrancar.
+6. Vídeo de las gafas con `recorded_by=falconone` e `incident_id` null.
+7. Bóveda: TEXT en una nota y en un vídeo; bloquear con el diálogo abierto y comprobar que se cierra.
+8. Con la W1 en la APK de `dev_whisper_text`: grabar, esperar `TRANSCRIPT_READY` y verla en
+   "Bodycam transcripts"; desconectar, grabar, reconectar y comprobar que llega por `UPLOAD_LIST`.
+
+---
+
+## 2026-09-29 (3) — El móvil suelta la W1 al cerrar sesión
+
+Encargo del usuario, transmitido por la sesión BC. Compila; **sin probar en aparato**.
+
+- **El problema:** al cerrar sesión solo se desataba y el RFCOMM seguía abierto. La W1 admite un
+  solo teléfono a la vez, y el del agente que se iba la volvía a coger tras cada caída, así que
+  bloqueaba la rotación de la cámara entre agentes.
+- **Ahora:** `BodycamRepository.soltar(motivo)` manda, en orden, UNBIND firmado, `TOKEN_CLEAR` si
+  el enlace estaba autenticado y, 300 ms después, `disconnect()`. Para garantizar el orden,
+  `escribir()` es la escritura síncrona y `sendCommand` solo la lanza en una corrutina.
+  `desatar()` desaparece.
+- **No reconecta sola:** nada llama a `connect()` al abrir la app; solo lo hace el controlador,
+  con sesión. La MAC se conserva.
+- La sesión se cierra en: fin de turno, caducidad (nunca grabando), PIN agotado al cambiarlo y
+  reintentar en BLOCKED. No se cierra al bloquearse la pantalla.
+- **Verificado en el Samsung y la W1 (17:31):** fin de turno → "bodycam soltada al cerrar la
+  sesion: FIN_DE_TURNO"; la W1 reabre su socket 1 s después, y en 75 s el Samsung no reconecta.
+  UNBIND y TOKEN_CLEAR no salieron porque en el piloto no hay atadura ni enlace autenticado.
+  **Siguen sin verificar** hasta tener un teléfono dado de alta contra el backend.
+
+**Pruebas del SOS con directo en el Samsung y la W1 (misma tarde):** verificados `SOS_TONE`, el
+tono, MIC/OTHERS, el restablecimiento al cancelar, el diario, el directo de la W1 con MUTED y el
+micro de la W1 en SOS. Arreglados: la banda de PTT tapaba la barra del directo y "OTHERS
+MUTED" se partía en dos líneas. Ahora el teléfono registra en el log los `BTN_*` de la cámara.
+Pendiente: la doble F2 y la pulsación simple en SOS, y el mapa, que necesita un segundo teléfono.
+
+---
+
+## 2026-09-29 (2) — SOS con directo: mapa, silencios, micro del emisor y tono
+
+Encargo del usuario. Compila y pasan los tests; **nada probado en aparato** (hace falta
+un segundo teléfono y la W1).
+
+**Decisiones del usuario:**
+- El PTT del receptor en el directo pasa a conmutador. El emisor por teléfono tiene
+  un botón de micro que arranca ABIERTO.
+- El SOS de la W1 se ata al círculo amarillo del teléfono que la lleva.
+- Tono de SOS configurable: OFF / DISCREET / LOUD, por defecto DISCREET, en Profile →
+  Emergency. Lo oye solo quien lanza el SOS (teléfono y W1).
+- W1: la pulsación larga de F2 no se puede medir (firmware: solo avisa al soltar, y a
+  1 s inyecta BACK). En su lugar, **doble F2** en SOS silencia lo que entra. La
+  pulsación simple en SOS abre y cierra el micro, que en la W1 también arranca abierto.
+  Encargado a BodyCamServer.
+
+**Móvil:**
+- Mapa: el círculo amarillo de un agente en SOS se puede tocar → diálogo "SOS active"
+  con VIEW LIVESTREAM (o dos botones si emite desde el teléfono y la bodycam).
+  `SosLivestreamDialog`. El teléfono atado manda `"bwc"` en sus `location`, y los SOS
+  de bodycam entran ahora también en `activeSosAlerts`.
+- Directo del receptor: `PttToggleButton` (extraído de Operations a
+  `ui/components`) y botón MUTED / SOUND ON (`adjustUserPlaybackSignalVolume`, solo
+  local; se deshace al salir de la pantalla).
+- Directo del emisor: MIC ON/OFF (`muteLocalAudioStream`, sigue publicado) y OTHERS
+  ON/MUTED (`adjustPlaybackSignalVolume(0)`, sin tocar suscripciones: la nube lo graba
+  todo). Con OTHERS MUTED tampoco suenan los pitidos de entra/sale. Los dos se
+  reinician al cancelar el SOS y quedan en el diario (`SOS_MICROFONO`,
+  `SOS_SILENCIO_ENTRANTE`).
+- Tono `PttTones.sosActivado`, gemelo del de la W1. Cámara y micro se publican AL
+  ACABAR el tono (~410 ms) para que no salga en el directo. La alerta sale al instante.
+- BT: `SOS_TONE:OFF|LOW|HIGH` en cada conexión y cada cambio (`AjustesSos`).
+
+**Por probar con dos teléfonos:**
+1. Tocar el círculo → diálogo → directo.
+2. Receptor: MUTED / SOUND ON; PTT conmutador que el emisor oye.
+3. Emisor: MIC OFF (el receptor deja de oírle), OTHERS MUTED (no oye el PTT del receptor).
+4. Tono en los tres niveles.
+5. SOS de la W1 en el círculo del teléfono atado.
+
+---
+
+## 2026-09-29 — Sesión AN: ancla del backend, PTT en el directo y caducidad de la credencial (wf 53)
+
+Nada de esto está probado en aparato: el Samsung no estuvo enchufado en toda la sesión.
+
+**AN-0 · El ancla de periféricos sale del backend** (commiteado en `2516769`)
+- `IamClient` lee `device_ca_pem` de `iam/devices/enroll` y de `iam/users/enroll`, y
+  `EnrollmentViewModel` lo guarda en `perifericos.ca.pem`. Si no viene, se deja la que hubiera.
+- Samsung, ya dado de alta: falta instalarle el ancla por adb con `peripheral_anchor`, sin repetir el alta.
+  Es la CA activa del backend: `CN=AeriaOne Device Identity CA, OU=QPD`, SHA-256 `AC:29:0D:…:A5:00`.
+  La W1 ya está dada de alta contra ella como `BWC-7D6F`.
+
+**PTT en el directo del SOS** (encargo del usuario vía BC; commiteado en `2516769`)
+- `LivestreamScreen`, solo el receptor: botón HOLD TO TALK de mantener pulsado, que usa
+  `iniciarPtt`/`terminarPtt`, con los mismos tonos y el aviso ámbar si otro pisa.
+  Se cierra al soltar, al cancelarse el gesto o al cerrarse el ViewModel.
+- La banda de "quién habla" (`PttAvisoOverlay`) baja 60 dp en el directo para no tapar el botón de volver.
+- Por probar con dos teléfonos: que la voz entrante suene por el altavoz del emisor mientras publica.
+
+**Wf 53 · Credencial que caduca en plena grabación** (sin commitear)
+- `PoliticaDeCaducidad` (pura, con `PoliticaDeCaducidadTest`) y `VigilanteDeCaducidad`.
+  Manda el primero que caduque, el del terminal o el del agente.
+- A 14 días o menos, aviso en la pantalla del PIN.
+- Caducada con una grabación en curso (cámara o audio del teléfono, SOS, bodycam o gafas):
+  gracia. No se corta nada, hay banda ámbar y evento `CREDENCIAL_EN_GRACIA`.
+- Caducada sin grabar: `BLOCKED / CERTIFICATE_EXPIRED` y evento `CREDENCIAL_CADUCADA`. Se cierra
+  la sesión y se desata la W1 con `CADUCIDAD`, motivo que ya existía, así que el protocolo no cambia.
+- Sin certificados (piloto con el simulador) no bloquea, y un fallo del Keystore tampoco.
+- **Decisiones por confirmar con el usuario:** bloqueado = sin SOS; la gracia no tiene tope;
+  la hora es la del reloj del teléfono, y la hora fiable es el wf 64.
+- Ojo: los teléfonos dados de alta con `tools/` llevan certificados de 30 días y se bloquearán al vencer.
+
+**Cierre del día.** El usuario generó las APK del piloto para el manager
+(`SIMULADOR_CONFIANZA_EN_RELEASE=true`; sin alta, el enlace queda NO_SOPORTADO y la W1 acepta los
+comandos en claro). Horas en el Excel, filas 59 y 60.
+
+**Para retomar mañana:**
+1. **BC-1:** instalar en el Samsung el ancla del backend por adb (`peripheral_anchor`, siempre con
+   `-s RZCY510MBBM`) y probar con BC el emparejamiento v2, el canal cifrado y la atadura a `BWC-7D6F`.
+   Hay que volver a atar, porque la de `BWC-896E` ya no vale. La subida (wf 40) espera a que la W1 tenga Wi-Fi.
+2. **Tarea principal: alta de la bodycam a través del móvil por BT** (`PROV_CSR` / `PROV_CERT`).
+   Toca protocolo, así que la hace una sola sesión en los dos repos. Antes, el usuario decide qué
+   backend publicado se usa y con qué dominio, y cómo recibe el móvil la dirección sin adb. Queda
+   abierto si `iam/devices/enroll` acepta el token de sesión del agente. Detalle en el DEVLOG de
+   BodyCamServer, entrada 2026-09-29.
+3. Probar en aparato el PTT del directo (voz por el altavoz del emisor) y el wf 53.
+4. Siguen abiertos AN-3 (wf 51), AN-4 (wf 66) y wf 46.
+
+---
+
+## 2026-09-29 (PLAN) — Reparto del día: dos sesiones en paralelo, workflows sin backend
+
+Escrito el 28-sep por la noche. **El mismo texto está en el DEVLOG de los dos repos.**
+Objetivo de 2 días: el código de 6-8 workflows más y 3-4 verificados en aparatos. Lo
+que solo compile se apunta como "compila, sin probar", no como terminado.
+
+### 0 · Antes de paralelizar (el usuario, ~30 min)
+
+1. **Commit en los dos repos.** Hoy hay trabajo de dos sesiones sin commitear mezclado
+   en los mismos ficheros: BodyCamServer `dev_device_owner` (token prestado, agente
+   atado, workflow 31 v2) y Aeria Nexus `dev_back_connection` (sesión, token, workflow
+   31 v2). Trabajar en paralelo encima de eso es arriesgado.
+2. **Anclas de la W1: opción B** (ver abajo), salvo que se decida otra cosa. Sin esto
+   no se prueba nada que pase por el emparejamiento.
+3. Tener conectados **la W1 y un teléfono dado de alta contra el backend** (Samsung).
+
+**Las anclas, en corto.** La W1 valida al teléfono con `files/identity/ca.pem` (y la
+atadura con `user-ca.pem`), que son de la CA de pruebas; el backend firma los teléfonos
+con `qpd-device-ca`/`qpd-user-ca`. Y la W1 presenta un certificado de la CA de pruebas,
+que un teléfono con las anclas del backend tampoco aceptaría. Tres salidas:
+- **A · Solo las anclas del backend en la W1, por adb.** La W1 aceptaría al teléfono,
+  pero su propio certificado seguiría siendo de la CA de pruebas: media solución.
+- **B · Alta de la W1 contra el IAM (recomendada).** El backend ya lo soporta sin
+  tocarlo: `POST /api/iam/devices/enroll` con `device_kind` bodycam respeta el
+  `BWC-xxxx` y devuelve el certificado y las **dos** anclas. En la W1 ya existen las
+  órdenes por adb (`bwc_enroll`, `bwc_cert`, `bwc_anchor`, `bwc_user_anchor`). Falta
+  llevar el CSR al endpoint con el secreto de enrolamiento. Aprox. 1 h.
+- **C · Que el backend firme con la CA de pruebas.** Toca el backend y rebaja su PKI. No.
+
+### Sesión BC — BodyCamServer (dueña del adb de la W1)
+
+1. **Alta de la W1 contra el IAM (opción B)** y prueba de punta a punta con el teléfono:
+   emparejamiento v2 y canal cifrado (wf 31), atadura con nombre real (33/34), token
+   prestado y subida al backend (40). Coordinar con la sesión AN el turno del teléfono.
+   Si todo sale, proponer al usuario `EXIGIR_CANAL_CIFRADO = true`.
+2. **Wf 61 en la unidad: diario de auditoría local.** Portar `AuditoriaLocal` del móvil
+   (HMAC encadenado con clave propia del Keystore). Eventos: emparejamiento, atadura,
+   token, grabar/parar, SOS, subida, cancelación, apagado. Hoy la unidad no tiene ninguno.
+3. **Wf 30 en la unidad: fin de turno.** Hoy `FIN_DE_TURNO` solo se registra. Que desate,
+   retire el token y lo apunte en el diario del punto 2.
+
+### Sesión AN — Aeria Nexus (dueña del teléfono)
+
+0. **AN-0, ANTES de BC-1: el ancla de periféricos del teléfono sale del backend.** Con la
+   opción B la W1 presentará un certificado de `qpd-device-ca`, y el teléfono la valida con
+   `perifericos.ca.pem`, que hoy solo se instala por adb con la CA de pruebas: rechazaría a la
+   W1 ya dada de alta. El teléfono **no guarda** el `device_ca_pem` que le devuelve el backend.
+   - Guardarlo al darse de alta: sale en `iam/devices/enroll` y también en `iam/users/enroll`
+     (`_anclas()` en `iam_views.py`, líneas 233 y 346).
+   - Teléfonos ya dados de alta (el Samsung): ningún GET devuelve las anclas (revisado
+     `iam_trust_views.py` e `iam_session_views.py`). O se repite el alta, o se instala por adb
+     con el intent `peripheral_anchor` y el PEM sacado del backend (`ensure_ca(tenant, DEVICE)`).
+   - Avisar a la sesión BC al terminar: su prueba de punta a punta espera esto.
+1. Ayudar a la prueba del punto BC-1 con el teléfono cuando la sesión BC lo pida.
+2. **Wf 53: certificado que caduca en plena grabación.** Política local con periodo de
+   gracia mientras se graba.
+3. **Wf 51: grabación sin red, gobernada.** Conjunto cerrado de lo que se permite sin red,
+   en vez de "todo funciona offline sin control".
+4. **Wf 66: detectar el reseteo de fábrica** y exigir alta nueva en vez de seguir con
+   carpetas huérfanas.
+5. Si sobra tiempo, **wf 46**: el evento de auditoría de quién abre la bóveda y qué mira **ya
+   existe desde el 15-sep** (`EVIDENCIA_VISUALIZADA` y los de bóveda). Lo que falta es el
+   **permiso de visionado por política**.
+
+### Compartidos: una sola sesión hace las dos puntas
+
+- **Wf 37 + 36: firma y procedencia de la evidencia.** Toca el formato que leerá el
+  backend en el wf 41, así que va en una sola sesión (la BC, tras su punto 1) y con
+  entrada nueva en `docs/CRYPTO-FORMAT.md`. **Decisión previa del usuario:** qué clave
+  firma. Propuesta: cada aparato con su clave de identidad (la BWC en la bodycam, la del
+  terminal en el móvil) y el agente dentro de lo firmado, por la atadura.
+- **Wf 21 (cadena de build: SAST, SCA, secretos)** si queda hueco: no toca código de las
+  apps; puede ir a un subagente en su propio worktree.
+
+### Reglas del día
+
+- Cada sesión escribe solo en su repo. Si un cambio toca el protocolo entre las dos, lo
+  hace una sola sesión en los dos lados y avisa a la otra antes (como el 28-sep).
+- La W1 por adb es de una sesión a la vez: la BC. Las pruebas en aparatos van por turnos.
+- Al cerrar: agente `coherencia-bodycam-movil` (ocho puntos), DEVLOG de cada repo y horas
+  al libro del manager (filas libres 57-65, una fila por app y bloque).
+
+---
+
+## 2026-09-28 — El canal Bluetooth con la bodycam va cifrado (workflow 31, v2)
+
+### Por qué
+
+El RFCOMM entre el teléfono y la W1 iba en claro. Desde el 25-sep por él viaja el
+token de la sesión del agente (`TOKEN:<jwt>:<segundos>`), que vale para subir a
+AeriaOne con todos los alcances del agente, y cualquiera con un receptor Bluetooth
+cerca podía leerlo. Es el paso 6 del workflow 31, el siguiente de la lista
+«Sin-backend-YA»: las dos puntas son nuestras.
+
+### Hecho (en las dos apps, que tienen que ir juntas)
+
+- **Emparejamiento v2 (`AERIA-BWC-2`).** `AUTH_HELLO` y `AUTH_ID` llevan un quinto
+  campo: una clave pública ECDH P-256 **efímera**, de una sola conexión y fuera del
+  Keystore (las claves de identidad son de firma y no sirven para acordar secretos).
+  Las dos efímeras entran en la transcripción que firma cada extremo: quien estuviera
+  en medio no puede cambiarlas por las suyas sin romper las dos firmas.
+- **`CanalCifrado.kt`, idéntico en los dos repositorios** (solo cambia el `package`).
+  Tras `AUTH_OK` cada línea viaja como `S:<base64>` con AES-256-GCM. Una clave por
+  sentido (HKDF-SHA256 del secreto ECDH, con los dos nonces de sal) y el IV es un
+  contador implícito: una trama repetida, quitada, reordenada o devuelta a quien la
+  mandó no descifra, y **un solo fallo rompe el canal** y se corta la conexión.
+- **Modo transición (decisión del usuario, 28-sep).** La bodycam sigue aceptando v1
+  (autentica sin cifrar) y comandos en claro de un teléfono que no se empareja,
+  porque sus anclas son las de la CA de pruebas y el backend firma los teléfonos con
+  otras: exigirlo ya dejaría la W1 sin nadie que la maneje. El interruptor es
+  `EXIGIR_CANAL_CIFRADO` en `BtServerService.kt`, hoy `false`.
+- **Lo que sí se exige ya:** `TOKEN` solo por el canal cifrado (`TOKEN_FAIL:hace
+  falta el canal cifrado`). Con el canal puesto, una línea en claro se rechaza en los
+  dos extremos.
+
+### Detalle de este lado
+
+- `EmparejamientoBodycam.kt`: el teléfono solo habla v2. Un `AUTH_ID` sin clave
+  efímera se rechaza (sería una bodycam que no cifra o alguien intentando que no se
+  cifre). `Autenticado` trae el `canal`.
+- `BodycamRepository.kt`: el canal se instala **antes** de `marcarEnlace(SI)`, porque
+  eso dispara `prestarToken()` en otra corrutina (aviso de la sesión de este repo).
+  Mientras se empareja, los comandos esperan en `enEspera` y salen después por el
+  canal que toque (STATUS no se guarda). Una trama que no descifra marca el enlace
+  RECHAZADO y lo corta.
+- `EmparejamientoBodycamTest`: la bodycam de referencia pasa a v2 y hay siete pruebas
+  nuevas: canal en los dos sentidos, intermediario que cambia la efímera, bodycam sin
+  efímera, trama repetida, trama reflejada, trama manipulada y la transcripción v1
+  intacta. **13/13 pasan.**
+
+### Pendiente
+
+- **Sin probar con hardware**: ningún teléfono se acredita hoy ante la W1 (anclas
+  desalineadas). Lo mismo que en BodyCamServer.
+- Un teléfono nuevo con una bodycam vieja (solo v1) queda NO autenticado y en claro,
+  como en modo transición; no hay vuelta atrás automática a v1 a propósito.
+
+---
+
+## 2026-09-25 (5) — Cada instalación tiene su propio `app_instance_id` (workflows 22-23)
+
+### Por qué
+
+Todos los teléfonos mandaban la constante `APPINST-8F27A91C`. El backend crea la instancia al
+verla (`AppInstance.update_or_create`) y la reasigna al último terminal que la presenta: la
+instancia saltaba de un teléfono a otro, y **revocarla habría cortado a todos a la vez**.
+
+### Hecho
+
+- **`IdentityRepository`:** la instancia se genera una vez por instalación (`APPINST-` + 16 hex
+  de `SecureRandom`) y se guarda en `noBackupFilesDir/app_instance_id`. Todas las identidades
+  que se construían desde `IDENTIDAD_DEMO` pasan por `identidadBase()`, que la pone. Viaja
+  sola a `iam/session` y a la auditoría.
+- **Fuera de la copia de seguridad a propósito:** `allowBackup="true"` con las reglas de
+  ejemplo, así que las preferencias se restauran en otro teléfono. Una instancia restaurada
+  sería justo el "APK copiado que hereda" que el modelo prohíbe.
+- Reinstalar o `deshacerAlta()` dan una instancia nueva.
+- Sin cambios en el backend: acepta cualquier id y crea la fila la primera vez.
+
+### Hallazgo (deuda, no se toca hoy)
+
+`android:allowBackup="true"` con `backup_rules.xml` / `data_extraction_rules.xml` de ejemplo:
+la copia automática se lleva `aeria_trust` y el resto de preferencias a Google Drive y las
+restaura en otro terminal. Las claves del Keystore no viajan, así que lo restaurado queda roto
+en vez de suplantar, pero no debería salir del teléfono. Para release: `allowBackup="false"`.
+
+### Pendiente
+
+- **Sin probar en teléfono.** Prueba: `adb shell run-as com.delta.aeria_nexus_prototype cat
+  no_backup/app_instance_id` en dos teléfonos → ids distintos; en el backend, una fila de
+  `AppInstance` por teléfono tras abrir sesión en cada uno.
+
+---
+
+## 2026-09-25 (4) — La sesión se renueva sola y se reintenta si no había red (workflow 29)
+
+### Por qué
+
+Sexto de la lista para la demo. El token de sesión caduca (12 h en el backend,
+`IAM_SESSION_HOURS`; el contrato dice 8) y nadie lo renovaba: al caducar, el teléfono y la W1
+dejaban de subir **sin avisar**, porque la pantalla seguía diciendo que la sesión estaba
+acreditada. Además, repasando: **si al poner el PIN no había red, la sesión se quedaba
+`SOLO_LOCAL` hasta el siguiente desbloqueo**, no se reintentaba nunca.
+
+### Hecho
+
+- **`IdentityRepository.mantenerAcreditada(sesion)`** sustituye a la acreditación de un solo
+  disparo. Un bucle por sesión que:
+  - acredita al desbloquear y **reintenta** con espera creciente (30 s, 1, 2 y 5 min);
+  - **renueva 10 min antes** de que caduque. El backend no tiene endpoint de renovación:
+    renovar es abrir otra sesión con un reto nuevo, y la clave del agente lo firma sin
+    pedir el PIN porque sigue autorizada mientras la app esté desbloqueada;
+  - si caduca sin renovarse, **vuelve a `SOLO_LOCAL` a la vista** y lo registra.
+- Al renovar, el token anterior se cierra en el backend en cuanto el nuevo está guardado.
+- La W1 recibe el token nuevo sola (sigue el `StateFlow` de `SesionBackend`), y al caducar
+  recibe `TOKEN_CLEAR`.
+- Tras cada acreditación, también las renovaciones, se reanudan las subidas pendientes.
+- La espera larga va a pasos de 1 min contra el reloj de pared: `delay` no avanza con el
+  teléfono en reposo profundo.
+- `lock()` cancela el bucle. Auditoría: `SESION_ACREDITADA` / `SESION_NO_ACREDITADA` llevan
+  `renewal`, y la caducidad sin renovar deja `reason=token expired`.
+
+### Pendiente
+
+- **Sin probar en teléfono.** Prueba corta: backend con `IAM_SESSION_HOURS=1` (son horas
+  enteras) → a los ~50 min "sesion renovada" en el log y la W1 recibe otro token. Y sin
+  el túnel al desbloquear → `SOLO_LOCAL`; poner el túnel → acreditada en ≤ 30 s, sin
+  volver a poner el PIN.
+
+---
+
+## 2026-09-25 (3) — Los vídeos de la bodycam salen a nombre del agente atado, no de "John Smith"
+
+### Por qué
+
+Tercero de la lista para la demo. La W1 rotulaba y firmaba el manifiesto con un oficial fijo
+(`HardcodedOfficer`: John Smith, 36975) aunque el que había entrado fuese `cmendez`.
+
+### Hecho (lado teléfono)
+
+- **`BindingPeriferico.declaracion`** lleva `officer_name`, `officer_rank` y `officer_badge`
+  (nuevo `OficialRotulado`). Van **dentro de lo firmado** por el agente: la cámara no rotula
+  nada que él no haya firmado. Se escapan con `JSONObject.quote` porque son texto libre.
+- `atarAlAgente` los saca de `incidentRepository.officerProfile`, el mismo perfil que va en el
+  manifiesto de los incidentes del teléfono (hoy `OfficerSampleData`: Carlos Mendez, P-4471).
+- La versión de la declaración no cambia: los campos son añadidos y la W1 no comprueba `v`.
+- Sin prueba JVM: `org.json` en los tests es el stub de Android y no merece añadirlo por esto.
+
+### Pendiente
+
+- **Sin probar con hardware**, y depende de que la atadura (wf 33) funcione en los aparatos,
+  que sigue sin verificar. Si no ata, los vídeos salen **UNASSIGNED**. El lado de la W1 está
+  en su DEVLOG del mismo día.
+
+---
+
+## 2026-09-25 (2) — La bodycam sube con el token de la sesión, prestado por el teléfono
+
+### Por qué
+
+Segundo de la lista para la demo. La W1 subía con `stub-token` y el backend real lo rechaza
+(401): **sus vídeos no llegaban**. El backend solo abre sesión al teléfono. Opciones: token
+reducido ligado al binding (toca backend), sesión propia de la unidad (toca más backend) o
+prestarle el del teléfono. **El usuario eligió la última**: sin cambios en el backend, que
+además comparte con otra persona (rama `dev_auth_supa` con cambios sin commitear).
+
+### Hecho
+
+- **`SesionBackend`** expone la sesión como `StateFlow` (`actual`); `token()` no cambia.
+- **`BodycamRepository.prestarToken()`**: combina el enlace autenticado con la sesión. Con
+  enlace `SI` y sesión manda `TOKEN:<jwt>:<segundos que le quedan>`; con enlace `SI` y sin
+  sesión, `TOKEN_CLEAR`. Por un enlace sin autenticar **no se manda nada**. Al reconectar el
+  enlace pasa por `DESCONOCIDO` y vuelve a `SI`, así que se reenvía solo.
+- Segundos de vida y no hora de caducidad: la W1 ha llegado a ir 6 h desfasada.
+- Bloquear o terminar el turno olvida la sesión, y eso manda el `TOKEN_CLEAR`.
+- El lado de la unidad está en el DEVLOG de BodyCamServer del mismo día.
+
+### Lo que se acepta
+
+La W1 lleva **todos** los alcances del agente durante el turno, por un RFCOMM sin cifrar, y en
+el backend sus subidas figuran con el terminal del agente como dispositivo. La salida limpia
+es un token reducido ligado al binding. No está en `aeria-contracts`: si se mantiene, hay que
+apuntarlo en su CHANGELOG (afecta a TEL y BWC).
+
+### Pendiente
+
+- **Sin probar con hardware**. Prueba: backend + túnel, desbloquear el teléfono (sesión
+  acreditada) con la W1 enlazada → en el log de la W1 "token de la sesión recibido"; grabar
+  un incidente en la W1 → llega al backend. Bloquear → "token de la sesión retirado".
+
+---
+
+## 2026-09-25 — Los reintentos de subida ya no parten el incidente
+
+### Por qué
+
+Pendiente del 18-sep, primero de la lista para la demo. Lo que se capturaba sin sesión con
+AeriaOne (o sin red) salía después por `resumePending`, que llamaba a `deliver` con `incident_id`,
+`sha256_plain`, `evidence_id`, `label` y `media_type` a null: al reintentar solo quedaba el `.fev`.
+El backend abría un incidente por fichero; así se partió en 3 la prueba de aquella mañana.
+
+### Hecho
+
+- **`EvidenceUploader`:** `enqueue` y `enqueueVideo` guardan esos datos en
+  `<nombre>.fev.evidence.json` junto al `.fev`, **antes** de mirar si la subida está configurada.
+  Es el mismo patrón que el `.proxy.json` del proxy. `resumePending` lo lee; si no existe (los
+  `.fev` de antes de este cambio) se comporta como hasta ahora.
+- Una sesión de subida que ya existía en el servidor conserva la metadata del primer intento; el
+  fallo solo pasaba cuando el primer intento no llegó a abrirla (típico: sin token).
+- Otras lecturas de la carpeta `evidence/` filtran por `.fev`, así que el json no aparece como
+  evidencia. El fichero no se borra al entregar, igual que el recibo.
+
+### Pendiente
+
+- **Sin verificar en teléfono**: ni aparato conectado ni backend local levantado. Compila.
+  Prueba: sin el `adb reverse` desbloquear (la sesión se queda `SOLO_LOCAL`), abrir incidente
+  y capturar foto + vídeo; poner el túnel, bloquear y desbloquear → en el backend un solo
+  incidente con las dos piezas, `media_type` correcto y `sha256_plain`.
+
+---
+
+## 2026-09-20 — Cancelar desde el móvil la subida de una evidencia de la bodycam
+
+### Por qué
+
+Una unidad estaba subiendo `INC_000032` una y otra vez. No es un fallo de la bodycam: su
+reanudación **no se rinde nunca** por diseño (reencola cada incidente sin entregar en cada arranque
+y reintenta con espera creciente). Para una evidencia real sin cobertura es lo que queremos; para
+una prueba vieja o un destino mal configurado, es un bucle infinito. Faltaba la puerta de salida, y
+el teléfono es el único sitio con pantalla para enseñar la lista y elegir: la de la unidad mide 3 cm.
+
+### Hecho
+
+- **`BodycamRepository`:** modelo `SubidaDeEvidencia` (id, entregada, cancelada, pendiente), flujo
+  `subidas`, y `pedirSubidas()` / `cancelarSubida(id)` / `reanudarSubida(id)`. La lista llega en la
+  línea `UPLOADS:[...]` del mismo canal de texto.
+  **No viaja en el `STATUS` de cada 5 s** a propósito: puede tener decenas de incidentes y no cambia
+  sola, así que se pide al mirarla.
+- **`SubidasBodycamViewModel` + `SubidasBodycamScreen` (nuevos):** lista con tres estados
+  —DELIVERED, PENDING, CANCELLED—, botón CANCEL con diálogo de confirmación y QUEUE AGAIN para
+  devolver a la cola. Se refresca sola al recuperar el enlace.
+- **Navegación:** ruta `bodycam/uploads`, con botón UPLOADS en el controlador de la bodycam.
+
+### La decisión que manda en esta pantalla
+
+**Cancelar no borra el vídeo.** Corta la transferencia y saca el incidente de la cola; el vídeo se
+queda en la cámara y volver a encolarlo no repite un solo byte, porque el servidor conserva los
+bloques que ya recibió. El diálogo lo dice con esas palabras: si diera a entender que borra, nadie
+se atrevería a usarlo. Una bodycam donde un botón hace desaparecer evidencia no es defendible en
+cadena de custodia.
+
+### Pendiente
+
+- **Sin probar con hardware**: no había ni bodycam ni teléfono conectados. Compila.
+- El lado de la bodycam va en la rama `dev_device_owner` de BodyCamServer (comandos `UPLOAD_LIST`,
+  `UPLOAD_CANCEL:<id>`, `UPLOAD_RESUME:<id>`). **Las dos ramas tienen que ir juntas**: sin la app
+  nueva de la unidad, esta pantalla no recibe nada.
+- Pasar el agente de coherencia entre las dos apps: esto amplía el contrato Bluetooth.
+
+### Próximo paso
+
+Probar las dos apps juntas contra el stub de subida.
+
+---
+
+## 2026-09-18 — La app habla con el backend de verdad: alta, sesión, subida autenticada, manifiesto y ubicación
+
+Rama nueva **`dev_back_connection`** (la creó el usuario) para todo lo que conecta la app con
+`aeria-nexus`. Backend en `D:\AeriaOne\aeria-nexus`, contratos en `D:\AeriaOne\aeria-contracts`.
+
+### Por qué (petición del usuario)
+
+"Estoy creando incidentes pero no suben al backend." El diagnóstico dio tres causas:
+1. No había `upload.conf` en el teléfono: la subida estaba desactivada a propósito.
+2. La app mandaba `Authorization: Bearer stub-token` y el backend exige un JWT de sesión con
+   alcance `video.upload` → `401 Token no valido: Not enough segments`.
+3. El incidente solo vivía en Room: al backend llegaban ficheros sueltos, sin tipo, ubicación
+   ni línea de tiempo, y un incidente sin evidencia no llegaba nunca.
+
+### Hecho
+
+- **Entorno de pruebas sin tocar el backend:** `adb reverse tcp:8000 tcp:8000` y `upload.conf` con
+  `base_url=http://127.0.0.1:8000/files/` y `api_url=http://127.0.0.1:8000/api/`. El túnel se pierde
+  al desconectar el cable.
+- **`IamClient` (nuevo):** `iam/devices/enroll`, `iam/users/enroll`, `iam/challenge`, `iam/session` y
+  `iam/session/logout`, contrato `aeria-contracts/iam-session.md`.
+- **Alta contra el IAM real (se SUSTITUYE el alta por adb, decisión del usuario):**
+  - `EnrollmentViewModel`: el reto de atestación lo emite AeriaOne; el teléfono **adopta el
+    `device_id` que asigna el backend** (`EnrollmentRepository.adoptarDeviceId`) y encadena solo
+    la fase del agente. Si falla, el paso queda en rojo con el motivo del backend y botón TRY AGAIN.
+  - `CredentialRepository.firmarSolicitud`: el terminal firma **los bytes UTF-8 del PEM tal cual se
+    envía**. Antes firmaba el DER, que es una firma correcta que el backend rechaza.
+  - Fuera: `RetoRepository`, los intents `device_cert`/`user_cert`/`challenge` de `MainActivity` y
+    `registrarPosesion`. Se queda `peripheral_anchor` (bodycam). `PropositoDelReto` pasa a su fichero.
+  - Obsoletos pero NO borrados: `tools/alta-terminal.sh`, `alta-agente.sh` y `reto.sh`
+    (`alta-bodycam.sh` sigue usando `tools/ca-pruebas`).
+- **Sesión:** `IdentityRepository.unlock` abre al instante como `SOLO_LOCAL` y en segundo plano pide
+  el reto, lo firma con la clave del agente y guarda el token en **`SesionBackend`** (solo memoria).
+  Pasa a `ACREDITADA` y avisa (`alAcreditarSesion`). Al bloquear, el token se invalida también en el
+  backend. Eventos de auditoría nuevos: `SESION_ACREDITADA` y `SESION_NO_ACREDITADA`.
+- **Subida y SOS con el token:** `UploadConfig.token()` sale de la sesión (la línea `token=` del
+  `upload.conf` ya no se usa). Sin sesión no se intenta subir; lo pendiente sale al acreditarse.
+- **`media_type`** (`photo`/`video`/`audio`) en cada subida `kind=evidence`.
+- **Manifiesto del incidente** (`ManifiestoDelTelefono` + `ManifestUploader`, nuevos): esquema
+  `phone-incident/1` de `manifest-schema.md` §5. Se sube, en claro, cada vez que el incidente se
+  guarda: al cerrarlo, al crearlo desde una importación y al añadirle evidencia.
+  `IncidentRepository.onIncidentSaved` pasa a recibir el incidente.
+- **Ubicación real:** `LocationRepository.posicionActual()` (fix de hasta 10 s, si no la última
+  conocida) y `direccionDe()` (Geocoder, 5 s). El incidente abre al momento con "Locating…" y se
+  completa después; sin dirección se guardan coordenadas y sin fix se dice por qué. **Room v3**
+  (`latitude`/`longitude`, migración de verdad). En Operations se pide el permiso de ubicación al
+  pulsar nuevo incidente, y se abre aunque se niegue. `updateActiveIncident` ahora es atómico.
+
+### Decisiones
+
+- **El PIN no espera a la red:** sin cobertura el agente trabaja, y la sesión dice que es local.
+- **Un token que llega tarde** (el agente bloqueó mientras iba el reto) se invalida, no se guarda.
+- **El manifiesto va aparte de la evidencia:** no está cifrado, se reemplaza entero y el backend
+  aplica el último.
+
+### Verificado en el Samsung contra el backend local
+
+- Alta completa: `DEV-6B85FB5C` enrolado y relación `cmendez.aeriaone.com ↔ DEV-6B85FB5C`.
+- PIN → sesión acreditada → las 4 subidas pendientes entregadas con hash confirmado.
+- Incidente con foto: un solo incidente en el backend con tipo, prioridad, línea de tiempo y la
+  foto con su clasificación (VEHICLE).
+- Incidente con vídeo: proxy + original + manifiesto; ubicación real ("Carrer de París, 50,
+  Sabadell") y coordenadas en `gps_location`.
+
+### Pendiente
+
+- **Lo que se reintenta al abrir sesión pierde `incident_id`, `sha256_plain` y `media_type`**
+  (`resumePending` llama a `deliver` con nulos). Así se partió en 3 incidentes lo de esta mañana.
+  Guardar esos datos junto al `.fev`, como ya hace el proxy.
+- `appInstanceId` es la constante de demo `APPINST-8F27A91C` para todos los teléfonos.
+- El agente sigue siendo el de demo (`cmendez.aeriaone.com`, `OfficerSampleData`); tiene que
+  existir en el backend (`seed_identities`).
+- El ancla de periféricos sigue siendo la CA de pruebas por adb; el backend ya devuelve la suya.
+
+### Bodycam, el mismo día
+
+Modo noche automático en BodyCamServer (IR, filtro IR-CUT y blanco y negro). Se cuenta en el DEVLOG
+de BodyCamServer; **falta probar el SOS en monocromo**.
+
+### Próximo paso
+
+Arreglar la pérdida de `incident_id` en los reintentos.
 
 ---
 

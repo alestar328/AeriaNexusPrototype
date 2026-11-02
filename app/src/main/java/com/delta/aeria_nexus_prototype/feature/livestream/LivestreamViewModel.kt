@@ -4,11 +4,15 @@ import android.view.TextureView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.delta.aeria_nexus_prototype.data.AgoraRepository
+import com.delta.aeria_nexus_prototype.data.IncidentRepository
 import com.delta.aeria_nexus_prototype.data.OfficerSampleData
 import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -29,16 +33,17 @@ data class LivestreamUiState(
  */
 class LivestreamViewModel(
     private val agoraRepository: AgoraRepository,
+    private val incidentRepository: IncidentRepository,
     val watchUid: Int,
 ) : ViewModel() {
 
     val isBroadcaster: Boolean = watchUid == OWN_CAMERA_UID
 
-    // Ficha del agente que sale en pantalla: la propia al emitir, la del
-    // emisor del SOS al mirar. Null si la placa no esta en el padron (por
-    // ejemplo el stream de la bodycam, que no tiene agente asignado).
+    // Ficha del agente que sale en pantalla: la propia al emitir, sacada del perfil
+    // de la sesion, y la del emisor del SOS al mirar. Null si no se sabe (sin perfil
+    // de AeriaOne, o una placa fuera del padron, como el stream de la bodycam).
     val agent: AgentIdCard? = if (isBroadcaster) {
-        OfficerSampleData.findAgent(OfficerSampleData.profile.officerNum)
+        fichaPropia()
     } else {
         agoraRepository.sosOfficer(watchUid)?.let(OfficerSampleData::findAgent)
     }
@@ -112,10 +117,59 @@ class LivestreamViewModel(
     /** Cancela el SOS propio (solo tiene efecto en modo emisor). */
     fun cancelSos() = agoraRepository.cancelSos()
 
+    // PTT del receptor: contestar por voz al agente del SOS. Es el mismo PTT
+    // propio que el de Operations y, desde el 2026-09-29, tambien conmutador
+    // (peticion del usuario). El olvido del micro abierto lo acota onCleared:
+    // salir del directo lo cierra. El emisor no lo necesita: su microfono ya
+    // sale con el livestream.
+    val pttActivo: StateFlow<Boolean> = agoraRepository.pttPropioActivo
+    val pttPisadoPor: StateFlow<String?> = agoraRepository.pttPisadoPor
+
+    fun tienePermisoMicrofono(): Boolean = agoraRepository.tienePermisoMicrofono()
+
+    fun alternarPtt() {
+        if (pttActivo.value) {
+            agoraRepository.terminarPtt()
+        } else {
+            agoraRepository.iniciarPtt(incidentRepository.agenteDeLaSesion().placa)
+        }
+    }
+
+    // Receptor: el directo que se ve, silenciado solo en este telefono.
+    val directoSilenciado: StateFlow<Boolean> = agoraRepository.directosSilenciados
+        .map { watchUid in it }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun alternarSilencioDirecto() = agoraRepository.alternarSilencioDirecto(watchUid)
+
+    // Emisor: su microfono y la voz de los demas durante el SOS.
+    val microCerrado: StateFlow<Boolean> = agoraRepository.microSosCerrado
+    val entranteSilenciado: StateFlow<Boolean> = agoraRepository.entranteSilenciado
+
+    fun alternarMicro() = agoraRepository.alternarMicroSos()
+
+    fun alternarSilencioEntrante() = agoraRepository.alternarSilencioEntrante()
+
     override fun onCleared() {
         // Al salir de la pantalla el receptor deja de escuchar la voz del
         // emisor; el emisor NO corta nada: su SOS sigue hasta que lo cancele.
-        if (!isBroadcaster) agoraRepository.stopWatching(watchUid)
+        if (!isBroadcaster) {
+            agoraRepository.stopWatching(watchUid)
+            agoraRepository.terminarPtt()
+        }
+    }
+
+    /** El grupo sanguineo no lo da AeriaOne: se deja en blanco antes que inventarlo. */
+    private fun fichaPropia(): AgentIdCard? {
+        val perfil = incidentRepository.agenteDeLaSesion()
+        if (perfil.nombre.isBlank() && perfil.placa.isBlank()) return null
+        return AgentIdCard(
+            firstName = perfil.nombre,
+            lastName = "",
+            badgeNumber = perfil.placa,
+            rank = perfil.rango,
+            bloodType = "",
+        )
     }
 
     companion object {

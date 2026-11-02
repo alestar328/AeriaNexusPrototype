@@ -41,6 +41,9 @@ data class IncidentEntity(
     val narrative: String?,
     // Para ordenar la lista del mas reciente al mas antiguo.
     val createdAtMillis: Long,
+    // v3. Null en los incidentes anteriores y cuando no hubo fix.
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 )
 
 @Entity(
@@ -123,6 +126,8 @@ fun IncidentWithDetails.toDomain(): OfficerIncident = OfficerIncident(
     narrative = incident.narrative,
     timeline = timeline.sortedBy { it.position }.map { it.toDomain() },
     evidence = evidence.sortedBy { it.position }.map { it.toDomain() },
+    latitude = incident.latitude,
+    longitude = incident.longitude,
 )
 
 private fun TimelineEntryEntity.toDomain() = TimelineEntry(
@@ -165,6 +170,8 @@ fun OfficerIncident.toEntity(createdAtMillis: Long) = IncidentEntity(
     duration = duration,
     narrative = narrative,
     createdAtMillis = createdAtMillis,
+    latitude = latitude,
+    longitude = longitude,
 )
 
 fun TimelineEntry.toEntity(incidentId: String, position: Int) = TimelineEntryEntity(

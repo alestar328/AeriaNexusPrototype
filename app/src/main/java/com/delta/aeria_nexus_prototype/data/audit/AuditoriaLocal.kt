@@ -24,13 +24,23 @@ private const val TAG = "AeriaAuditoria"
 enum class TipoEvento(val familia: String, val texto: String) {
     AUDITORIA_INICIADA("security", "Audit log started"),
     AUDITORIA_REINICIADA("security", "Audit log restarted without its key"),
+    BASE_EN_CUARENTENA("security", "Local database quarantined: its key could not be read"),
 
     SESION_ABIERTA("session", "Session opened"),
+    SESION_ACREDITADA("session", "Session accredited by AeriaOne"),
+    SESION_NO_ACREDITADA("session", "AeriaOne did not accredit the session"),
     PIN_INCORRECTO("session", "Wrong PIN"),
     PIN_BLOQUEO_TEMPORAL("session", "PIN keypad locked out"),
     PIN_CAMBIADO("session", "PIN changed"),
     PIN_CAMBIO_FALLIDO("session", "PIN change could not be stored"),
     SESION_CERRADA("session", "Session closed"),
+    CREDENCIAL_EN_GRACIA("session", "Credential expired during a recording"),
+    CREDENCIAL_CADUCADA("session", "Credential expired: phone out of service"),
+    AGENTE_RETIRADO("session", "Revoked officer removed from this phone"),
+    CERTIFICADO_RENOVADO("session", "Certificate renewed with a new key"),
+    CERTIFICADO_NO_RENOVADO("session", "Certificate renewal failed"),
+    TERMINAL_EN_CUARENTENA("security", "Phone quarantined by AeriaOne"),
+    TERMINAL_RETIRADO("security", "Phone decommissioned: keys and identity destroyed"),
 
     BODYCAM_ENLACE("peripheral", "Bodycam link checked"),
     ATADURA_CREADA("peripheral", "Bodycam bound to officer"),
@@ -41,7 +51,11 @@ enum class TipoEvento(val familia: String, val texto: String) {
     BOVEDA_ABIERTA("evidence", "Evidence vault unlocked"),
     BOVEDA_CONTRASENA_INCORRECTA("evidence", "Wrong vault password"),
     BOVEDA_CERRADA("evidence", "Evidence vault sealed"),
+    BOVEDA_REINICIADA("evidence", "Evidence vault reset after a forgotten password"),
     EVIDENCIA_VISUALIZADA("evidence", "Evidence opened"),
+
+    SOS_MICROFONO("emergency", "SOS microphone switched"),
+    SOS_SILENCIO_ENTRANTE("emergency", "Other officers muted during SOS"),
 }
 
 /** Quien y desde donde, en el momento del evento (§14.1). */

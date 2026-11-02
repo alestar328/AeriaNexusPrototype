@@ -62,7 +62,7 @@ import kotlinx.coroutines.delay
 
 /** Pestanas principales de la barra de navegacion inferior. */
 enum class MainTab(val label: String, val icon: ImageVector) {
-    OPERATIONS("Operations", Icons.Filled.Bolt),
+    OPERATIONS("Ops", Icons.Filled.Bolt),
     MAP("Map", Icons.Filled.Map),
     INCIDENTS("Incidents", Icons.Filled.Description),
     PROFILE("Profile", Icons.Filled.Person),
@@ -125,6 +125,7 @@ private fun StatusBar(
     // observa el repositorio directamente en lugar de pasar por un ViewModel.
     val bodycamState by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
     val enlaceBodycam by AppContainer.bodycamRepository.enlaceAutenticado.collectAsStateWithLifecycle()
+    val bodycamEnCuarentena by AppContainer.bodycamRepository.camaraEnCuarentena.collectAsStateWithLifecycle()
     val gafasState by AppContainer.gafasRepository.state.collectAsStateWithLifecycle()
     val estadoCanal by AppContainer.agoraRepository.estadoCanal.collectAsStateWithLifecycle()
 
@@ -167,7 +168,7 @@ private fun StatusBar(
         // pero sin acreditar se verian igual, y la diferencia importa mas que la
         // conexion. Cuando todo esta en orden no se escribe nada; el aviso solo
         // aparece cuando hay algo que decir.
-        avisoDelEnlace(bodycamState, enlaceBodycam)?.let { aviso ->
+        avisoDelEnlace(bodycamState, enlaceBodycam, bodycamEnCuarentena)?.let { aviso ->
             Spacer(Modifier.width(6.dp))
             Text(
                 text = aviso.texto,
@@ -242,8 +243,10 @@ private fun indicadorDelCanal(estado: EstadoCanal): Pair<Color, String> = when (
 /** Lo que se escribe junto al icono, o null si no hay nada que advertir. */
 private data class AvisoDeEnlace(val texto: String, val color: Color)
 
-private fun avisoDelEnlace(state: BodycamState, enlace: EnlaceAutenticado): AvisoDeEnlace? {
+private fun avisoDelEnlace(state: BodycamState, enlace: EnlaceAutenticado, enCuarentena: Boolean): AvisoDeEnlace? {
     if (state != BodycamState.CONNECTED) return null
+    // Por encima de todo: AeriaOne no deja usar esta camara.
+    if (enCuarentena) return AvisoDeEnlace("QUARANTINED", RojoSuave)
     return when (enlace) {
         // Lo normal no se anuncia: si cada enlace correcto pusiera una etiqueta,
         // el agente dejaria de leerlas y la que importa pasaria desapercibida.

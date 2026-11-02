@@ -109,7 +109,8 @@ private fun LockContent(
                 verticalArrangement = Arrangement.Center,
             ) {
                 Cabecera(sessionExpired = uiState.sessionExpired, apretado = apretado)
-                uiState.emisorDelRetoPendiente?.let { AvisoDeReto(it) }
+                if (uiState.conAeriaOne) AvisoDeReto()
+                uiState.diasParaCaducar?.let { AvisoDeCaducidad(dias = it) }
                 Spacer(Modifier.height(hueco))
                 uiState.identity?.let { TarjetaIdentidad(identity = it, apretado = apretado) }
             }
@@ -175,6 +176,28 @@ private fun Cabecera(sessionExpired: Boolean, apretado: Boolean) {
 }
 
 /**
+ * La credencial caduca pronto (workflow 53). Amarillo y no rojo: todavia no pasa
+ * nada, pero cuando pase el telefono se queda fuera de servicio.
+ */
+@Composable
+private fun AvisoDeCaducidad(dias: Long) {
+    Spacer(Modifier.height(14.dp))
+    Text(
+        text = if (dias == 1L) "CREDENTIAL EXPIRES IN 1 DAY" else "CREDENTIAL EXPIRES IN $dias DAYS",
+        color = AmarilloAviso,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.5.sp,
+    )
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "Ask your supervisor to renew it. When it expires this phone goes out of service.",
+        color = TextoSecundario,
+        fontSize = 13.sp,
+    )
+}
+
+/**
  * Aviso de que el PIN, ademas de abrir la app, va a firmar un reto de AeriaOne.
  *
  * Se dice antes y no despues porque cambia lo que el agente esta haciendo: no
@@ -182,10 +205,10 @@ private fun Cabecera(sessionExpired: Boolean, apretado: Boolean) {
  * detalle: significa que nadie del otro lado ha comprobado nada.
  */
 @Composable
-private fun AvisoDeReto(emisor: String) {
+private fun AvisoDeReto() {
     Spacer(Modifier.height(14.dp))
     Text(
-        text = "AERIAONE CHALLENGE PENDING",
+        text = "AERIAONE SIGN-IN",
         color = AzulClaro,
         fontSize = 10.sp,
         fontWeight = FontWeight.Bold,
@@ -193,7 +216,7 @@ private fun AvisoDeReto(emisor: String) {
     )
     Spacer(Modifier.height(4.dp))
     Text(
-        text = "Your PIN will sign it with your credential · $emisor",
+        text = "Your PIN will sign an AeriaOne challenge with your credential",
         color = TextoSecundario,
         fontSize = 13.sp,
     )
@@ -322,14 +345,14 @@ private fun LockScreenPreview() {
     }
 }
 
-@Preview(name = "Con reto pendiente", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
+@Preview(name = "Con AeriaOne", showBackground = true, backgroundColor = 0xFF080B12, heightDp = 800)
 @Composable
 private fun LockScreenConRetoPreview() {
     AeriaNexusPrototypeTheme {
         LockContent(
             uiState = LockUiState(
                 identity = IDENTIDAD_PREVIEW,
-                emisorDelRetoPendiente = "AeriaOne-challenge-service-test",
+                conAeriaOne = true,
             ),
             onDigito = {},
             onBorrar = {},

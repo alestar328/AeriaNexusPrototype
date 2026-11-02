@@ -1,6 +1,9 @@
 package com.delta.aeria_nexus_prototype.feature.livestream
 
+import android.Manifest
 import android.view.TextureView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -40,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
+import com.delta.aeria_nexus_prototype.ui.components.PttToggleButton
 import com.delta.aeria_nexus_prototype.ui.theme.RojoCritico
 import com.delta.aeria_nexus_prototype.ui.theme.TextoSecundario
 import java.time.Instant
@@ -48,9 +52,10 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Pantalla de livestream del SOS, a pantalla completa sobre fondo negro.
- * Emisor: previsualiza su propia camara mientras se publica al canal, con el
- * boton para cancelar el SOS. Receptor: ve en vivo la camara del emisor y un
- * aviso de "Signal cut" si este corta la senal.
+ * Emisor: previsualiza su propia camara mientras se publica al canal, puede
+ * cerrar su micro o dejar de oir a los demas, y cancelar el SOS. Receptor: ve en
+ * vivo la camara del emisor, puede silenciarla en su telefono, le contesta con
+ * el PTT conmutador y ve un aviso de "Signal cut" si este corta la senal.
  */
 @Composable
 fun LivestreamScreen(
@@ -58,6 +63,17 @@ fun LivestreamScreen(
     onClose: () -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val pttActivo by viewModel.pttActivo.collectAsStateWithLifecycle()
+    val pttPisadoPor by viewModel.pttPisadoPor.collectAsStateWithLifecycle()
+    val directoSilenciado by viewModel.directoSilenciado.collectAsStateWithLifecycle()
+    val microCerrado by viewModel.microCerrado.collectAsStateWithLifecycle()
+    val entranteSilenciado by viewModel.entranteSilenciado.collectAsStateWithLifecycle()
+
+    // Sin microfono se pide al pulsar. Al concederlo NO se abre solo: abrir el
+    // micro tiene que ser siempre un gesto del agente, no el efecto de un dialogo.
+    val pttPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
 
     // Si el emisor cancela su SOS desde otra pantalla, esta ya no tiene sentido.
     LaunchedEffect(uiState.sosActive) {
@@ -76,27 +92,50 @@ fun LivestreamScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        TopBar(isBroadcaster = viewModel.isBroadcaster, onClose = onClose)
+        TopBar(isBroadcaster = viewModel.isBroadcaster, onClose = onClose) {
+            if (!viewModel.isBroadcaster) {
+                BotonSilenciarDirecto(
+                    silenciado = directoSilenciado,
+                    onClick = viewModel::alternarSilencioDirecto,
+                )
+            }
+        }
 
         viewModel.agent?.let { agente ->
             AgentInfoCard(
                 agent = agente,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    // Sobre el emisor la tarjeta sube para no tapar CANCEL SOS.
-                    .padding(
-                        start = 16.dp,
-                        bottom = if (viewModel.isBroadcaster) 128.dp else 32.dp,
-                    ),
+                    // La tarjeta sube para no tapar los controles de abajo.
+                    .padding(start = 16.dp, bottom = if (viewModel.isBroadcaster) 196.dp else 128.dp),
             )
         }
 
+        val posicionControles = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(horizontal = 16.dp, vertical = 32.dp)
         if (viewModel.isBroadcaster) {
-            CancelSosButton(
-                onClick = viewModel::cancelSos,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 32.dp),
+            ControlesDelEmisor(
+                microCerrado = microCerrado,
+                entranteSilenciado = entranteSilenciado,
+                onAlternarMicro = viewModel::alternarMicro,
+                onAlternarEntrante = viewModel::alternarSilencioEntrante,
+                onCancelarSos = viewModel::cancelSos,
+                modifier = posicionControles,
+            )
+        } else {
+            PttToggleButton(
+                activo = pttActivo,
+                pisadoPor = pttPisadoPor,
+                onClick = {
+                    if (pttActivo || viewModel.tienePermisoMicrofono()) {
+                        viewModel.alternarPtt()
+                    } else {
+                        pttPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                },
+                fondoEnReposo = Color.Black.copy(alpha = 0.6f),
+                modifier = posicionControles,
             )
         }
 
@@ -113,7 +152,11 @@ fun LivestreamScreen(
 }
 
 @Composable
-private fun TopBar(isBroadcaster: Boolean, onClose: () -> Unit) {
+private fun TopBar(
+    isBroadcaster: Boolean,
+    onClose: () -> Unit,
+    accionDerecha: @Composable () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -137,6 +180,8 @@ private fun TopBar(isBroadcaster: Boolean, onClose: () -> Unit) {
         }
         Spacer(Modifier.width(12.dp))
         LiveBadge(text = if (isBroadcaster) "SOS BROADCASTING" else "LIVE — EMERGENCY")
+        Spacer(Modifier.weight(1f))
+        accionDerecha()
     }
 }
 
@@ -189,16 +234,17 @@ private fun AgentInfoCard(agent: AgentIdCard, modifier: Modifier = Modifier) {
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
-            text = "${agent.firstName} ${agent.lastName}".uppercase(),
+            text = "${agent.firstName} ${agent.lastName}".trim().uppercase(),
             color = Color.White,
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp,
         )
         Spacer(Modifier.height(6.dp))
-        AgentDataRow(label = "Badge", value = agent.badgeNumber)
-        AgentDataRow(label = "Rank", value = agent.rank)
-        AgentDataRow(label = "Blood type", value = agent.bloodType)
+        // Lo que AeriaOne no da (el grupo sanguineo, hoy) no se pinta vacio.
+        listOf("Badge" to agent.badgeNumber, "Rank" to agent.rank, "Blood type" to agent.bloodType)
+            .filter { (_, valor) -> valor.isNotBlank() }
+            .forEach { (etiqueta, valor) -> AgentDataRow(label = etiqueta, value = valor) }
     }
 }
 
@@ -212,27 +258,6 @@ private fun AgentDataRow(label: String, value: String) {
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun CancelSosButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(RojoCritico)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "CANCEL SOS",
-            color = Color.White,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 2.sp,
         )
     }
 }

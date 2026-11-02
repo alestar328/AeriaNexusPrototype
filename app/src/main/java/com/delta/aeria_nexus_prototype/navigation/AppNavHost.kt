@@ -4,7 +4,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -12,10 +15,16 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.delta.aeria_nexus_prototype.BuildConfig
 import com.delta.aeria_nexus_prototype.data.AppContainer
+import com.delta.aeria_nexus_prototype.data.BodycamState
+import com.delta.aeria_nexus_prototype.data.GafasState
+import com.delta.aeria_nexus_prototype.feature.profile.FichaDelAgente
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentScreen
 import com.delta.aeria_nexus_prototype.feature.activeincident.ActiveIncidentViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.SubidasBodycamScreen
+import com.delta.aeria_nexus_prototype.feature.bodycam.SubidasBodycamViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamControllerViewModel
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderScreen
 import com.delta.aeria_nexus_prototype.feature.bodycam.BodycamViewfinderViewModel
@@ -27,6 +36,9 @@ import com.delta.aeria_nexus_prototype.feature.gafas.GafasControlViewModel
 import com.delta.aeria_nexus_prototype.feature.incidentdetail.IncidentDetailScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListScreen
 import com.delta.aeria_nexus_prototype.feature.incidentlist.IncidentListViewModel
+import com.delta.aeria_nexus_prototype.data.identity.FaseDeCaducidad
+import com.delta.aeria_nexus_prototype.feature.credencial.ALTO_BANDA_GRACIA
+import com.delta.aeria_nexus_prototype.feature.credencial.CredencialEnGraciaOverlay
 import com.delta.aeria_nexus_prototype.feature.livestream.LivestreamScreen
 import com.delta.aeria_nexus_prototype.feature.livestream.LivestreamViewModel
 import com.delta.aeria_nexus_prototype.feature.map.MapScreen
@@ -50,6 +62,7 @@ import com.delta.aeria_nexus_prototype.feature.vault.VaultScreen
 import com.delta.aeria_nexus_prototype.feature.vault.VaultViewModel
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.currentBackStackEntryAsState
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.MainTab
@@ -80,6 +93,8 @@ object Routes {
     const val BODYCAM_VIEWFINDER = "bodycam/viewfinder"
     // Monitor de la grabacion en curso de la bodycam (misma pantalla, modo REC).
     const val BODYCAM_REC_MONITOR = "bodycam/recording"
+    // Subidas de evidencia de la bodycam, con el boton de cancelar.
+    const val BODYCAM_UPLOADS = "bodycam/uploads"
     // Mando a distancia de las gafas BleeqUp (grabacion y foto por BLE).
     const val GAFAS = "gafas"
 
@@ -179,6 +194,7 @@ fun AppNavHost() {
                 },
                 onOpenViewfinder = { navController.navigate(Routes.BODYCAM_VIEWFINDER) },
                 onOpenRecordingMonitor = { navController.navigate(Routes.BODYCAM_REC_MONITOR) },
+                onOpenUploads = { navController.navigate(Routes.BODYCAM_UPLOADS) },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -192,6 +208,15 @@ fun AppNavHost() {
                         pendientes = AppContainer.gafasPendientesRepository,
                         descarga = AppContainer.descargaDeGafas,
                     )
+                },
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Routes.BODYCAM_UPLOADS) {
+            SubidasBodycamScreen(
+                viewModel = viewModel {
+                    SubidasBodycamViewModel(AppContainer.bodycamRepository)
                 },
                 onBack = { navController.popBackStack() },
             )
@@ -220,7 +245,7 @@ fun AppNavHost() {
             LivestreamScreen(
                 // La clave por uid evita reutilizar el ViewModel de otro livestream.
                 viewModel = viewModel(key = "livestream-$uid") {
-                    LivestreamViewModel(AppContainer.agoraRepository, uid)
+                    LivestreamViewModel(AppContainer.agoraRepository, repositorio, uid)
                 },
                 onClose = { navController.popBackStack() },
             )
@@ -239,6 +264,7 @@ fun AppNavHost() {
                         AppContainer.locationRepository,
                         AppContainer.batteryRepository,
                         AppContainer.agoraRepository,
+                        AppContainer.historialSos,
                     )
                 },
                 onOpenLivestream = { uid -> navController.navigate(Routes.livestream(uid)) },
@@ -256,8 +282,27 @@ fun AppNavHost() {
 
         composable(Routes.PROFILE) {
             val sosActivo by AppContainer.agoraRepository.sosActive.collectAsStateWithLifecycle()
+            val tonoSos by AppContainer.ajustesSos.tono.collectAsStateWithLifecycle()
+            val confianza by AppContainer.identityRepository.status.collectAsStateWithLifecycle()
+            val bodycam by AppContainer.bodycamRepository.state.collectAsStateWithLifecycle()
+            val gafas by AppContainer.gafasRepository.state.collectAsStateWithLifecycle()
+            // Nada de datos de ejemplo: lo que AeriaOne no ha mandado no se ensena.
+            val identidad = confianza.identity
+            val perfil = AppContainer.perfilDelAgente.actual()
+            val userId = identidad?.userId.orEmpty()
             ProfileScreen(
-                profile = repositorio.officerProfile,
+                profile = FichaDelAgente(
+                    nombre = perfil?.nombre?.takeIf { it.isNotBlank() } ?: userId,
+                    userId = userId,
+                    placa = perfil?.placa.orEmpty(),
+                    rango = perfil?.rango.orEmpty(),
+                    unidad = perfil?.unidad.orEmpty(),
+                    tenant = AppContainer.almacenDeInvitacion.actual()?.tenant.orEmpty(),
+                    deviceId = identidad?.deviceId.orEmpty(),
+                    bodycamConectada = bodycam == BodycamState.CONNECTED,
+                    gafasConectadas = gafas == GafasState.CONNECTED,
+                    versionDeLaApp = BuildConfig.VERSION_NAME,
+                ),
                 onOpenVault = { navController.navigate(Routes.VAULT) },
                 onChangePin = { navController.navigate(Routes.CHANGE_PIN) },
                 // TrustGate cambia a la pantalla de bloqueo en cuanto el estado pasa a
@@ -265,6 +310,8 @@ fun AppNavHost() {
                 onEndShift = { AppContainer.identityRepository.terminarTurno() },
                 onOpenAuditLog = { navController.navigate(Routes.AUDIT_LOG) },
                 sosActivo = sosActivo,
+                tonoSos = tonoSos,
+                onCambiarTonoSos = AppContainer.ajustesSos::cambiarTono,
             )
         }
 
@@ -290,6 +337,7 @@ fun AppNavHost() {
                         enBruto = AppContainer.rawEvidenceRepository,
                         incidentes = AppContainer.incidentRepository,
                         auditoria = AppContainer.auditoria,
+                        identidad = AppContainer.identityRepository,
                     )
                 },
                 onBack = { navController.popBackStack() },
@@ -316,7 +364,9 @@ fun AppNavHost() {
                         AppContainer.localEvidenceRepository,
                         AppContainer.evidenceUploader,
                         AppContainer.proxyRepository,
+                        AppContainer.transcripcionRepository,
                         AppContainer.agoraRepository,
+                        AppContainer.gafasCommandRepository,
                     )
                 },
                 onBackToOperations = { navController.popBackStack() },
@@ -380,16 +430,33 @@ fun AppNavHost() {
     // Aviso de PTT: un companero esta comunicando por la bodycam. Se monta
     // DESPUES del SOS a proposito — si coinciden, la emergencia manda. Es una
     // banda superior, no un dialogo: no roba el foco ni tapa la pantalla.
+    // En el livestream las bandas van debajo de su barra superior: ahi es donde mas
+    // se habla (los companeros contestan al SOS) y taparian volver y MUTED. Esa
+    // barra lleva ademas el hueco de la barra de estado, que cambia de un telefono
+    // a otro: con 60 dp fijos la banda caia encima (visto en el Samsung, 2026-09-29).
+    val altoBarraDeEstado = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val margenBandas = if (entradaActual?.destination?.route == Routes.LIVESTREAM) {
+        altoBarraDeEstado + ALTO_BARRA_DIRECTO
+    } else {
+        0.dp
+    }
+    val caducidad by AppContainer.vigilanteDeCaducidad.estado.collectAsStateWithLifecycle()
+    val enGracia = caducidad.fase == FaseDeCaducidad.EN_GRACIA
+    CredencialEnGraciaOverlay(visible = enGracia, margenSuperior = margenBandas)
     PttAvisoOverlay(
         viewModel = viewModel {
             PttAvisoViewModel(AppContainer.agoraRepository, AppContainer.bodycamRepository)
         },
+        margenSuperior = margenBandas + if (enGracia) ALTO_BANDA_GRACIA else 0.dp,
     )
 }
 
 /** Lee el argumento id de la ruta; todas las rutas de detalle lo requieren. */
 private fun androidx.navigation.NavBackStackEntry.requireId(): String =
     requireNotNull(arguments?.getString("id")) { "La ruta requiere el argumento id" }
+
+// Barra superior del directo: boton de 44 dp mas 8 dp de margen arriba y abajo.
+private val ALTO_BARRA_DIRECTO = 60.dp
 
 // Fundidos cortos: mas de 300 ms se siente lento en uso de campo.
 private const val FADE_IN_MILLIS = 220

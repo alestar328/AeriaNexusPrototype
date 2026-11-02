@@ -5,22 +5,53 @@ import com.delta.aeria_nexus_prototype.data.audit.AuditoriaLocal
 import com.delta.aeria_nexus_prototype.data.audit.ContextoDeAuditoria
 import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
+import com.delta.aeria_nexus_prototype.data.crypto.NexusKeyWrapper
+import com.delta.aeria_nexus_prototype.data.identity.AlmacenDeInvitacion
+import com.delta.aeria_nexus_prototype.data.identity.ClaveEnKeystore
 import com.delta.aeria_nexus_prototype.data.identity.CredentialRepository
 import com.delta.aeria_nexus_prototype.data.identity.EnrollmentRepository
+import com.delta.aeria_nexus_prototype.data.identity.IamClient
 import com.delta.aeria_nexus_prototype.data.identity.IdentityRepository
+import com.delta.aeria_nexus_prototype.data.identity.PerfilDelAgente
 import com.delta.aeria_nexus_prototype.data.identity.PinLocal
-import com.delta.aeria_nexus_prototype.data.identity.RetoRepository
+import com.delta.aeria_nexus_prototype.data.identity.RenovacionDeCertificados
+import com.delta.aeria_nexus_prototype.data.identity.SesionBackend
+import com.delta.aeria_nexus_prototype.data.identity.VigilanteDeCaducidad
+import com.delta.aeria_nexus_prototype.data.local.BaseCifrada
 import com.delta.aeria_nexus_prototype.data.local.IncidentDatabase
+import com.delta.aeria_nexus_prototype.data.transcript.MotorWhisper
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionRepository
+import com.delta.aeria_nexus_prototype.data.transcript.TranscripcionesDeBodycam
+import com.delta.aeria_nexus_prototype.data.upload.AutoriaDeEvidencia
 import com.delta.aeria_nexus_prototype.data.upload.EvidenceUploader
+import com.delta.aeria_nexus_prototype.data.upload.ManifestUploader
 import com.delta.aeria_nexus_prototype.data.upload.UploadConfig
 import com.delta.aeria_nexus_prototype.data.upload.UploadSessions
 import com.delta.aeria_nexus_prototype.data.video.ProxyEncoder
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 
 /**
  * Contenedor de dependencias manual del proyecto. Se inicializa una sola vez
  * en AeriaNexusApp; no se usa ningun framework de inyeccion.
  */
 object AppContainer {
+    private val _avisoBaseEnCuarentena = MutableStateFlow(false)
+
+    /**
+     * La base local no se pudo abrir y se aparto (ver BaseCifrada): el agente tiene que
+     * saber que los incidentes que hubiera en este telefono ya no estan. Sigue en true
+     * en cada arranque hasta que lo confirma.
+     */
+    val avisoBaseEnCuarentena: StateFlow<Boolean> = _avisoBaseEnCuarentena.asStateFlow()
+
+    fun confirmarAvisoBaseEnCuarentena(context: Context) {
+        BaseCifrada.avisoVisto(context.applicationContext)
+        _avisoBaseEnCuarentena.value = false
+    }
+
     lateinit var incidentRepository: IncidentRepository
         private set
     lateinit var locationRepository: LocationRepository
@@ -28,8 +59,11 @@ object AppContainer {
     lateinit var batteryRepository: BatteryRepository
         private set
     lateinit var agoraRepository: AgoraRepository
+    lateinit var historialSos: HistorialSos
         private set
     lateinit var bodycamRepository: BodycamRepository
+        private set
+    lateinit var ajustesSos: AjustesSos
         private set
     lateinit var buscadorBodycam: BuscadorBodycam
         private set
@@ -55,15 +89,29 @@ object AppContainer {
         private set
     lateinit var enrollmentRepository: EnrollmentRepository
         private set
+    lateinit var perfilDelAgente: PerfilDelAgente
+        private set
+    lateinit var accesoAgora: AccesoAgoraRepository
+        private set
     lateinit var credentialRepository: CredentialRepository
         private set
     lateinit var pinLocal: PinLocal
         private set
-    lateinit var retoRepository: RetoRepository
+    lateinit var iamClient: IamClient
+        private set
+    lateinit var almacenDeInvitacion: AlmacenDeInvitacion
         private set
     lateinit var evidenceUploader: EvidenceUploader
         private set
+    lateinit var manifestUploader: ManifestUploader
+        private set
     lateinit var proxyRepository: ProxyRepository
+        private set
+    lateinit var transcripcionRepository: TranscripcionRepository
+        private set
+    lateinit var transcripcionesDeBodycam: TranscripcionesDeBodycam
+        private set
+    lateinit var vigilanteDeCaducidad: VigilanteDeCaducidad
         private set
 
     /** Diario de auditoria local (workflow 61). Lo primero en crearse: todos registran en el. */
@@ -72,6 +120,8 @@ object AppContainer {
     fun init(context: Context) {
         val appContext = context.applicationContext
         auditoria = AuditoriaLocal(appContext)
+        // Antes que cualquier repositorio de identidad: dice que generacion de cada clave vale.
+        ClaveEnKeystore.iniciar(appContext)
         // La boveda va primero: sin ella cargada, una captura que se cierre antes de
         // abrir la pantalla de evidencia se cifraria solo para el servidor y el
         // agente no podria volver a verla en el telefono.
@@ -79,21 +129,42 @@ object AppContainer {
         // Una sola instancia de Room: build() no es singleton, y abrir dos sobre el
         // mismo fichero significa dos pools de conexiones y dos rastreadores de
         // invalidacion peleandose por el mismo WAL.
-        val db = IncidentDatabase.build(appContext)
+        val db = IncidentDatabase.build(appContext) { apartada ->
+            auditoria.registrar(TipoEvento.BASE_EN_CUARENTENA, listOf("file" to apartada.name))
+        }
+        _avisoBaseEnCuarentena.value = BaseCifrada.hayAvisoPendiente(appContext)
         val dao = db.incidentDao()
-        // Un solo upload.conf para la subida y para los avisos del SOS al backend.
-        val uploadConfig = UploadConfig(appContext)
-        incidentRepository = IncidentRepository(dao)
+        // Un solo destino para la subida, los avisos del SOS y el IAM: el del QR de alta
+        // (o upload.conf en depuracion). El token lo pone la sesion que se abre con el PIN.
+        val sesionBackend = SesionBackend()
+        almacenDeInvitacion = AlmacenDeInvitacion(appContext)
+        val uploadConfig = UploadConfig(appContext, sesionBackend, almacenDeInvitacion)
+        iamClient = IamClient(uploadConfig)
+        locationRepository = LocationRepository(appContext)
+        // Antes que los incidentes: cada uno guarda el nombre y la placa del agente al crearse.
+        perfilDelAgente = PerfilDelAgente(appContext)
+        incidentRepository = IncidentRepository(dao, locationRepository, perfilDelAgente)
         // Material que entra de un periferico y todavia no es de ningun incidente.
         rawEvidenceRepository = RawEvidenceRepository(db.rawEvidenceDao(), incidentRepository)
-        locationRepository = LocationRepository(appContext)
         batteryRepository = BatteryRepository(appContext)
+        ajustesSos = AjustesSos(appContext)
+        bodycamRepository = BodycamRepository(appContext, sesionBackend, ajustesSos)
+        historialSos = HistorialSos(appContext, HistorialSosBackend(uploadConfig))
+        accesoAgora = AccesoAgoraRepository(appContext, uploadConfig, sesionBackend)
         agoraRepository = AgoraRepository(
             context = appContext,
             locationRepository = locationRepository,
-            sosNotifier = SosNotifier(appContext, uploadConfig),
+            sosNotifier = SosNotifier(uploadConfig),
+            ajustesSos = ajustesSos,
+            historialSos = historialSos,
+            // Solo con el enlace vivo: una bodycam de la que no llega nada no se
+            // puede ofrecer como la camara de este agente.
+            uidBodycamPropia = {
+                bodycamRepository.uidAgoraBodycam.takeIf { bodycamRepository.isConnected }
+            },
+            placaDelAgente = { incidentRepository.agenteDeLaSesion().placa },
+            accesoAgora = accesoAgora,
         )
-        bodycamRepository = BodycamRepository(appContext)
         buscadorBodycam = BuscadorBodycam(appContext)
         gafasRepository = GafasRepository(appContext)
         // Canal de mando de las gafas. No abre nada al construirse: el GATT se abre
@@ -112,6 +183,34 @@ object AppContainer {
             aviso = AvisoDeGafas(appContext),
         )
         localEvidenceRepository = LocalEvidenceRepository(appContext)
+        // Una sola instancia de UploadSessions para los dos: sincroniza por
+        // instancia y guarda en un unico fichero.
+        val uploadSessions = UploadSessions(appContext)
+        evidenceUploader = EvidenceUploader(
+            context = appContext,
+            config = uploadConfig,
+            sessions = uploadSessions,
+            dao = dao,
+            agenteActual = ::agenteActual,
+        )
+        // Lo que se cifra al reintentar (el cifrado fallo al capturar) sale con su incidente.
+        localEvidenceRepository.alCifrarTarde = { sellada, p ->
+            evidenceUploader.enqueue(sellada, p.evidenceId, p.incidentId, p.label, p.type)
+        }
+        manifestUploader = ManifestUploader(appContext, uploadConfig, uploadSessions, ::agenteActual)
+        // Antes que las gafas: lo que se baja de ellas tambien se transcribe.
+        transcripcionRepository = TranscripcionRepository(
+            motor = MotorWhisper(appContext),
+            evidencia = localEvidenceRepository,
+            uploader = evidenceUploader,
+        )
+        transcripcionesDeBodycam = TranscripcionesDeBodycam(bodycamRepository, localEvidenceRepository)
+        proxyRepository = ProxyRepository(
+            evidencia = localEvidenceRepository,
+            encoder = ProxyEncoder(appContext),
+            uploader = evidenceUploader,
+            transcripciones = transcripcionRepository,
+        )
         // Trae de las gafas a la boveda. Lo usa DescargaDeGafas, que es quien
         // orquesta encender el AP, unirse, listar y bajar. Construirlo aqui no
         // abre red ni consume nada.
@@ -119,6 +218,7 @@ object AppContainer {
             context = appContext,
             evidencia = localEvidenceRepository,
             enBruto = rawEvidenceRepository,
+            transcripciones = transcripcionRepository,
         )
         // Trae a la boveda lo que las gafas dejaron en su tarjeta. Necesita el
         // repositorio de medios, que se construye mas arriba con la boveda ya viva.
@@ -134,14 +234,15 @@ object AppContainer {
         pinLocal = PinLocal(appContext)
         enrollmentRepository = EnrollmentRepository(appContext)
         credentialRepository = CredentialRepository(appContext)
-        retoRepository = RetoRepository(appContext)
-        // Va detras de los tres anteriores: el desbloqueo autoriza la clave del
-        // agente y firma el reto del backend, asi que los necesita ya construidos.
+        // Va detras de los anteriores: el desbloqueo autoriza la clave del agente y
+        // firma el reto del backend, asi que los necesita ya construidos.
         identityRepository = IdentityRepository(
             context = appContext,
             pinLocal = pinLocal,
             credential = credentialRepository,
-            retos = retoRepository,
+            iam = iamClient,
+            sesionBackend = sesionBackend,
+            perfilDelAgente = perfilDelAgente,
             auditoria = auditoria,
         )
         // Quien actua y desde donde, para cada evento. Se lee en el momento de
@@ -157,23 +258,41 @@ object AppContainer {
                 sesion = identityRepository.sesionActual,
             )
         }
-        evidenceUploader = EvidenceUploader(
+        incidentRepository.onIncidentSaved = { incidente ->
+            evidenceUploader.reconcile()
+            // El expediente sale cada vez que el incidente se guarda: al cerrarlo y
+            // al anadirle evidencia despues (manifest-schema.md §5).
+            manifestUploader.enqueue(incidente)
+        }
+        // Lo capturado sin sesion con AeriaOne —sin cobertura al desbloquear, o antes
+        // de que llegase el token— sale en cuanto hay token.
+        identityRepository.alAcreditarSesion = ::reanudarSubidas
+        // Ciclo de vida de las credenciales (credential-lifecycle.md): lo que trae cada
+        // sesion se guarda, y si un certificado esta por caducar se renueva con clave nueva.
+        val renovacion = RenovacionDeCertificados(
             context = appContext,
-            config = uploadConfig,
-            sessions = UploadSessions(appContext),
-            dao = dao,
+            iam = iamClient,
+            credential = credentialRepository,
+            enrollment = enrollmentRepository,
+            auditoria = auditoria,
         )
-        proxyRepository = ProxyRepository(
-            evidencia = localEvidenceRepository,
-            encoder = ProxyEncoder(appContext),
-            uploader = evidenceUploader,
-        )
-        incidentRepository.onIncidentSaved = { evidenceUploader.reconcile() }
+        identityRepository.alRecibirSesion = { sesion ->
+            enrollmentRepository.guardarCas(sesion.cas)
+            sesion.claveDeEvidencia?.let(enrollmentRepository::guardarClaveDeEvidencia)
+            // Esta sesion ya se abrio con la clave nueva: la anterior sobra.
+            renovacion.limpiarAnteriores()
+            renovacion.renovarSiToca(sesion.credenciales)
+        }
+        // Se cifra para la clave de evidencia que manda AeriaOne; sin ella, la compilada.
+        NexusKeyWrapper.recibida = { enrollmentRepository.claveDeEvidencia()?.let { it.kid to it.publicaPem } }
+        identityRepository.alRetirarTerminal = ::destruirIdentidadLocal
         // Workflow 34: cerrar sesion deshace las ataduras con los perifericos. Sin
         // esto, una camara emparejada seguiria operando en nombre de un agente que
         // ya no esta de servicio.
         identityRepository.alCerrarSesion = { motivo ->
-            bodycamRepository.desatar(motivo)
+            // Soltar y no solo desatar: si el enlace sigue abierto, el telefono del
+            // agente que se va retiene la W1 y el siguiente no puede cogerla.
+            bodycamRepository.soltar(motivo)
             // Workflow 30: la boveda se sella con la sesion. Si no, quien coja el
             // telefono despues de desbloquearlo veria la evidencia abierta del agente
             // anterior, y sus copias descifradas seguirian en la cache.
@@ -183,6 +302,41 @@ object AppContainer {
             EvidenceVault.bloquear()
             vaultRepository.clearDecrypted()
         }
+        vigilarCaducidad()
+    }
+
+    /**
+     * Workflow 53: con la credencial caducada el telefono se bloquea, pero no en
+     * mitad de una grabacion. Cuenta cualquier captura, la del telefono y la de los
+     * perifericos: bloquear deshace la atadura con la bodycam.
+     */
+    private fun vigilarCaducidad() {
+        val grabando = combine(
+            incidentRepository.activeIncident,
+            localEvidenceRepository.grabandoAudio,
+            agoraRepository.sosActive,
+            bodycamRepository.isRecording,
+            gafasCommandRepository.grabando,
+        ) { incidente, audio, sos, bodycam, gafas ->
+            incidente?.isRecording == true || audio || sos || bodycam || gafas
+        }
+        vigilanteDeCaducidad = VigilanteDeCaducidad(identityRepository, auditoria, grabando)
+        vigilanteDeCaducidad.arrancar()
+    }
+
+    /**
+     * El agente de la credencial instalada, para sellar la autoria de lo que se guarda.
+     * Sus dos piezas se crean mas abajo en init(); solo se lee al guardar evidencia.
+     */
+    private fun agenteActual(): AutoriaDeEvidencia? {
+        val userId = credentialRepository.agenteProvisionado() ?: return null
+        return AutoriaDeEvidencia(userId, perfilDelAgente.actual()?.placa)
+    }
+
+    /** Reintenta la evidencia y los manifiestos que quedaron sin entregar. */
+    fun reanudarSubidas() {
+        evidenceUploader.resumePending()
+        manifestUploader.resumePending()
     }
 
     /**
@@ -197,10 +351,13 @@ object AppContainer {
         enrollmentRepository.deshacerAlta()
         credentialRepository.borrarCredencial()
         pinLocal.borrar()
-        retoRepository.borrar()
         // Tambien los identificadores: si se quedasen, un volcado de las
         // preferencias seguiria mostrando a que agente y a que terminal pertenecio
         // este telefono despues de haber destruido su identidad.
         identityRepository.deshacerAlta()
+        // El QR apunta al servidor y al agente de la identidad que se acaba de destruir.
+        almacenDeInvitacion.borrar()
+        // El uid y la clave del canal eran de este alta.
+        accesoAgora.olvidar()
     }
 }

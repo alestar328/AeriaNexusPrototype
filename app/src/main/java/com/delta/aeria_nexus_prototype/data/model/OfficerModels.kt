@@ -2,24 +2,8 @@ package com.delta.aeria_nexus_prototype.data.model
 
 /**
  * Modelos del flujo de campo del agente: incidentes capturados en sitio,
- * su evidencia, su linea de tiempo y el perfil del agente.
+ * su evidencia y su linea de tiempo. El agente sale de la sesion (PerfilDelAgente).
  */
-
-data class OfficerProfile(
-    val name: String,
-    val officerNum: String,
-    val agency: String,
-    val unit: String,
-    val rank: String,
-    val jurisdiction: String,
-    val languageProfile: String,
-    val transcriptLanguage: String,
-    val reportLanguage: String,
-    val deviceId: String,
-    val fcConnected: Boolean,
-    val flConnected: Boolean,
-    val appVersion: String,
-)
 
 data class TimelineEntry(
     val id: String,
@@ -65,6 +49,9 @@ data class OfficerIncident(
     val narrative: String? = null,
     val timeline: List<TimelineEntry> = emptyList(),
     val evidence: List<EvidenceRecord> = emptyList(),
+    // Donde se abrio el incidente. Null si no hubo permiso o no llego un fix.
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 )
 
 /** Incidente en curso: existe uno como maximo y vive solo en memoria. */
@@ -73,6 +60,8 @@ data class ActiveIncident(
     val type: String,
     val location: String,
     val startedAtMillis: Long,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
     val evidenceCount: Int = 0,
     val witnessCount: Int = 0,
     val isRecording: Boolean = false,

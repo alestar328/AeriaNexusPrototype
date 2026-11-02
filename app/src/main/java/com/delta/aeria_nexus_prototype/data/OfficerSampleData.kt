@@ -1,11 +1,11 @@
 package com.delta.aeria_nexus_prototype.data
 
 import com.delta.aeria_nexus_prototype.data.model.AgentIdCard
-import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
 
 /**
- * Identidad del agente y padron de placas. Estatico hasta que exista login
- * contra un backend real.
+ * Padron de placas para rotular el SOS de otro agente. Estatico hasta que AeriaOne
+ * entregue el de su tenant. La identidad de este telefono ya no sale de aqui: es la
+ * de la sesion (PerfilDelAgente) desde el 2026-11-02.
  *
  * Ya NO trae incidentes de ejemplo: la lista de incidentes sale entera de Room
  * (lo que el agente ha capturado de verdad). Se retiraron el 2026-08-25 porque
@@ -14,25 +14,8 @@ import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
  */
 object OfficerSampleData {
 
-    val profile = OfficerProfile(
-        name = "Carlos Mendez",
-        officerNum = "P-4471",
-        agency = "Aeria Demo Police Department",
-        unit = "Night Shift Patrol",
-        rank = "Patrol Officer",
-        jurisdiction = "Demo City",
-        languageProfile = "Philippines — Tagalog/English",
-        transcriptLanguage = "Tagalog/Taglish aware",
-        reportLanguage = "English",
-        deviceId = "DEVICE-MB-4471",
-        fcConnected = true,
-        flConnected = true,
-        appVersion = "v1.0.0",
-    )
-
     // Ficha de cada agente conocido, por numero de placa. El SOS solo viaja
-    // con la placa del emisor; aqui se resuelve el resto de sus datos. Padron
-    // estatico hasta que exista login contra un backend real.
+    // con la placa del emisor; aqui se resuelve el resto de sus datos.
     private val agentsByBadge = mapOf(
         "P-4471" to AgentIdCard(
             firstName = "Carlos",

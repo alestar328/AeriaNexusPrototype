@@ -4,6 +4,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -18,6 +21,7 @@ import com.delta.aeria_nexus_prototype.feature.enrollment.PinSetupScreen
 import com.delta.aeria_nexus_prototype.feature.enrollment.PinSetupViewModel
 import com.delta.aeria_nexus_prototype.feature.lock.LockScreen
 import com.delta.aeria_nexus_prototype.feature.lock.LockViewModel
+import com.delta.aeria_nexus_prototype.feature.lock.ProfileCutDialog
 import com.delta.aeria_nexus_prototype.feature.lock.TrustBlockedScreen
 
 /**
@@ -44,10 +48,26 @@ fun TrustGate() {
             // se sigue trabajando. Lo que cambia es que hay funciones prohibidas
             // (§12) y una caducidad; eso se senalizara en la barra superior
             // cuando se implemente el indicador de sesion.
-            TrustState.ACTIVE, TrustState.OFFLINE_GRANTED -> AppNavHost()
+            TrustState.ACTIVE, TrustState.OFFLINE_GRANTED -> {
+                AppNavHost()
+                // Encima de la pantalla en la que este el agente. Vuelve a salir si
+                // AeriaOne lo rechaza de nuevo, porque la clave es el propio corte.
+                var avisoCerrado by remember(status.corteDelPerfil) { mutableStateOf(false) }
+                val corte = status.corteDelPerfil
+                if (corte != null && !avisoCerrado) {
+                    ProfileCutDialog(
+                        corte = corte,
+                        onCerrar = { avisoCerrado = true },
+                        onComprobar = identityRepository::comprobarCorte,
+                        onRetirarAgente = identityRepository::retirarAgente,
+                    )
+                }
+            }
 
             TrustState.LOCKED, TrustState.SESSION_EXPIRED -> LockScreen(
-                viewModel = viewModel { LockViewModel(identityRepository, AppContainer.retoRepository) },
+                viewModel = viewModel {
+                    LockViewModel(identityRepository, AppContainer.iamClient, AppContainer.vigilanteDeCaducidad.estado)
+                },
             )
 
             // El asistente de alta lleva su propio progreso, asi que las dos ramas
@@ -59,7 +79,8 @@ fun TrustGate() {
                         enrollment = AppContainer.enrollmentRepository,
                         credential = AppContainer.credentialRepository,
                         identity = identityRepository,
-                        retos = AppContainer.retoRepository,
+                        iam = AppContainer.iamClient,
+                        invitaciones = AppContainer.almacenDeInvitacion,
                     )
                 },
             )

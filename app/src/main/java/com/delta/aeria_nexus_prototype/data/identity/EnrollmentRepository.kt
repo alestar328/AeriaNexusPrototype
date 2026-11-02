@@ -4,6 +4,7 @@ import android.content.Context
 import java.io.File
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import org.json.JSONObject
 
 /** Como quedo la clave y si su atestacion prueba frescura o solo esta bien formada. */
 data class ResultadoDeClave(val nivel: NivelClave, val conRetoDelBackend: Boolean)
@@ -11,21 +12,13 @@ data class ResultadoDeClave(val nivel: NivelClave, val conRetoDelBackend: Boolea
 /**
  * Alta del telefono como dispositivo BYOD de AeriaOne (workflow 12).
  *
- * De los 21 pasos del catalogo, 9 son nuestros y estan aqui: recoger los datos
- * del terminal (3), mirar su estado de seguridad (5 y 6), generar el par de
- * claves (10), construir la peticion de certificado (11), entregarla (12),
- * instalar el certificado que devuelva la CA (15) y demostrar posesion de la
- * clave (16). Los otros 12 son del backend.
+ * Lo que es del telefono esta aqui: recoger los datos del terminal (paso 3), mirar
+ * su estado de seguridad (5 y 6), generar el par de claves (10), construir la
+ * peticion de certificado (11) e instalar el certificado que devuelve la CA (15).
+ * La entrega y la emision son del backend y van por [IamClient].
  *
- * QUE FALTA, dicho sin rodeos: no hay backend. Los pasos 2, 4, 7, 13, 14, 17 y 18
- * no ocurren, y el Device ID se lo inventa este fichero cuando en realidad lo
- * asigna el registro de dispositivos (paso 8). Lo que SI es real y no una maqueta:
- * la clave vive en el Keystore y no sale de alli, el CSR esta bien formado
- * (validado con `openssl req -verify`) y, cuando hay un reto emitido de fuera
- * ([RetoRepository]), la atestacion y la prueba de posesion acreditan frescura.
- *
- * Mientras no exista el canal, la CA y los retos entran por `tools/`; ver
- * `MainActivity`.
+ * El Device ID lo asigna AeriaOne (paso 8). El que se propone en el CSR es solo
+ * una propuesta: el definitivo es el que vuelve en la respuesta del alta.
  */
 class EnrollmentRepository(private val context: Context) {
 
@@ -39,14 +32,18 @@ class EnrollmentRepository(private val context: Context) {
     fun postura(): DevicePosture = DeviceInspector.postura(context)
 
     /**
-     * Pasos 8 y 9, simulados. En el modelo real este identificador lo emite el
-     * registro de dispositivos y llega por la red; que lo genere el propio
-     * telefono es exactamente lo que el backend vendra a corregir.
+     * Device ID de este telefono. Antes del alta es la propuesta que va en el CSR;
+     * despues, el que asigno AeriaOne (ver [adoptarDeviceId]).
      */
     fun deviceId(): String = prefs.getString(CLAVE_DEVICE_ID, null) ?: run {
         val sufijo = ByteArray(4).also { SecureRandom().nextBytes(it) }
             .joinToString("") { "%02X".format(it) }
         "DEV-$sufijo".also { prefs.edit().putString(CLAVE_DEVICE_ID, it).apply() }
+    }
+
+    /** Paso 8: el backend manda sobre el sujeto del certificado, y con el sobre el Device ID. */
+    fun adoptarDeviceId(asignado: String) {
+        prefs.edit().putString(CLAVE_DEVICE_ID, asignado).apply()
     }
 
     /**
@@ -77,21 +74,11 @@ class EnrollmentRepository(private val context: Context) {
     }
 
     /**
-     * Paso 12: entrega de la peticion.
-     *
-     * Sin canal al backend, "entregar" es dejarla en la carpeta privada de la app.
-     * Es lo que permite sacarla con `adb` y firmarla con una CA de pruebas.
-     */
-    fun guardarCsr(pem: String): File =
-        File(carpeta, "device.csr.pem").apply { writeText(pem) }
-
-    fun csrGuardado(): String? = File(carpeta, "device.csr.pem").takeIf { it.exists() }?.readText()
-
-    /**
      * Ancla con la que se valida a los perifericos que se emparejan (workflow 31).
      *
-     * En el modelo real la reparte el backend junto al resto de la politica
-     * (workflow 65). Aqui se instala en el alta y se guarda en la carpeta privada.
+     * Es el `device_ca_pem` que AeriaOne devuelve en el alta del terminal y en la del
+     * agente, y se guarda en la carpeta privada. El intent `peripheral_anchor` de
+     * MainActivity queda para telefonos dados de alta antes de guardarla.
      * Sin ancla no hay emparejamiento posible, y eso es lo correcto: aceptar a
      * cualquier camara que se identifique seria peor que no comprobar nada, porque
      * daria la impresion de que si se comprueba.
@@ -101,11 +88,64 @@ class EnrollmentRepository(private val context: Context) {
         return runCatching { Pem.leerCertificados(fichero.readText()).firstOrNull() }.getOrNull()
     }
 
+    /** El ancla tal como se guardo, para compararla con la huella del QR de alta. */
+    fun anclaDePerifericosPem(): String? =
+        File(carpeta, FICHERO_ANCLA).takeIf { it.isFile }?.readText()
+
     fun instalarAnclaDePerifericos(pem: String): X509Certificate {
         val ancla = Pem.leerCertificados(pem).firstOrNull()
             ?: error("El PEM del ancla no trae ningun certificado")
         File(carpeta, FICHERO_ANCLA).writeText(pem)
         return ancla
+    }
+
+    /**
+     * Todas las CA de dispositivos de confianza (credential-lifecycle.md §2.3): el ancla
+     * del alta y las que trae cada sesion. Tras rotar una CA, una camara firmada por la
+     * vieja tiene que seguir emparejando hasta que caduque su certificado.
+     */
+    fun anclasDePerifericos(): List<X509Certificate> =
+        (listOfNotNull(anclaDePerifericosPem()) + leer(FICHERO_CAS_DISPOSITIVOS))
+            .flatMap { runCatching { Pem.leerCertificados(it) }.getOrDefault(emptyList()) }
+            .distinctBy { it.encoded.contentHashCode() }
+
+    /**
+     * Guarda las CA de dispositivos que manda AeriaOne en el alta, la sesion o la
+     * renovacion; son las que validan a la camara. Llegan por el canal autenticado con el
+     * servidor y el ancla fijada por el QR no se toca. Las de agentes no hacen falta aqui:
+     * la camara las pide ella misma a AeriaOne (GET iam/trust-anchors), nunca por BT.
+     * Sin listas (backend anterior al 2-nov-2026) no cambia nada.
+     */
+    fun guardarCas(cas: CasDeConfianza) {
+        val dispositivos = (listOfNotNull(cas.dispositivosEmisora) + cas.dispositivos).distinct()
+        if (dispositivos.isNotEmpty()) escribir(FICHERO_CAS_DISPOSITIVOS, dispositivos)
+    }
+
+    /**
+     * La clave publica de evidencia que manda AeriaOne (§2.4). Se cifra para ella en vez
+     * de para la compilada en el APK; sin ella (servidor viejo) se sigue con la compilada.
+     */
+    fun guardarClaveDeEvidencia(clave: ClaveDeEvidencia) {
+        runCatching {
+            File(carpeta, FICHERO_CLAVE_EVIDENCIA).writeText(
+                JSONObject().put("kid", clave.kid).put("public_key_pem", clave.publicaPem).toString(),
+            )
+        }
+    }
+
+    fun claveDeEvidencia(): ClaveDeEvidencia? = runCatching {
+        val json = JSONObject(File(carpeta, FICHERO_CLAVE_EVIDENCIA).readText())
+        ClaveDeEvidencia(json.getString("kid"), json.getString("public_key_pem"))
+    }.getOrNull()
+
+    // Una CA por bloque, separadas por una linea en blanco: PEM admite varios seguidos.
+    private fun escribir(nombre: String, pems: List<String>) {
+        runCatching { File(carpeta, nombre).writeText(pems.joinToString("\n") { it.trim() + "\n" }) }
+    }
+
+    private fun leer(nombre: String): List<String> {
+        val texto = File(carpeta, nombre).takeIf { it.isFile }?.readText() ?: return emptyList()
+        return BLOQUE_PEM.findAll(texto).map { it.value + "\n" }.toList()
     }
 
     /** Cuantos certificados trae la atestacion del dispositivo; 0 si no la soporta. */
@@ -122,12 +162,6 @@ class EnrollmentRepository(private val context: Context) {
         return delTerminal
     }
 
-    /**
-     * Paso 16: prueba de posesion. Firma el reto con la clave privada, que sigue
-     * sin salir del Keystore.
-     */
-    fun pruebaDePosesion(reto: ByteArray): ByteArray = ClaveEnKeystore.terminal.firmarReto(reto)
-
     fun altaCompleta(): Boolean = prefs.getBoolean(CLAVE_ALTA_COMPLETA, false)
 
     /** §13: un reseteo tiene que destruir la identidad local, no solo olvidarla. */
@@ -141,5 +175,8 @@ class EnrollmentRepository(private val context: Context) {
         const val CLAVE_DEVICE_ID = "device_id"
         const val CLAVE_ALTA_COMPLETA = "alta_completa"
         const val FICHERO_ANCLA = "perifericos.ca.pem"
+        const val FICHERO_CAS_DISPOSITIVOS = "dispositivos.confianza.pem"
+        const val FICHERO_CLAVE_EVIDENCIA = "evidencia.clave.json"
+        val BLOQUE_PEM = Regex("-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----")
     }
 }

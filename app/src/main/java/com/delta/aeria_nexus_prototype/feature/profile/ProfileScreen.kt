@@ -47,7 +47,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceVault
-import com.delta.aeria_nexus_prototype.data.model.OfficerProfile
 import com.delta.aeria_nexus_prototype.ui.components.AppScaffold
 import com.delta.aeria_nexus_prototype.ui.components.CardSurface
 import com.delta.aeria_nexus_prototype.ui.components.SectionLabel
@@ -58,18 +57,39 @@ import com.delta.aeria_nexus_prototype.ui.theme.RojoSuave
 import com.delta.aeria_nexus_prototype.ui.theme.SuperficiePresionada
 import com.delta.aeria_nexus_prototype.ui.theme.TextoPrincipal
 import com.delta.aeria_nexus_prototype.ui.theme.TextoTerciario
+import com.delta.aeria_nexus_prototype.data.TonoSos
 import com.delta.aeria_nexus_prototype.ui.theme.VerdeOk
 
-/** Perfil del agente: datos administrativos, idioma, dispositivos y la sesion. */
+/**
+ * Lo que la pantalla de perfil sabe del agente, todo de fuentes reales: el perfil que
+ * entrega AeriaOne (§5.3), el certificado del terminal y el estado de los perifericos.
+ * Un campo vacio es que AeriaOne no lo tiene, y su fila no se pinta.
+ */
+data class FichaDelAgente(
+    val nombre: String,
+    val userId: String,
+    val placa: String,
+    val rango: String,
+    val unidad: String,
+    val tenant: String,
+    val deviceId: String,
+    val bodycamConectada: Boolean,
+    val gafasConectadas: Boolean,
+    val versionDeLaApp: String,
+)
+
+/** Perfil del agente: datos administrativos, dispositivos y la sesion. */
 @Composable
 fun ProfileScreen(
-    profile: OfficerProfile,
+    profile: FichaDelAgente,
     onOpenVault: () -> Unit,
     onChangePin: () -> Unit,
     onEndShift: () -> Unit,
     onOpenAuditLog: () -> Unit,
     /** Durante un SOS no se puede terminar el turno: la emergencia manda. */
     sosActivo: Boolean,
+    tonoSos: TonoSos,
+    onCambiarTonoSos: (TonoSos) -> Unit,
 ) {
     var confirmandoFinDeTurno by remember { mutableStateOf(false) }
 
@@ -104,36 +124,36 @@ fun ProfileScreen(
         SectionLabel("Officer Information")
         CardSurface {
             Column(Modifier.padding(horizontal = 16.dp)) {
-                InfoRow("Agency", profile.agency)
-                InfoRow("Unit", profile.unit)
-                InfoRow("Rank", profile.rank)
-                InfoRow("Jurisdiction", profile.jurisdiction, isLast = true)
+                val filas = listOf(
+                    "AeriaOne ID" to profile.userId,
+                    "Agency" to profile.tenant,
+                    "Unit" to profile.unidad,
+                    "Rank" to profile.rango,
+                ).filter { it.second.isNotBlank() }
+                filas.forEachIndexed { i, (etiqueta, valor) ->
+                    InfoRow(etiqueta, valor, mono = etiqueta == "AeriaOne ID", isLast = i == filas.lastIndex)
+                }
             }
         }
-
-        SectionLabel("Language Profile")
-        CardSurface {
-            Column(Modifier.padding(horizontal = 16.dp)) {
-                InfoRow("Profile", profile.languageProfile)
-                InfoRow("Transcript", profile.transcriptLanguage)
-                InfoRow("RMS Report", profile.reportLanguage, isLast = true)
-            }
-        }
-        PolicyNote("Language settings are admin-assigned. Contact your supervisor to change language configuration.")
 
         SectionLabel("Device & Connections")
         CardSurface {
             Column(Modifier.padding(horizontal = 16.dp)) {
                 InfoRow("Device ID", profile.deviceId, mono = true)
-                ConnectionRow("Falcon Core (FC)", profile.fcConnected)
-                ConnectionRow("Falcon Lens (FL)", profile.flConnected)
-                InfoRow("App Version", profile.appVersion, mono = true, isLast = true)
+                ConnectionRow("Bodycam", profile.bodycamConectada)
+                ConnectionRow("FalconOne", profile.gafasConectadas)
+                InfoRow("App Version", profile.versionDeLaApp, mono = true, isLast = true)
             }
         }
         PolicyNote(
             "GPS is enabled by agency policy. Evidence is automatically geotagged. " +
                 "Officer breadcrumb tracking is admin-controlled.",
         )
+
+        SectionLabel("Emergency")
+        CardSurface {
+            SelectorTonoSos(tono = tonoSos, onCambiar = onCambiarTonoSos)
+        }
 
         // Al final y no arriba: son acciones de una vez por turno, y la de terminar
         // no debe quedar donde se pulsa buscando otra cosa.
@@ -239,7 +259,7 @@ private fun SessionRow(
 }
 
 @Composable
-private fun AvatarCard(profile: OfficerProfile) {
+private fun AvatarCard(profile: FichaDelAgente) {
     CardSurface {
         Row(
             modifier = Modifier.padding(20.dp),
@@ -253,7 +273,8 @@ private fun AvatarCard(profile: OfficerProfile) {
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = profile.name.split(" ").mapNotNull { it.firstOrNull()?.toString() }.joinToString(""),
+                    text = profile.nombre.split(" ", ".").mapNotNull { it.firstOrNull()?.uppercase() }
+                        .take(2).joinToString(""),
                     color = AzulClaro,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Black,
@@ -262,18 +283,22 @@ private fun AvatarCard(profile: OfficerProfile) {
             Spacer(Modifier.width(16.dp))
             Column {
                 Text(
-                    text = profile.name,
+                    text = profile.nombre,
                     color = Color.White,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Black,
                 )
-                Text(
-                    text = profile.officerNum,
-                    color = AzulClaro,
-                    fontSize = 14.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Text(text = profile.rank, color = TextoTerciario, fontSize = 12.sp)
+                if (profile.placa.isNotBlank()) {
+                    Text(
+                        text = profile.placa,
+                        color = AzulClaro,
+                        fontSize = 14.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                if (profile.rango.isNotBlank()) {
+                    Text(text = profile.rango, color = TextoTerciario, fontSize = 12.sp)
+                }
             }
         }
     }

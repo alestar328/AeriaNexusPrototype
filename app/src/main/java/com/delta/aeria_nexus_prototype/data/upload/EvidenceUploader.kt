@@ -6,6 +6,7 @@ import android.util.Log
 import com.delta.aeria_nexus_prototype.data.LocalEvidenceRepository
 import com.delta.aeria_nexus_prototype.data.crypto.EvidenceCrypto
 import com.delta.aeria_nexus_prototype.data.local.IncidentDao
+import com.delta.aeria_nexus_prototype.data.model.EvidenceType
 import com.delta.aeria_nexus_prototype.data.model.SyncState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +18,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "FalconUpload"
@@ -33,6 +35,13 @@ private const val TAG = "FalconUpload"
  *
  * Solo cuando el servidor **no contradice** el hash. `verified == false` es un incidente
  * de integridad, no un fallo de red: se deja constancia y no se borra nada.
+ *
+ * ── Qué autoriza a borrar ─────────────────────────────────────────────────────
+ *
+ * Entregado no basta. Una copia local (hoy, el proxy) solo se borra con el **recibo
+ * firmado del servidor** en `accepted` y su `sha256_received` igual al hash propio
+ * (receipt-schema.md §5). Si el recibo no llegó con la subida se vuelve a pedir en
+ * [resumePending]; el recibo entero se guarda dentro del `.upload.json`.
  *
  * ── Dónde vive la verdad ──────────────────────────────────────────────────────
  *
@@ -55,6 +64,11 @@ class EvidenceUploader(
     private val config: UploadConfig,
     private val sessions: UploadSessions,
     private val dao: IncidentDao,
+    /**
+     * Agente de la credencial instalada ahora mismo, o null si no hay ninguna. Se sella
+     * en cada pieza al guardar sus datos, no al subirla (ver [AutoriaDeEvidencia]).
+     */
+    private val agenteActual: () -> AutoriaDeEvidencia?,
 ) {
 
     private val uploader = ChunkedUploader(config, sessions)
@@ -63,6 +77,7 @@ class EvidenceUploader(
     // Proxies subiendo ahora mismo. Al arrancar coinciden la reanudacion y los
     // proxies que se rehacen, y un mismo fichero no puede ir en dos subidas a la vez.
     private val proxiesEnVuelo = ConcurrentHashMap.newKeySet<String>()
+    private val transcripcionesEnVuelo = ConcurrentHashMap.newKeySet<String>()
 
     /** Proxy de un video, ya cifrado, con lo que lo enlaza a su original (ver ProxyRepository). */
     data class ProxySellado(
@@ -88,14 +103,47 @@ class EvidenceUploader(
         // Los datos del proxy se guardan aunque la subida este apagada: son lo unico que
         // permitira enlazarlo con su original el dia que se configure.
         proxy?.let { guardarDatosDeProxy(it, evidenceId, incidentId) }
+        guardarDatosDeEvidencia(original, evidenceId, incidentId, label, EvidenceType.VIDEO)
         if (!config.enabled()) {
             Log.d(TAG, "subida no configurada — ${original.file.name} se queda en el teléfono")
             return
         }
         scope.launch {
             proxy?.let { deliverProxy(it.sealed.file, it.sealed.cipherSha256) }
-            deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label)
+            deliver(original.file, original.cipherSha256, original.plainSha256, evidenceId, incidentId, label, EvidenceType.VIDEO)
         }
+    }
+
+    /** Lo que enlaza una transcripcion con su grabacion (TRANSCRIPT-FORMAT.md de BodyCamServer). */
+    data class DatosDeTranscripcion(
+        val transcriptOf: String,
+        val idioma: String?,
+        val estado: String,
+        val evidenceId: String?,
+        val incidentId: String?,
+        val mediaType: String,
+    )
+
+    /**
+     * Entrega una transcripcion recien cifrada, sin esperar a su grabacion: sale aunque
+     * el agente no suba el video, y el backend la casa con el cuando llegue.
+     */
+    fun enqueueTranscript(sealed: EvidenceCrypto.Sealed, datos: DatosDeTranscripcion) {
+        val json = JSONObject()
+            .put("transcript_of", datos.transcriptOf)
+            .put("transcript_language", datos.idioma ?: "")
+            .put("transcript_status", datos.estado)
+            .put("media_type", datos.mediaType)
+            .put("sha256_plain", sealed.plainSha256)
+        datos.evidenceId?.let { json.put("evidence_id", it) }
+        datos.incidentId?.let { json.put("incident_id", it) }
+        val fichero = datosDeTranscripcion(sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(json)
+        json.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(json.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
+        if (!config.enabled()) return
+        scope.launch { deliverTranscript(sealed.file) }
     }
 
     /** Proxy suelto, sin original detras: el que se rehace al arrancar la app. */
@@ -114,22 +162,33 @@ class EvidenceUploader(
         evidenceId: String?,
         incidentId: String?,
         label: String?,
+        type: EvidenceType,
     ) {
+        guardarDatosDeEvidencia(sealed, evidenceId, incidentId, label, type)
         if (!config.enabled()) {
             Log.d(TAG, "subida no configurada — ${sealed.file.name} se queda en el teléfono")
             return
         }
-        scope.launch { deliver(sealed.file, sealed.cipherSha256, sealed.plainSha256, evidenceId, incidentId, label) }
+        scope.launch { deliver(sealed.file, sealed.cipherSha256, sealed.plainSha256, evidenceId, incidentId, label, type) }
     }
 
     /**
      * Reintenta lo que quedó sin entregar. Se llama al arrancar la app, que es cuando se
-     * recupera de un proceso muerto a mitad de subida.
+     * recupera de un proceso muerto a mitad de subida, y cada vez que se abre sesión con
+     * AeriaOne, que es cuando hay token con el que subir.
      */
     fun resumePending() {
         if (!config.enabled()) return
+        if (config.token() == null) {
+            Log.d(TAG, "sin sesión con AeriaOne — lo pendiente sale al abrirla")
+            return
+        }
         scope.launch {
-            // Los proxies primero, por lo mismo que en enqueueVideo.
+            // Las transcripciones antes que nada: pesan unos KB y son lo primero que el
+            // backend necesita de una grabacion (TRANSCRIPT-FORMAT.md §6).
+            transcriptsDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
+                ?.forEach { deliverTranscript(it) }
+            // Despues los proxies, por lo mismo que en enqueueVideo.
             proxiesDir()?.listFiles { f -> f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) }
                 ?.forEach { fev ->
                     val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
@@ -138,14 +197,24 @@ class EvidenceUploader(
             val pendientes = evidenceDir()?.listFiles { f ->
                 f.isFile && f.name.endsWith(EvidenceCrypto.EXTENSION) && !isDelivered(f)
             }?.sortedBy { it.lastModified() }.orEmpty()
-            if (pendientes.isEmpty()) return@launch
-            Log.d(TAG, "reanudando ${pendientes.size} evidencia(s) sin entregar")
+            if (pendientes.isNotEmpty()) Log.d(TAG, "reanudando ${pendientes.size} evidencia(s) sin entregar")
             pendientes.forEach { fev ->
                 // El hash del ciphertext es la huella de la sesión. No está en el recibo
                 // —si el fichero nunca llegó a subirse no hay recibo—, así que se recalcula.
                 // Cuesta una lectura y solo pasa al reanudar.
                 val sha = runCatching { EvidenceCrypto.sha256(fev) }.getOrNull() ?: return@forEach
-                deliver(fev, sha, null, null, null, null)
+                // Sin sus datos cada pieza llegaba suelta y el backend abria un incidente
+                // nuevo por fichero. Solo faltan en los .fev anteriores a este cambio.
+                val datos = leerDatos(datosDeEvidencia(fev))
+                deliver(
+                    fev = fev,
+                    cipherSha256 = sha,
+                    plainSha256 = datos?.optString("sha256_plain")?.ifBlank { null },
+                    evidenceId = datos?.optString("evidence_id")?.ifBlank { null },
+                    incidentId = datos?.optString("incident_id")?.ifBlank { null },
+                    label = datos?.optString("label")?.ifBlank { null },
+                    type = datos?.optString("type")?.let { t -> EvidenceType.entries.find { it.name == t } },
+                )
             }
         }
     }
@@ -157,40 +226,43 @@ class EvidenceUploader(
         evidenceId: String?,
         incidentId: String?,
         label: String?,
+        type: EvidenceType?,
     ) = withContext(Dispatchers.IO) {
         if (isDelivered(fev)) return@withContext
 
         evidenceId?.let { setSync(it, SyncState.SYNCING) }
 
-        val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId) + buildMap {
+        val datos = leerDatos(datosDeEvidencia(fev))
+        val autoria = AutoriaDeEvidencia.leerDe(datos)
+        // Un incidente del telefono mezcla fotos, videos y audios, y el backend
+        // solo manda al analisis de video lo que es video (upload-protocol.md §5).
+        val mediaType = type?.let { mediaTypeDe(it) }
+        val metadata = metadataComun(fev, cipherSha256, plainSha256, evidenceId, incidentId, autoria) + buildMap {
             put("kind", "evidence")
             label?.let { put("label", it) }
-        }
+            mediaType?.let { put("media_type", it) }
+        } + sello(fev, cipherSha256, plainSha256, "evidence", mediaType, incidentId, datos)
 
         val outcome = uploader.upload(fev, cipherSha256, metadata)
         writeReceipt(fev, cipherSha256, outcome, evidenceId)
 
-        when {
-            outcome.delivered && outcome.verified == false -> {
-                Log.e(TAG, "${fev.name}: el servidor NO confirma el hash — revisar")
-                evidenceId?.let { setSync(it, SyncState.FAILED) }
-            }
-            outcome.delivered -> {
-                Log.d(TAG, "${fev.name} entregado (${outcome.bytesSent / 1024} KB enviados)")
-                evidenceId?.let { setSync(it, SyncState.VERIFIED) }
-            }
-            else -> {
-                Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
-                evidenceId?.let { setSync(it, SyncState.PENDING_SYNC) }
-            }
+        val fallo = outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256)
+        val estado = estadoTrasEntregar(outcome.delivered, fallo, outcome.receipt)
+        when (estado) {
+            SyncState.FAILED -> Log.e(TAG, "${fev.name}: el servidor NO confirma el hash — revisar")
+            SyncState.REJECTED -> Log.e(TAG, "${fev.name}: rechazado por ir cifrado para la clave de pruebas — se conserva")
+            SyncState.VERIFIED -> Log.d(TAG, "${fev.name} entregado (${outcome.bytesSent / 1024} KB enviados)")
+            else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
         }
+        avisarDelSello(fev, outcome.receipt)
+        evidenceId?.let { setSync(it, estado) }
         reconcile()
     }
 
     /**
-     * Sube un proxy y, en cuanto el servidor no contradice su hash, lo borra: el proxy
-     * no es evidencia, es una copia para el backend, y a partir de ahi la unica copia
-     * es la suya. El recibo se queda como constancia de la entrega.
+     * Sube un proxy y, en cuanto el servidor firma que lo ha aceptado, lo borra: el
+     * proxy no es evidencia, es una copia para el backend, y a partir de ahi la unica
+     * copia es la suya. El recibo se queda como constancia de la entrega.
      *
      * No toca Room: el proxy comparte evidence_id con su original, y marcar esa fila
      * como entregada por el proxy diria que ha llegado el video cuando no es asi.
@@ -199,10 +271,11 @@ class EvidenceUploader(
         if (!proxiesEnVuelo.add(fev.name)) return@withContext
         try {
             if (isDelivered(fev)) {
-                borrarProxy(fev)
+                // Ya subido: solo falta, si no llego entonces, el recibo que deja borrarlo.
+                if (aceptado(reciboDelServidor(fev), cipherSha256)) borrarProxy(fev)
                 return@withContext
             }
-            val datos = runCatching { JSONObject(datosDeProxy(fev).readText()) }.getOrNull()
+            val datos = leerDatos(datosDeProxy(fev))
             if (datos == null) {
                 Log.w(TAG, "${fev.name}: sin datos de su original, no se puede enlazar — se deja")
                 return@withContext
@@ -213,25 +286,77 @@ class EvidenceUploader(
                 plainSha256 = datos.optString("sha256_plain").ifBlank { null },
                 evidenceId = datos.optString("evidence_id").ifBlank { null },
                 incidentId = datos.optString("incident_id").ifBlank { null },
+                autoria = AutoriaDeEvidencia.leerDe(datos),
             ) + mapOf(
                 "kind" to "proxy",
                 "proxy_of" to datos.optString("proxy_of"),
                 "proxy_short_side" to datos.optInt("proxy_short_side").toString(),
                 "proxy_fps" to datos.optInt("proxy_fps").toString(),
+            ) + sello(
+                fev, cipherSha256, datos.optString("sha256_plain").ifBlank { null },
+                "proxy", "video", datos.optString("incident_id").ifBlank { null }, datos,
             )
 
             val outcome = uploader.upload(fev, cipherSha256, metadata)
             writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
             when {
-                outcome.delivered && outcome.verified == false ->
+                outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) ->
                     Log.e(TAG, "${fev.name}: el servidor NO confirma el hash del proxy — se conserva")
-                outcome.delivered -> borrarProxy(fev)
+                outcome.delivered && aceptado(outcome.receipt, cipherSha256) -> borrarProxy(fev)
+                outcome.delivered ->
+                    Log.w(TAG, "${fev.name} entregado sin recibo aceptado — se conserva hasta tenerlo")
                 else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
             }
         } finally {
             proxiesEnVuelo.remove(fev.name)
         }
     }
+
+    /**
+     * Sube una transcripcion. No toca Room ni se borra al entregarse: es evidencia
+     * derivada, y su .fev es tambien la marca de que esa grabacion ya se transcribio.
+     */
+    private suspend fun deliverTranscript(fev: File) = withContext(Dispatchers.IO) {
+        if (!transcripcionesEnVuelo.add(fev.name)) return@withContext
+        try {
+            if (isDelivered(fev)) return@withContext
+            val datos = leerDatos(datosDeTranscripcion(fev))
+            if (datos == null) {
+                Log.w(TAG, "${fev.name}: sin datos de su grabacion, no se puede enlazar — se deja")
+                return@withContext
+            }
+            val cipherSha256 = EvidenceCrypto.sha256(fev)
+            val metadata = metadataComun(
+                fev = fev,
+                cipherSha256 = cipherSha256,
+                plainSha256 = datos.optString("sha256_plain").ifBlank { null },
+                evidenceId = datos.optString("evidence_id").ifBlank { null },
+                incidentId = datos.optString("incident_id").ifBlank { null },
+                autoria = AutoriaDeEvidencia.leerDe(datos),
+            ) + mapOf(
+                "kind" to "transcript",
+                "transcript_of" to datos.getString("transcript_of"),
+                "transcript_language" to datos.optString("transcript_language"),
+                "transcript_status" to datos.getString("transcript_status"),
+                "media_type" to datos.getString("media_type"),
+            ) + sello(
+                fev, cipherSha256, datos.optString("sha256_plain").ifBlank { null },
+                "transcript", datos.getString("media_type"), datos.optString("incident_id").ifBlank { null }, datos,
+            )
+            val outcome = uploader.upload(fev, cipherSha256, metadata)
+            writeReceipt(fev, cipherSha256, outcome, evidenceId = null)
+            when {
+                outcome.delivered && falloDeIntegridad(outcome.verified, outcome.receipt, cipherSha256) ->
+                    Log.e(TAG, "${fev.name}: el servidor NO confirma el hash de la transcripcion")
+                outcome.delivered -> Log.d(TAG, "${fev.name} entregada")
+                else -> Log.e(TAG, "${fev.name} sin entregar: ${outcome.error}")
+            }
+        } finally {
+            transcripcionesEnVuelo.remove(fev.name)
+        }
+    }
+
+    private fun datosDeTranscripcion(fev: File) = File(fev.parentFile, fev.name + TRANSCRIPT_DATA_SUFFIX)
 
     private fun borrarProxy(fev: File) {
         if (fev.exists() && !fev.delete()) Log.w(TAG, "no se pudo borrar el proxy entregado ${fev.name}")
@@ -251,11 +376,90 @@ class EvidenceUploader(
             .put("sha256_plain", proxy.sealed.plainSha256)
         evidenceId?.let { datos.put("evidence_id", it) }
         incidentId?.let { datos.put("incident_id", it) }
-        runCatching { datosDeProxy(proxy.sealed.file).writeText(datos.toString(2)) }
+        val fichero = datosDeProxy(proxy.sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(datos)
+        datos.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(datos.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudieron guardar los datos del proxy: ${it.message}") }
     }
 
     private fun datosDeProxy(fev: File) = File(fev.parentFile, fev.name + PROXY_DATA_SUFFIX)
+
+    private fun leerDatos(fichero: File): JSONObject? = runCatching { JSONObject(fichero.readText()) }.getOrNull()
+
+    /**
+     * La autoria ya sellada en los datos de la pieza o, si es la primera vez que se
+     * guardan, la del agente de ahora. Una pieza se vuelve a encolar (al clasificarla,
+     * al cifrarla tarde) y para entonces el agente puede ser otro.
+     */
+    private fun autoriaParaSellar(datos: File): AutoriaDeEvidencia? =
+        AutoriaDeEvidencia.leerDe(leerDatos(datos)) ?: agenteActual()
+
+    /**
+     * Cuando se capturo, para el sello: la primera vez que se guardan los datos de la
+     * pieza, que es al cerrarla. Se conserva al volver a encolarla.
+     */
+    private fun capturaParaSellar(datos: File): String =
+        leerDatos(datos)?.optString(SelloDeEvidencia.CLAVE_CAPTURA)?.ifBlank { null }
+            ?: SelloDeEvidencia.ahoraIso()
+
+    /**
+     * `seal` y `seal_sig` de la pieza (evidence-seal.md). El agente es el que la grabo,
+     * no el de ahora: si no, lo de un agente dado de baja saldria sellado con el siguiente.
+     */
+    private fun sello(
+        fev: File,
+        cipherSha256: String,
+        plainSha256: String?,
+        kind: String,
+        mediaType: String?,
+        incidentId: String?,
+        datos: JSONObject?,
+    ): Map<String, String> = SelloDeEvidencia(
+        sha256Cipher = cipherSha256,
+        sha256Plain = plainSha256,
+        kind = kind,
+        mediaType = mediaType,
+        incidentId = incidentId,
+        principal = (AutoriaDeEvidencia.leerDe(datos) ?: agenteActual())?.userId,
+        capturedAt = datos?.optString(SelloDeEvidencia.CLAVE_CAPTURA)?.ifBlank { null },
+        recordedBy = SelloDeEvidencia.grabadoPor(fev.name),
+    ).metadata()
+
+    /**
+     * Lo que une una evidencia a su incidente, junto al .fev. Mismo motivo que el proxy:
+     * la subida puede no salir ahora (sin sesion, sin red) y al reintentarla solo queda
+     * el fichero. Se guarda antes de mirar si la subida esta configurada.
+     */
+    private fun guardarDatosDeEvidencia(
+        sealed: EvidenceCrypto.Sealed,
+        evidenceId: String?,
+        incidentId: String?,
+        label: String?,
+        type: EvidenceType,
+    ) {
+        val datos = JSONObject()
+            .put("sha256_plain", sealed.plainSha256)
+            .put("type", type.name)
+        evidenceId?.let { datos.put("evidence_id", it) }
+        incidentId?.let { datos.put("incident_id", it) }
+        label?.let { datos.put("label", it) }
+        val fichero = datosDeEvidencia(sealed.file)
+        autoriaParaSellar(fichero)?.sellarEn(datos)
+        datos.put(SelloDeEvidencia.CLAVE_CAPTURA, capturaParaSellar(fichero))
+        runCatching { fichero.writeText(datos.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudieron guardar los datos de ${sealed.file.name}: ${it.message}") }
+    }
+
+    private fun datosDeEvidencia(fev: File) = File(fev.parentFile, fev.name + EVIDENCE_DATA_SUFFIX)
+
+    /** Valor de `media_type`. Lo que subio un testigo no es de este camino. */
+    private fun mediaTypeDe(type: EvidenceType): String? = when (type) {
+        EvidenceType.PHOTO -> "photo"
+        EvidenceType.VIDEO -> "video"
+        EvidenceType.AUDIO -> "audio"
+        EvidenceType.WITNESS_UPLOAD -> null
+    }
 
     /** Metadata que llevan igual la evidencia y el proxy (UPLOAD-PROTOCOL.md §5). */
     private fun metadataComun(
@@ -264,6 +468,7 @@ class EvidenceUploader(
         plainSha256: String?,
         evidenceId: String?,
         incidentId: String?,
+        autoria: AutoriaDeEvidencia?,
     ): Map<String, String> = buildMap {
         put("filename", fev.name)
         put("sha256_cipher", cipherSha256)
@@ -271,8 +476,12 @@ class EvidenceUploader(
         put("crypto_format", "FEVD1")
         put("source", "phone")
         put("device_model", Build.MODEL)
-        put("officer_code", AGENT_ID)
-        put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
+        putAll(AutoriaDeEvidencia.metadata(autoria, placaActual = agenteActual()?.placa))
+        // En UTC: con la 'Z' delante de la hora local el backend calculaba el desfase
+        // del reloj con la zona horaria entera de mas (receipt-schema.md §6).
+        put("uploaded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("UTC") }
+            .format(Date()))
         plainSha256?.let { put("sha256_plain", it) }
         incidentId?.let { put("incident_id", it) }
         evidenceId?.let { put("evidence_id", it) }
@@ -299,12 +508,12 @@ class EvidenceUploader(
                 val entregado = json.optBoolean("delivered")
                 val verificado = if (json.isNull("verified_by_server")) null
                                  else json.optBoolean("verified_by_server")
-                val estado = when {
-                    entregado && verificado == false -> SyncState.FAILED
-                    entregado -> SyncState.VERIFIED
-                    else -> SyncState.PENDING_SYNC
-                }
-                setSync(id, estado)
+                val fallo = falloDeIntegridad(
+                    verificado,
+                    json.optJSONObject("server_receipt"),
+                    json.optString("sha256_uploaded"),
+                )
+                setSync(id, estadoTrasEntregar(entregado, fallo, json.optJSONObject("server_receipt")))
             }
         }
     }
@@ -346,10 +555,77 @@ class EvidenceUploader(
             put("session_url", outcome.sessionUrl ?: JSONObject.NULL)
             put("endpoint", config.baseUrl())
             put("at_epoch_ms", System.currentTimeMillis())
+            // Entero, tal como llego: es la prueba de entrega que verificara un auditor.
+            put("server_receipt", outcome.receipt ?: JSONObject.NULL)
             outcome.error?.let { put("error", it) }
         }
         runCatching { receiptOf(fev).writeText(receipt.toString(2)) }
             .onFailure { Log.e(TAG, "no se pudo escribir el recibo de ${fev.name}: ${it.message}") }
+    }
+
+    /**
+     * El recibo firmado de una subida ya entregada. Si no llego con ella —servidor
+     * antiguo, red caida justo al final— se vuelve a pedir con la URL guardada y se
+     * anade al `.upload.json`. Null mientras el servidor no lo de.
+     */
+    private fun reciboDelServidor(fev: File): JSONObject? {
+        val fichero = receiptOf(fev)
+        val local = runCatching { JSONObject(fichero.readText()) }.getOrNull() ?: return null
+        local.optJSONObject("server_receipt")?.let { return it }
+        val url = local.optString("session_url").takeIf { it.isNotBlank() && it != "null" } ?: return null
+        if (config.token() == null) return null
+        val status = uploader.status(url)
+        val recibo = status.receipt ?: return null
+        local.put("server_receipt", recibo)
+        status.verified?.let { local.put("verified_by_server", it) }
+        runCatching { fichero.writeText(local.toString(2)) }
+            .onFailure { Log.e(TAG, "no se pudo guardar el recibo de ${fev.name}: ${it.message}") }
+        Log.d(TAG, "${fev.name}: recibo del servidor recuperado (${recibo.optString("status")})")
+        return recibo
+    }
+
+    /**
+     * Lo que se pinta en el incidente tras una entrega. `key_rejected` no es "subido":
+     * el servidor no lo ha guardado. Los `flags` (p. ej. `device_quarantined`) no
+     * cambian nada aqui: el servidor si tiene la copia.
+     */
+    private fun estadoTrasEntregar(entregado: Boolean, falloDeIntegridad: Boolean, recibo: JSONObject?): SyncState =
+        when {
+            !entregado -> SyncState.PENDING_SYNC
+            falloDeIntegridad -> SyncState.FAILED
+            recibo?.optString("status") == ESTADO_CLAVE_RECHAZADA -> SyncState.REJECTED
+            else -> SyncState.VERIFIED
+        }
+
+    /**
+     * Un sello que no verifica no impide aceptar la subida durante el piloto
+     * (evidence-seal.md §4), pero tiene que quedar a la vista en el log.
+     */
+    private fun avisarDelSello(fev: File, recibo: JSONObject?) {
+        val sello = recibo?.optString("seal")?.ifBlank { null } ?: return
+        if (sello != "verified") Log.w(TAG, "${fev.name}: el servidor marca el sello como $sello")
+    }
+
+    /**
+     * La regla para borrar una copia local (receipt-schema.md §5): el servidor ha
+     * firmado `accepted` sobre los mismos bytes que se subieron. Sin recibo, nunca.
+     */
+    private fun aceptado(recibo: JSONObject?, cipherSha256: String): Boolean =
+        recibo != null &&
+            recibo.optString("status") == "accepted" &&
+            recibo.optString("sha256_received").equals(cipherSha256, ignoreCase = true)
+
+    /**
+     * El servidor ha recibido otros bytes que los que se subieron: por `verified`, por
+     * el recibo en `integrity_failed`, o por un `sha256_received` distinto del propio.
+     * Es un incidente, no un fallo de red: se conserva todo y se marca.
+     */
+    private fun falloDeIntegridad(verified: Boolean?, recibo: JSONObject?, cipherSha256: String): Boolean {
+        if (verified == false) return true
+        if (recibo == null) return false
+        if (recibo.optString("status") == "integrity_failed") return true
+        val recibido = recibo.optString("sha256_received")
+        return recibido.isNotBlank() && !recibido.equals(cipherSha256, ignoreCase = true)
     }
 
     /** Misma carpeta que usa LocalEvidenceRepository para los .fev. */
@@ -363,12 +639,17 @@ class EvidenceUploader(
         return File(base, LocalEvidenceRepository.PROXIES_FOLDER).takeIf { it.isDirectory }
     }
 
+    private fun transcriptsDir(): File? {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, LocalEvidenceRepository.TRANSCRIPTS_FOLDER).takeIf { it.isDirectory }
+    }
+
     private companion object {
         const val RECEIPT_SUFFIX = ".upload.json"
         const val PROXY_DATA_SUFFIX = ".proxy.json"
+        const val EVIDENCE_DATA_SUFFIX = ".evidence.json"
+        const val TRANSCRIPT_DATA_SUFFIX = ".data.json"
         const val EVIDENCE_FOLDER = "evidence"
-
-        /** TODO: sale de la sesión autenticada cuando exista login real (AUTH-001). */
-        const val AGENT_ID = "agent_007"
+        const val ESTADO_CLAVE_RECHAZADA = "key_rejected"
     }
 }

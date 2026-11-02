@@ -10,6 +10,8 @@ data class RemoteAgent(
     val latitude: Double,
     val longitude: Double,
     val lastSeenMillis: Long,
+    // Uid de la bodycam que lleva este agente, si su telefono la anuncia.
+    val bodycamUid: Int? = null,
 )
 
 /**

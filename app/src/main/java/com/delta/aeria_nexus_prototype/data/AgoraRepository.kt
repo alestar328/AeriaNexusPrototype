@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.delta.aeria_nexus_prototype.BuildConfig
+import com.delta.aeria_nexus_prototype.data.audit.TipoEvento
 import com.delta.aeria_nexus_prototype.data.model.RemoteAgent
 import com.delta.aeria_nexus_prototype.data.model.SosAlert
 import com.delta.aeria_nexus_prototype.data.model.SosCancel
@@ -16,6 +17,7 @@ import io.agora.rtc2.DataStreamConfig
 import io.agora.rtc2.IRtcEngineEventHandler
 import io.agora.rtc2.RtcEngine
 import io.agora.rtc2.RtcEngineConfig
+import io.agora.rtc2.internal.EncryptionConfig
 import io.agora.rtc2.video.CameraCapturerConfiguration
 import io.agora.rtc2.video.VideoCanvas
 import kotlinx.coroutines.CoroutineScope
@@ -35,8 +37,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 /**
@@ -56,6 +60,17 @@ class AgoraRepository(
     private val context: Context,
     private val locationRepository: LocationRepository,
     private val sosNotifier: SosNotifier,
+    private val ajustesSos: AjustesSos,
+    private val historialSos: HistorialSos,
+    // Uid de Agora de la bodycam enlazada a este telefono, si la hay. Viaja en cada
+    // mensaje de posicion para que los demas aten el SOS de la camara (que no
+    // tiene GPS) al marcador de este agente en el mapa.
+    private val uidBodycamPropia: () -> Int?,
+    // Placa del agente de la sesion, para avisar al backend del SOS de su bodycam.
+    // Vacia sin perfil de AeriaOne: el backend la saca entonces de la sesion.
+    private val placaDelAgente: () -> String,
+    // Uid, token y clave del canal que asigna AeriaOne (sos-and-proxy.md §2.7).
+    private val accesoAgora: AccesoAgoraRepository,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -76,6 +91,26 @@ class AgoraRepository(
     private var sosOfficer = ""
     private var sosHeartbeatJob: Job? = null
 
+    // Espera a que acabe el tono de SOS antes de publicar camara y microfono.
+    private var publicacionSosJob: Job? = null
+
+    // El emisor del SOS ha cerrado su microfono: el video sigue saliendo, la voz
+    // no. Arranca abierto en cada SOS, que es lo que pidio el usuario.
+    private val _microSosCerrado = MutableStateFlow(false)
+    val microSosCerrado: StateFlow<Boolean> = _microSosCerrado.asStateFlow()
+
+    // El emisor del SOS ha dejado de oir a los demas. Solo es volumen de
+    // reproduccion local: las suscripciones siguen como estaban y nada se pierde
+    // en la grabacion de la nube. Se reabre solo al terminar el SOS.
+    private val _entranteSilenciado = MutableStateFlow(false)
+    val entranteSilenciado: StateFlow<Boolean> = _entranteSilenciado.asStateFlow()
+
+    // Directos que el receptor ha silenciado en este telefono, por uid. Tambien es
+    // solo volumen local, y se deshace al salir de la pantalla del directo: un
+    // silencio olvidado dejaria sin oir a ese agente el resto del turno.
+    private val _directosSilenciados = MutableStateFlow<Set<Int>>(emptySet())
+    val directosSilenciados: StateFlow<Set<Int>> = _directosSilenciados.asStateFlow()
+
     // Identidad del SOS en curso ante el backend, que lo graba en la nube: un id por
     // emergencia hace idempotentes sus tres avisos (ver SosNotifier).
     private var sosId = ""
@@ -84,8 +119,31 @@ class AgoraRepository(
     // Uid con el que este telefono entro al canal. El backend graba el SOS por uid.
     private var miUid = 0
 
+    // Canal en el que se esta: el de AeriaOne o, sin acceso suyo, el de siempre.
+    private var canal = CHANNEL_ID
+
+    // Clave con la que se entro al canal (null = en claro). Si la que vale ahora es
+    // otra hay que salir y volver a entrar: el cifrado solo se fija antes del join.
+    private var claveConLaQueSeEntro: String? = null
+
+    // Para no pedir el token en bucle si el backend no contesta.
+    private var ultimaPeticionDeAccesoMillis = 0L
+
     // Claves de sesion SOS ya vistas, para ignorar los reenvios del heartbeat.
     private val seenSosKeys = mutableSetOf<String>()
+
+    // Ultima vez que se oyo el "emergency" de cada telefono en SOS. Si deja de
+    // llegar, el SOS se da por cortado aunque no llegue su cancelacion: se pierde
+    // si el emisor se queda sin red, se le cierra la app o se le apaga el telefono.
+    // Lo leen el hilo de Agora y la vigilancia, por eso es concurrente.
+    private val ultimoLatidoSos = ConcurrentHashMap<Int, Long>()
+
+    // SOS de la bodycam propia que este telefono le ha avisado al backend, por uid
+    // de la camara → sos_id. Solo el telefono que la lleva lo avisa: si lo hicieran
+    // todos los del canal, el backend apuntaria la misma emergencia una vez por
+    // cada telefono.
+    private val sosBodycamEnBackend = ConcurrentHashMap<Int, String>()
+    private var ultimoLatidoBodycamMillis = 0L
 
     // Bodycams que estan publicando video en el canal, por uid. Que una bodycam
     // transmita ES su senal de SOS: asi funciona su boton fisico 133 y tambien el
@@ -222,6 +280,7 @@ class AgoraRepository(
             _isConnected.value = true
             _estadoCanal.value = EstadoCanal.CONECTADO
             _connectedUsers.value = 1
+            if (_entranteSilenciado.value) engine?.adjustPlaybackSignalVolume(0)
             sendCurrentLocation()
             // Tras volver a entrar, el canal nuevo no sabe nada del SOS que seguia
             // en pie: hay que publicar otra vez la camara y reanunciarlo. Fuera del
@@ -256,6 +315,8 @@ class AgoraRepository(
             // Al volver a entrar se reciben de nuevo todos los que ya estaban; a
             // quien se estuviera viendo en livestream hay que volver a oirle.
             if (uid in uidsEnEscucha) engine?.muteRemoteAudioStream(uid, false)
+            // El volumen por usuario no sobrevive a que ese usuario salga y vuelva.
+            if (uid in _directosSilenciados.value) engine?.adjustUserPlaybackSignalVolume(uid, 0)
             // Una bodycam es un dispositivo, no un agente: no debe inflar el
             // contador de usuarios.
             if (!esBodycam(uid)) _connectedUsers.value++
@@ -288,6 +349,7 @@ class AgoraRepository(
             }
             // Un emisor que se desconecta equivale a un livestream cortado.
             _remoteVideoStopped.value = uid
+            if (!esBodycam(uid)) cortarSosSinAviso(uid, System.currentTimeMillis())
             // Solo se quita el marcador si el agente salio del canal a proposito.
             // En una caida transitoria (tunel, sin cobertura) se conserva la
             // ultima posicion conocida y el mapa lo pinta como "sin senal".
@@ -344,6 +406,25 @@ class AgoraRepository(
         override fun onError(err: Int) {
             Log.w(TAG, "Error de Agora: $err")
         }
+
+        /** El token de 12 h esta por caducar: se pide otro y se renueva sin salir (§2.7). */
+        override fun onTokenPrivilegeWillExpire(token: String?) {
+            pedirAcceso(forzar = true)
+        }
+
+        /** Ya caduco. Si el backend no contesta, el de reserva, que es para esto. */
+        override fun onRequestToken() {
+            scope.launch {
+                val nuevo = withContext(Dispatchers.IO) { accesoAgora.renovarEsteTelefono() }
+                if (nuevo == null) {
+                    accesoAgora.actual.value?.tokenPara(System.currentTimeMillis())?.let { engine?.renewToken(it) }
+                }
+            }
+        }
+
+        override fun onEncryptionError(errorType: Int) {
+            Log.e(TAG, "Error de cifrado del canal: $errorType")
+        }
     }
 
     /**
@@ -392,11 +473,11 @@ class AgoraRepository(
                 },
             )
 
-            // Cada telefono entra con un uid aleatorio, como en Falcon One, pero por
-            // encima del rango reservado a servicios (bodycams y grabador en la nube,
-            // ver esBodycam): coincidir con el grabador romperia la grabacion.
+            // Sin acceso de AeriaOne (servidor viejo, nunca hubo sesion) se entra como
+            // antes: uid aleatorio por encima del rango reservado a servicios (bodycams y
+            // grabador en la nube, ver esBodycam), sin token y en claro.
             miUid = Random.nextInt(PRIMER_UID_TELEFONO, Int.MAX_VALUE)
-            rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
+            entrarAlCanal(rtcEngine)
         } catch (e: Exception) {
             Log.w(TAG, "No se pudo iniciar la red tactica", e)
             engine = null
@@ -406,6 +487,91 @@ class AgoraRepository(
 
         startLocationSharingIfPermitted()
         startLocationHeartbeat()
+        startVigilanciaSos()
+        vigilarAcceso()
+    }
+
+    /**
+     * Entra al canal con lo que haya de AeriaOne (§2.7): su uid, el token que valga
+     * ahora (el normal o el de reserva) y la clave de la semana. Sin token se entra sin
+     * el, que vale mientras el proyecto de Agora no tenga certificado; sin clave, en claro.
+     *
+     * Durante un SOS no se cambia de uid: el backend lo graba por uid y cambiarlo
+     * partiria la grabacion. Se cambia al terminar (ver [cancelSos]).
+     */
+    private fun entrarAlCanal(rtcEngine: RtcEngine): Int {
+        val ahora = System.currentTimeMillis()
+        val acceso = accesoAgora.actual.value
+        if (acceso != null && !_sosActive.value) miUid = acceso.uid
+        // El canal lo dice AeriaOne: el token va firmado para ese y no vale en otro.
+        canal = acceso?.canal?.ifBlank { null } ?: CHANNEL_ID
+        val clave = acceso?.claveEn(ahora)
+        val cifrado = EncryptionConfig()
+        if (clave != null) {
+            cifrado.encryptionMode = EncryptionConfig.EncryptionMode.AES_256_GCM2
+            // La clave va como texto, sin descodificar; la sal si, a sus 32 bytes.
+            cifrado.encryptionKey = clave.keyHex
+            clave.salt().copyInto(cifrado.encryptionKdfSalt)
+            cifrado.datastreamEncryptionEnabled = true
+        }
+        rtcEngine.enableEncryption(clave != null, cifrado)
+        claveConLaQueSeEntro = clave?.keyId
+        return rtcEngine.joinChannel(acceso?.tokenPara(ahora), canal, miUid, opcionesDelCanal())
+    }
+
+    /**
+     * Aplica cada acceso nuevo de AeriaOne y vigila el cambio de clave del lunes. Un
+     * acceso con otro uid u otra clave obliga a salir y volver a entrar; si solo cambia
+     * el token, se renueva sin salir.
+     */
+    private fun vigilarAcceso() {
+        scope.launch {
+            accesoAgora.actual.collect { acceso -> if (acceso != null) aplicarAcceso() }
+        }
+        scope.launch {
+            while (isActive) {
+                delay(REVISION_DE_CLAVE_MILLIS)
+                val acceso = accesoAgora.actual.value ?: continue
+                val ahora = System.currentTimeMillis()
+                if (acceso.claveEn(ahora)?.keyId != claveConLaQueSeEntro) {
+                    Log.i(TAG, "cambio de clave del canal: se vuelve a entrar")
+                    volverAEntrar()
+                }
+                // A un dia de que acabe la ultima clave conocida, o sin token vigente: se pide.
+                val acabanLasClaves = acceso.claves.isNotEmpty() &&
+                    acceso.claves.maxOf { it.hastaMillis } - ahora < UN_DIA_MILLIS
+                if (acabanLasClaves || ahora >= acceso.tokenHastaMillis) pedirAcceso(forzar = false)
+            }
+        }
+    }
+
+    private fun aplicarAcceso() {
+        val rtcEngine = engine ?: return
+        val acceso = accesoAgora.actual.value ?: return
+        val ahora = System.currentTimeMillis()
+        val otroUid = acceso.uid != miUid && !_sosActive.value
+        val otroCanal = acceso.canal.isNotBlank() && acceso.canal != canal
+        if (otroUid || otroCanal || acceso.claveEn(ahora)?.keyId != claveConLaQueSeEntro) {
+            volverAEntrar()
+        } else {
+            acceso.tokenPara(ahora)?.let { rtcEngine.renewToken(it) }
+        }
+    }
+
+    /** Salir y entrar con el mismo motor. Un SOS en curso se reanuncia al entrar. */
+    private fun volverAEntrar() {
+        val rtcEngine = engine ?: return
+        rtcEngine.leaveChannel()
+        val resultado = entrarAlCanal(rtcEngine)
+        Log.i(TAG, "De vuelta al canal (uid $miUid, cifrado ${claveConLaQueSeEntro ?: "no"}): $resultado")
+    }
+
+    /** Pide a AeriaOne el acceso de este telefono, como mucho cada pocos minutos salvo [forzar]. */
+    private fun pedirAcceso(forzar: Boolean) {
+        val ahora = System.currentTimeMillis()
+        if (!forzar && ahora - ultimaPeticionDeAccesoMillis < ESPERA_ENTRE_PETICIONES_MILLIS) return
+        ultimaPeticionDeAccesoMillis = ahora
+        scope.launch(Dispatchers.IO) { accesoAgora.renovarEsteTelefono() }
     }
 
     private fun opcionesDelCanal() = ChannelMediaOptions().apply {
@@ -459,7 +625,7 @@ class AgoraRepository(
                 val rtcEngine = engine ?: return@launch
                 if (_isConnected.value) return@launch
                 rtcEngine.leaveChannel()
-                val resultado = rtcEngine.joinChannel(null, CHANNEL_ID, miUid, opcionesDelCanal())
+                val resultado = entrarAlCanal(rtcEngine)
                 Log.i(TAG, "Reentrando al canal: $resultado")
                 // Un join aceptado sigue su curso solo: si vuelve a fallar, el
                 // callback de FAILED lanza otra reentrada.
@@ -503,12 +669,28 @@ class AgoraRepository(
         if (_sosActive.value) return
         sosOfficer = officer
         sosStartedAtMillis = System.currentTimeMillis()
+        _microSosCerrado.value = false
         _sosActive.value = true
-        startCameraPublish()
+        // La alerta sale ya; camara y microfono esperan a que acabe el tono, o el
+        // pitido que confirma el SOS al agente se colaria en su propio directo.
+        val duracionTono = PttTones.sosActivado(ajustesSos.tono.value)
+        publicacionSosJob = scope.launch {
+            delay(duracionTono)
+            if (_sosActive.value) startCameraPublish()
+        }
         sendSosSignal()
         sosId = UUID.randomUUID().toString()
         ultimoLatidoBackendMillis = System.currentTimeMillis()
-        sosNotifier.inicio(sosId, CHANNEL_ID, miUid, officer, lastLatitude, lastLongitude)
+        sosNotifier.inicio(sosId, canal, miUid, officer, lastLatitude, lastLongitude)
+        historialSos.registrarInicio(
+            RegistroSos(
+                clave = "$miUid@$sosStartedAtMillis",
+                uid = miUid,
+                officer = officer,
+                origen = OrigenSos.ESTE_TELEFONO,
+                inicioMillis = sosStartedAtMillis,
+            ),
+        )
         startSosHeartbeat()
     }
 
@@ -517,15 +699,71 @@ class AgoraRepository(
         _sosSignalCuts.update { it - uid }
     }
 
+    /**
+     * Quita del mapa el marcador gris de un agente del que ya no llega nada. Si
+     * vuelve a mandar su posicion, reaparece solo.
+     */
+    fun olvidarAgente(uid: Int) {
+        _remoteAgents.update { it - uid }
+    }
+
     /** Cancela el SOS propio: corta el livestream y avisa a los receptores. */
     fun cancelSos() {
         if (!_sosActive.value) return
         sosHeartbeatJob?.cancel()
         sosHeartbeatJob = null
+        publicacionSosJob?.cancel()
         _sosActive.value = false
         sendSosCancel()
         sosNotifier.fin(sosId, "cancelled")
+        historialSos.registrarFin(miUid, System.currentTimeMillis(), FinDeSos.TERMINADO)
         stopCameraPublish()
+        _microSosCerrado.value = false
+        if (_entranteSilenciado.value) alternarSilencioEntrante()
+        // Si AeriaOne asigno otro uid durante el SOS, se adopta ahora.
+        accesoAgora.actual.value?.takeIf { it.uid != miUid }?.let { scope.launch { aplicarAcceso() } }
+    }
+
+    /**
+     * Cierra o reabre la voz del emisor durante su SOS, sin tocar el video. El
+     * microfono sigue publicado y solo se silencia: reabrirlo es inmediato.
+     * Queda en el diario, porque deja un hueco sin audio en la grabacion del SOS.
+     */
+    fun alternarMicroSos() {
+        if (!_sosActive.value) return
+        val cerrar = !_microSosCerrado.value
+        _microSosCerrado.value = cerrar
+        // Con el PTT abierto el agente esta hablando a proposito: el micro sigue
+        // abierto y el cambio se aplica al soltar el PTT.
+        if (!_pttPropioActivo.value) engine?.muteLocalAudioStream(cerrar)
+        if (cerrar) PttTones.cerrar() else PttTones.abrir()
+        AppContainer.auditoria.registrar(
+            TipoEvento.SOS_MICROFONO,
+            listOf("state" to if (cerrar) "off" else "on"),
+        )
+    }
+
+    /**
+     * Durante el SOS propio, deja de oir a los demas o vuelve a oirlos. Fuera del
+     * SOS solo se puede reabrir: es lo que hace cancelSos al terminar.
+     */
+    fun alternarSilencioEntrante() {
+        val silenciar = !_entranteSilenciado.value
+        if (silenciar && !_sosActive.value) return
+        _entranteSilenciado.value = silenciar
+        engine?.adjustPlaybackSignalVolume(if (silenciar) 0 else VOLUMEN_NORMAL)
+        if (silenciar) PttTones.silenciarEntrante() else PttTones.abrirEntrante()
+        AppContainer.auditoria.registrar(
+            TipoEvento.SOS_SILENCIO_ENTRANTE,
+            listOf("state" to if (silenciar) "on" else "off"),
+        )
+    }
+
+    /** El receptor silencia o reabre en este telefono el directo del agente [uid]. */
+    fun alternarSilencioDirecto(uid: Int) {
+        val silenciar = uid !in _directosSilenciados.value
+        _directosSilenciados.update { if (silenciar) it + uid else it - uid }
+        engine?.adjustUserPlaybackSignalVolume(uid, if (silenciar) 0 else VOLUMEN_NORMAL)
     }
 
     // Las vistas de video son TextureView y no SurfaceView: dentro de Compose,
@@ -564,6 +802,7 @@ class AgoraRepository(
             rtcEngine.muteRemoteAudioStream(uid, true)
         }
         rtcEngine.setupRemoteVideo(VideoCanvas(null, VideoCanvas.RENDER_MODE_HIDDEN, uid))
+        if (uid in _directosSilenciados.value) alternarSilencioDirecto(uid)
     }
 
     /**
@@ -649,8 +888,16 @@ class AgoraRepository(
                 .put("ts", System.currentTimeMillis()),
         )
         // El SOS manda: si esta emitiendo, la voz sigue publicada como parte del
-        // livestream y apagar el microfono aqui dejaria la emergencia muda.
-        if (_sosActive.value) return
+        // livestream y apagar el microfono aqui dejaria la emergencia muda. Salvo
+        // que el agente lo hubiera cerrado en el directo: entonces vuelve a como
+        // lo dejo, y ahi si suena el cierre porque de verdad ya no se le oye.
+        if (_sosActive.value) {
+            if (_microSosCerrado.value) {
+                engine?.muteLocalAudioStream(true)
+                PttTones.cerrar()
+            }
+            return
+        }
         apagarMicrofono()
         // Despues de apagarlo, no antes: el tono de cierre solo suena cuando el
         // microfono esta cerrado de verdad. Por eso NO suena en el caso de arriba
@@ -682,7 +929,7 @@ class AgoraRepository(
         val cambio = if (hablando) bodycamsHablando.add(uid) else bodycamsHablando.remove(uid)
         if (!cambio) return
         _bodycamHablando.value = bodycamsHablando.isNotEmpty()
-        if (hablando) avisarDeQueEntraOtro() else PttTones.sale()
+        if (hablando) avisarDeQueEntraOtro() else avisarDeQueSaleOtro()
     }
 
     /**
@@ -691,7 +938,14 @@ class AgoraRepository(
      * propia voz, asi que el agente seguiria hablando sin saber que le pisan.
      */
     private fun avisarDeQueEntraOtro() {
+        // Con los demas silenciados el agente no va a oirlos: el pitido solo le
+        // haria ruido, y puede estar escondido.
+        if (_entranteSilenciado.value) return
         if (_pttPropioActivo.value) PttTones.pisando() else PttTones.entra()
+    }
+
+    private fun avisarDeQueSaleOtro() {
+        if (!_entranteSilenciado.value) PttTones.sale()
     }
 
     /**
@@ -702,7 +956,7 @@ class AgoraRepository(
     private fun cerrarPttRemoto(uid: Int) {
         // Solo suena si ese agente estaba hablando: aqui se entra tambien por
         // onUserOffline, que llama por cualquiera que se va del canal.
-        if (uid in _pttsRemotos.value) PttTones.sale()
+        if (uid in _pttsRemotos.value) avisarDeQueSaleOtro()
         _pttsRemotos.update { it - uid }
         if (esBodycam(uid) || uid in uidsEnEscucha) return
         engine?.muteRemoteAudioStream(uid, true)
@@ -723,7 +977,8 @@ class AgoraRepository(
         )
         rtcEngine.startPreview()
         rtcEngine.muteLocalVideoStream(false)
-        rtcEngine.muteLocalAudioStream(false)
+        // Tras volver a entrar al canal se respeta el microfono que el agente cerro.
+        rtcEngine.muteLocalAudioStream(_microSosCerrado.value && !_pttPropioActivo.value)
         rtcEngine.updateChannelMediaOptions(
             ChannelMediaOptions().apply {
                 publishCameraTrack = true
@@ -764,19 +1019,24 @@ class AgoraRepository(
         if (!cambio) return
         val ahora = System.currentTimeMillis()
         if (streaming) {
-            _incomingSos.tryEmit(
-                SosAlert(
-                    sessionKey = "$uid@$ahora",
-                    officer = BODYCAM_OFFICER,
-                    uid = uid,
-                    startedAtMillis = ahora,
-                    // La bodycam no emite GPS; el agente que la lleva comparte
-                    // su posicion desde el telefono como cualquier otro.
-                    latitude = null,
-                    longitude = null,
-                ),
+            val alerta = SosAlert(
+                sessionKey = "$uid@$ahora",
+                officer = BODYCAM_OFFICER,
+                uid = uid,
+                startedAtMillis = ahora,
+                // La bodycam no emite GPS: el mapa la situa en el marcador del
+                // telefono que anuncia llevarla (campo "bwc" de su posicion).
+                latitude = null,
+                longitude = null,
             )
+            _activeSosAlerts.update { it + (uid to alerta) }
+            _incomingSos.tryEmit(alerta)
+            historialSos.registrarInicio(alerta.aRegistro(OrigenSos.BODYCAM))
+            avisarSosDeBodycamAlBackend(uid)
         } else {
+            _activeSosAlerts.update { it - uid }
+            historialSos.registrarFin(uid, ahora, FinDeSos.TERMINADO)
+            sosBodycamEnBackend.remove(uid)?.let { sosNotifier.fin(it, "cancelled") }
             // Este corte no se fija en el mapa (sosSignalCuts): la bodycam no
             // emite GPS, asi que no hay posicion donde anclar el aviso.
             _incomingSosCancel.tryEmit(
@@ -789,6 +1049,32 @@ class AgoraRepository(
                 ),
             )
         }
+    }
+
+    private fun avisarSosDeBodycamAlBackend(uid: Int) {
+        if (uid != uidBodycamPropia()) return
+        val id = UUID.randomUUID().toString()
+        sosBodycamEnBackend[uid] = id
+        ultimoLatidoBodycamMillis = System.currentTimeMillis()
+        sosNotifier.inicio(
+            sosId = id,
+            channel = canal,
+            uid = uid,
+            officer = placaDelAgente(),
+            // La camara no tiene GPS: va la posicion de este telefono, que la lleva puesta.
+            latitude = lastLatitude,
+            longitude = lastLongitude,
+            bwcId = bwcDelUid(uid),
+        )
+    }
+
+    /** El backend da el SOS por perdido a los 30 s sin latido; la bodycam no late sola. */
+    private fun latirSosDeBodycam() {
+        if (sosBodycamEnBackend.isEmpty()) return
+        val ahora = System.currentTimeMillis()
+        if (ahora - ultimoLatidoBodycamMillis < BACKEND_HEARTBEAT_MILLIS) return
+        ultimoLatidoBodycamMillis = ahora
+        sosBodycamEnBackend.values.forEach { sosNotifier.latido(it) }
     }
 
     private fun startLocationSharingIfPermitted() {
@@ -868,6 +1154,7 @@ class AgoraRepository(
             .put("lat", lat)
             .put("lng", lng)
             .put("ts", System.currentTimeMillis())
+        uidBodycamPropia()?.let { payload.put("bwc", it) }
         sendJson(payload)
     }
 
@@ -923,6 +1210,7 @@ class AgoraRepository(
                     latitude = mensaje.optDouble("lat"),
                     longitude = mensaje.optDouble("lng"),
                     lastSeenMillis = System.currentTimeMillis(),
+                    bodycamUid = mensaje.optInt("bwc").takeIf(::esBodycam),
                 )
                 if (!agente.latitude.isNaN() && !agente.longitude.isNaN()) {
                     _remoteAgents.update { it + (remoteUid to agente) }
@@ -947,6 +1235,8 @@ class AgoraRepository(
                 // El SOS queda fijado para el mapa mientras no se cancele; los
                 // reenvios del heartbeat solo refrescan el mismo valor.
                 _activeSosAlerts.update { it + (remoteUid to alerta) }
+                ultimoLatidoSos[remoteUid] = System.currentTimeMillis()
+                historialSos.registrarInicio(alerta.aRegistro(OrigenSos.TELEFONO))
                 // Solo la primera vez que se ve una sesion se alerta al usuario;
                 // los reenvios del heartbeat de esa misma sesion se ignoran.
                 if (seenSosKeys.add(sessionKey)) {
@@ -976,12 +1266,74 @@ class AgoraRepository(
                     latitude = mensaje.optDoubleOrNull("lat"),
                     longitude = mensaje.optDoubleOrNull("lng"),
                 )
-                _activeSosAlerts.update { it - remoteUid }
-                _incomingSosCancel.tryEmit(cancelacion)
-                _sosSignalCuts.update { it + (remoteUid to cancelacion) }
+                cerrarSosRemoto(cancelacion, FinDeSos.TERMINADO)
             }
         }
     }
+
+    /**
+     * Quita el SOS de otro telefono: se cierran su popup y su banner y queda en el
+     * mapa el aviso de corte, con la hora, hasta que el usuario lo cierre.
+     */
+    private fun cerrarSosRemoto(cancelacion: SosCancel, fin: FinDeSos) {
+        val uid = cancelacion.uid
+        ultimoLatidoSos.remove(uid)
+        historialSos.registrarFin(uid, cancelacion.timestampMillis, fin)
+        if (uid in _activeSosAlerts.value) {
+            _activeSosAlerts.update { it - uid }
+            _incomingSosCancel.tryEmit(cancelacion)
+            _sosSignalCuts.update { it + (uid to cancelacion) }
+        } else if (uid in _sosSignalCuts.value) {
+            // La cancelacion llega despues de haberlo dado por perdido: solo se
+            // corrige la hora. Si el usuario ya cerro el aviso, no se le reabre.
+            _sosSignalCuts.update { it + (uid to cancelacion) }
+        }
+    }
+
+    /** Da por cortado el SOS del telefono [uid] sin que haya llegado su cancelacion. */
+    private fun cortarSosSinAviso(uid: Int, ultimaNoticiaMillis: Long) {
+        val alerta = _activeSosAlerts.value[uid] ?: return
+        val posicion = _remoteAgents.value[uid]
+        cerrarSosRemoto(
+            SosCancel(
+                officer = alerta.officer,
+                uid = uid,
+                timestampMillis = ultimaNoticiaMillis,
+                latitude = posicion?.latitude ?: alerta.latitude,
+                longitude = posicion?.longitude ?: alerta.longitude,
+            ),
+            FinDeSos.SENAL_PERDIDA,
+        )
+    }
+
+    /**
+     * Cada pocos segundos mira que SOS de telefono han dejado de oirse. Mientras este
+     * telefono este fuera del canal no se puede saber si siguen: se espera a volver
+     * a entrar y se les da el mismo margen desde ese momento.
+     */
+    private fun startVigilanciaSos() {
+        scope.launch {
+            while (isActive) {
+                delay(VIGILANCIA_SOS_MILLIS)
+                latirSosDeBodycam()
+                val ahora = System.currentTimeMillis()
+                ultimoLatidoSos.forEach { (uid, ultimo) ->
+                    when {
+                        !_isConnected.value -> ultimoLatidoSos[uid] = ahora
+                        ahora - ultimo > SOS_SIN_LATIDO_MILLIS -> cortarSosSinAviso(uid, ultimo)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun SosAlert.aRegistro(origen: OrigenSos) = RegistroSos(
+        clave = sessionKey,
+        uid = uid,
+        officer = officer,
+        origen = origen,
+        inicioMillis = startedAtMillis,
+    )
 
     companion object {
         private const val TAG = "AgoraRepository"
@@ -990,6 +1342,7 @@ class AgoraRepository(
         private const val REENTRADA_MILLIS = 5_000L
 
         // Mismo canal que la app Flutter: ambas versiones se ven entre si.
+        /** El de siempre, para cuando AeriaOne no ha dado acceso (servidor viejo, nunca hubo sesion). */
         private const val CHANNEL_ID = "falcon_group_channel"
 
         // Cada bodycam entra al canal con un uid sacado de su identidad (BWC-896E
@@ -1005,6 +1358,10 @@ class AgoraRepository(
         // pisan. Quitarlo cuando no quede ninguna W1 con la version antigua.
         private const val UID_BODYCAM_ANTIGUO = 9001
 
+        /** BWC de la bodycam que entra con [uid]: el uid es 10000 + su sufijo hexadecimal. */
+        fun bwcDelUid(uid: Int): String? =
+            if (uid in PRIMER_UID_BODYCAM..ULTIMO_UID_BODYCAM) "BWC-%04X".format(uid - PRIMER_UID_BODYCAM) else null
+
         /** True si [uid] es una bodycam y no un telefono ni el grabador en la nube. */
         fun esBodycam(uid: Int): Boolean =
             uid == UID_BODYCAM_ANTIGUO || uid in PRIMER_UID_BODYCAM..ULTIMO_UID_BODYCAM
@@ -1016,9 +1373,20 @@ class AgoraRepository(
         private const val HEARTBEAT_INTERVAL_MILLIS = 3_000L
         private const val BACKEND_HEARTBEAT_MILLIS = 10_000L
 
+        // El emisor reanuncia su SOS cada 3 s (HEARTBEAT_INTERVAL_MILLIS): 10 s
+        // sin oirlo son tres reenvios perdidos seguidos.
+        private const val SOS_SIN_LATIDO_MILLIS = 10_000L
+        private const val VIGILANCIA_SOS_MILLIS = 2_000L
+
+        // Volumen de reproduccion por defecto de Agora (0-400).
+        private const val VOLUMEN_NORMAL = 100
+
         // Por debajo quedan los uids de servicios: las bodycams (ver esBodycam) y
         // 90000-99999 el grabador en la nube (docs/BACKEND-PROXY-AND-SOS.md §2.3).
         private const val PRIMER_UID_TELEFONO = 100_000
+        private const val REVISION_DE_CLAVE_MILLIS = 60_000L
+        private const val ESPERA_ENTRE_PETICIONES_MILLIS = 10 * 60_000L
+        private const val UN_DIA_MILLIS = 24 * 60 * 60_000L
 
         // Uid del agente inventado de simularPttRemotoDebug: en el rango de telefonos.
         private const val UID_SIMULADO_DEBUG = 123_456
